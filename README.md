@@ -70,3 +70,5 @@ This project combines:
 - React-Native
 - WebSockets
 
+## 🔮 Future Plans
+### TBA
