@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
-from App.Models.game import GameCreation, GameJoinRequest
-from App.Logic.session_manager import SessionManager
+from models.game import GameCreation, GameJoinRequest
+from Logic.session_manager import SessionManager
 
 
 router = APIRouter()
