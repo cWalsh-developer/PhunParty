@@ -16,3 +16,14 @@ class SessionManager:
     
     def get_all_sessions(self):
         return self.sessions
+    
+    def join_session(self, game_code: str, player_name: str):
+        if game_code in self.sessions:
+            session = self.sessions[game_code]
+            if player_name not in session["players"]:
+                session["players"].append(player_name)
+                session["scores"][player_name] = 0 # Initialize player's score to 0
+                return session
+            else:
+                raise ValueError("Player already in session")
+            

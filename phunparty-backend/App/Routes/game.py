@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from App.Models.game import GameCreation
+from App.Models.game import GameCreation, GameJoinRequest
 from App.Logic.session_manager import SessionManager
 
 
@@ -30,3 +30,15 @@ def get_all_games():
     """
     session = session_manager.get_all_sessions()
     return session
+
+@router.post("/join", tags=["Game"])
+def join_game(req: GameJoinRequest):
+    """
+    Join an existing game session.
+    """
+    try:
+        session = session_manager.join_session(req.game_code, req.player_name)
+        return {"message": f"{req.player_name} joined the game successfully.", "session": session}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
