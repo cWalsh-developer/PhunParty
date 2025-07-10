@@ -2,8 +2,8 @@ from pydantic import BaseModel
 
 class GameCreation(BaseModel):
     host_name: str
-    players: list = []
-    scores: dict = {}
+    players: list[str] = [] 
+    scores: dict[str, int] = {}
 
 class GameJoinRequest(BaseModel):
     game_code: str
