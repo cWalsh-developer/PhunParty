@@ -1,4 +1,4 @@
-from app.database.dbCRUD import create_game as cg, get_game_by_code, get_all_games as gag, join_game
+from app.database.dbCRUD import create_game as cg, get_game_by_code, get_all_games as gag, join_game, update_player_game_code
 from app.dependencies import get_db
 from app.models.response_models import GameResponse
 from app.models.game_model import Game
@@ -12,10 +12,12 @@ router = APIRouter()
 
 @router.post("/create", tags=["Game"])
 def create_game(request: GameCreation, db: Session = Depends(get_db)):
-  game = cg(db, request.host_name, request.players, request.scores)
+  game = cg(db, request.host_name, request.rules, request.genre, request.players, request.scores)
   return {"message": "Game created successfully.",
           "game_code": game.game_code,
           "host_name": game.host_name,
+          "rules": game.rules,
+          "genre": game.genre,
           "players": game.players,
           "scores": game.scores}
 
@@ -46,7 +48,7 @@ def join_game_route(req: GameJoinRequest, db: Session = Depends(get_db)):
     Join an existing game session.
     """
     try:
-        game = join_game(db, req.game_code, req.player_name)
+        game = join_game(db, req.game_code, req.player_name, req.player_id)
         return {
             "message": f"{req.player_name} joined the game successfully.",
             "game_code": game.game_code,

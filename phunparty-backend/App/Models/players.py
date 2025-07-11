@@ -1,7 +1,8 @@
 from pydantic import BaseModel
+from typing import Optional
 
 class Player(BaseModel):
-    player_id: str
-    game_code: str
+    game_code: Optional[str] = None
     player_name: str
-    score: int = 0
+    player_email: str
+    player_mobile: Optional[str] = None
