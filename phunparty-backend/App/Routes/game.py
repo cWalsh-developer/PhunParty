@@ -5,7 +5,6 @@ from app.models.db_model import Game
 from typing import List
 from fastapi import APIRouter, HTTPException, Depends
 from app.models.game import GameCreation, GameJoinRequest
-from app.Logic.session_manager import SessionManager
 from sqlalchemy.orm import Session
 
 
@@ -25,7 +24,7 @@ def get_game(game_code: str, db: Session = Depends(get_db)):
     """
     Retrieve the game session details by game code.
     """
-    game = db.query(Game).filter(Game.game_code == game_code).first()
+    game = get_game_by_code(db, game_code)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found")   
     return game
@@ -36,7 +35,7 @@ def get_all_games(db: Session = Depends(get_db)):
     """
     Retrieve all games.
     """
-    games = db.query(Game).all()
+    games = gag(db)
     if not games:
         raise HTTPException(status_code=404, detail="No games found")
     return games
