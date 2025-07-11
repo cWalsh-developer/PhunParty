@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from app.config import Base, engine
-from app.models.db_model import Game
+from app.models.game_model import Game
 from app.routes import game
 
 app = FastAPI(title="PhunParty Backend API")

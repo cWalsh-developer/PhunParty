@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
-from app.models.db_model import Game
+from app.models.game_model import Game
 import string, random
 
 def generate_game_code(length=6):
