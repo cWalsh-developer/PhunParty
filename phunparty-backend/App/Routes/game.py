@@ -1,7 +1,7 @@
 from app.database.dbCRUD import create_game as cg, get_game_by_code, get_all_games as gag, join_game
 from app.dependencies import get_db
 from app.models.response_models import GameResponse
-from app.models.db_model import Game
+from app.models.game_model import Game
 from typing import List
 from fastapi import APIRouter, HTTPException, Depends
 from app.models.game import GameCreation, GameJoinRequest
