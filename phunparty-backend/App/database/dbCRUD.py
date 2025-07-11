@@ -3,6 +3,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.models.game_model import Game
 import string, random
 
+# Game CRUD operations -----------------------------------------------------------------------------------------------------
 def generate_game_code(length=6):
     """Generate a random game code consisting of uppercase letters and digits."""
     characters = string.ascii_uppercase + string.digits
@@ -50,3 +51,7 @@ def join_game(db: Session, game_code: str, player_name: str) -> Game:
         db.commit()
         db.refresh(game)
         return game
+    
+    # Players CRUD operations -----------------------------------------------------------------------------------------------------
+    # History CRUD operations -----------------------------------------------------------------------------------------------------
+    # Questions CRUD operations -----------------------------------------------------------------------------------------------------
