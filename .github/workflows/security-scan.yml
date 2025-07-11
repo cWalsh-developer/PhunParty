@@ -1,0 +1,149 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * 1'  # Weekly on Monday at midnight UTC
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+    
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+    
+    - name: Run Trivy scanner in table format
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'table'
+
+  python-security:
+    runs-on: ubuntu-latest
+    # if: ${{ hashFiles('phunparty-backend/requirements.txt') != '' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        cd phunparty-backend
+        python -m pip install --upgrade pip
+        pip install safety bandit
+    
+    - name: Run Safety check for known vulnerabilities
+      run: |
+        cd phunparty-backend
+        safety check -r requirements.txt --json --output safety-report.json || true
+        safety check -r requirements.txt || echo "Safety check found vulnerabilities"
+    
+    - name: Run Bandit security linter
+      run: |
+        cd phunparty-backend
+        bandit -r . -f json -o bandit-report.json || true
+        bandit -r . || echo "Bandit found security issues"
+    
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: python-security-reports
+        path: |
+          phunparty-backend/safety-report.json
+          phunparty-backend/bandit-report.json
+        retention-days: 30
+
+  npm-security:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project: [web-host-ui, mobile-app]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Check if project exists
+      id: check-project
+      run: |
+        if [ -d "${{ matrix.project }}" ] && [ -f "${{ matrix.project }}/package.json" ]; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Install dependencies and run audit
+      if: steps.check-project.outputs.exists == 'true'
+      run: |
+        cd ${{ matrix.project }}
+        npm ci
+        npm audit --audit-level critical || echo "npm audit found vulnerabilities"
+        npm audit --json > npm-audit-report.json || true
+    
+    - name: Upload npm security report
+      if: steps.check-project.outputs.exists == 'true'
+      uses: actions/upload-artifact@v3
+      with:
+        name: npm-security-report-${{ matrix.project }}
+        path: ${{ matrix.project }}/npm-audit-report.json
+        retention-days: 30
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['python', 'javascript']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v2
+      with:
+        languages: ${{ matrix.language }}
+        queries: security-extended,security-and-quality
+    
+    - name: Autobuild
+      uses: github/codeql-action/autobuild@v2
+    
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v2
+      with:
+        category: "/language:${{matrix.language}}"

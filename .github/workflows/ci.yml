@@ -1,0 +1,172 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.changes.outputs.backend }}
+      web: ${{ steps.changes.outputs.web }}
+      mobile: ${{ steps.changes.outputs.mobile }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Detect changes
+      uses: dorny/paths-filter@v2
+      id: changes
+      with:
+        filters: |
+          backend:
+            - 'phunparty-backend/**'
+          web:
+            - 'web-host-ui/**'
+          mobile:
+            - 'mobile-app/**'
+
+  backend-checks:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_USER: test_user
+          POSTGRES_DB: test_phunparty
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        cache-dependency-path: 'phunparty-backend/requirements.txt'
+    
+    - name: Install dependencies
+      run: |
+        cd phunparty-backend
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-asyncio httpx flake8
+    
+    - name: Lint with flake8
+      run: |
+        cd phunparty-backend
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+    
+    - name: Run tests
+      env:
+        DB_HOST: localhost
+        DB_PORT: 5432
+        DB_USER: test_user
+        DB_PASSWORD: test_password
+        DB_NAME: test_phunparty
+        SECRET_KEY: test_secret_key_for_testing_only
+      run: |
+        cd phunparty-backend
+        pytest
+
+  web-checks:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: 'web-host-ui/package-lock.json'
+    
+    - name: Install dependencies
+      run: |
+        cd web-host-ui
+        npm ci
+    
+    - name: Lint
+      run: |
+        cd web-host-ui
+        npm run lint
+    
+    - name: Test
+      run: |
+        cd web-host-ui
+        npm test -- --watchAll=false
+    
+    - name: Build
+      run: |
+        cd web-host-ui
+        npm run build
+
+  mobile-checks:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.mobile == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: 'mobile-app/package-lock.json'
+    
+    - name: Install dependencies
+      run: |
+        cd mobile-app
+        npm ci
+    
+    - name: Lint
+      run: |
+        cd mobile-app
+        npm run lint
+    
+    - name: Type check
+      run: |
+        cd mobile-app
+        npx tsc --noEmit
+    
+    - name: Test
+      run: |
+        cd mobile-app
+        npm test -- --watchAll=false
+
+  all-checks-complete:
+    runs-on: ubuntu-latest
+    needs: [backend-checks, web-checks, mobile-checks]
+    if: always()
+    
+    steps:
+    - name: Check all jobs
+      run: |
+        if [[ "${{ needs.backend-checks.result }}" == "failure" || "${{ needs.web-checks.result }}" == "failure" || "${{ needs.mobile-checks.result }}" == "failure" ]]; then
+          echo "One or more checks failed"
+          exit 1
+        else
+          echo "All applicable checks passed"
+        fi
