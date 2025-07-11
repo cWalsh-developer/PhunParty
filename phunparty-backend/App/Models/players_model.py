@@ -6,4 +6,5 @@ class Players(Base):
     player_id = Column(String, primary_key=True, index=False)
     game_code = Column(String, ForeignKey('games.game_code'), nullable=True)
     player_name = Column(String, nullable=False)
-    score = Column(Integer, default=0)
+    player_email = Column(String, nullable=False)
+    player_mobile = Column(String, nullable=True)

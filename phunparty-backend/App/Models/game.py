@@ -11,9 +11,9 @@ class GameCreation(BaseModel):
 class GameJoinRequest(BaseModel):
     game_code: str
     player_name: str
+    player_id: str = None  # Optional player ID for tracking
 
 class GameHistory(BaseModel):
-    history_code: str
     game_code: str
     players: list[str]
     results: dict[str, int]
