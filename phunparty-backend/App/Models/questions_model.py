@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String
+from sqlalchemy import Column, String, Enum
 from app.config import Base
 
 class Questions(Base):
@@ -7,3 +7,4 @@ class Questions(Base):
     question = Column(String, nullable=False)
     answer = Column(String, nullable=False)
     genre = Column(String, nullable=False)
+    difficulty = Column(Enum, nullable=False)
