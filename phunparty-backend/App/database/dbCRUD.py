@@ -1,28 +1,49 @@
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from app.models.game_model import Game
+from app.models.game_session_model import GameSession
+from app.models.session_player_assignment_model import SessionAssignment
+from app.models.session_question_assignment import SessionQuestionAssignment
 from app.models.players_model import Players
+from app.models.questions_model import Questions
 import string, random
+from datetime import datetime
 
 # Game CRUD operations -----------------------------------------------------------------------------------------------------
-def generate_game_code(length=6):
+def generate_game_code(length=9):
     """Generate a random game code consisting of uppercase letters and digits."""
     characters = string.ascii_uppercase + string.digits
     return ''.join(random.choice(characters) for _ in range(length))
 
-def create_game(db: Session, host_name: str, rules: str, genre: str, players: list = [], scores: dict = {}) -> Game:
+def create_game(db: Session, rules: str, genre: str) -> Game:
     """Create a new game session in the database."""
     game_code = generate_game_code()
     new_game = Game(game_code=game_code, 
-                    host_name=host_name, 
                     rules=rules,
-                    genre=genre,
-                    players= players, 
-                    scores=scores)
+                    genre=genre)
     db.add(new_game)
     db.commit()
     db.refresh(new_game)
     return new_game
+
+def create_game_session(db: Session, host_name: str, number_of_questions: int, game_code: str) -> GameSession:
+    """Create a new game session with the specified parameters."""
+    session_code = generate_game_code()
+    gameSession = GameSession(session_code = session_code,
+                              host_name=host_name,
+                              number_of_questions=number_of_questions,
+                              game_code=game_code)
+    db.add(gameSession)
+    db.commit()
+    db.refresh(gameSession)
+    if not gameSession:
+        raise ValueError("Failed to create game session")
+    add_question_to_session(db, session_code)
+    return gameSession
+
+def get_session_by_code(db: Session, session_code: str) -> GameSession:
+    """Retrieve a game session by its session code."""
+    return db.query(GameSession).filter(GameSession.session_code == session_code).first()
 
 def get_game_by_code(db: Session, game_code: str) -> Game:
     """Retrieve a game session by its game code."""
@@ -32,29 +53,14 @@ def get_all_games(db: Session) -> list[Game]:
     """Retrieve all game sessions."""
     return db.query(Game).all()
 
-def join_game(db: Session, game_code: str, player_name: str, player_id: str) -> Game:
+def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
     """Join an existing game session."""
-    game = get_game_by_code(db, game_code)
-    if not game:
-        raise ValueError("Game not found")
-    
-    if game.players is None:
-        game.players = []
-
-    if game.scores is None:
-        game.scores = {}
- 
-    if player_name in game.players:
-        raise ValueError("Player already in the game")
-    else:
-        game.players.append(player_name)
-        game.scores[player_name] = 0
-        flag_modified(game, "scores")
-        flag_modified(game, "players")
-        db.commit()
-        db.refresh(game)
-        update_player_game_code(db, player_id, game_code)
-        return game
+    gameSession = get_session_by_code(db, session_code)
+    if not gameSession:
+        raise ValueError("Game session not found")
+    update_player_game_code(db, player_id, gameSession.session_code)
+    assign_player_to_session(db, player_id, session_code)
+    return gameSession
     
 # Players CRUD operations -----------------------------------------------------------------------------------------------------
 def create_player_id() -> str:
@@ -76,7 +82,7 @@ def create_player(db: Session, player_name: str, player_email: str, player_mobil
                          player_name=player_name, 
                          player_email=player_email,
                          player_mobile=player_mobile,
-                         game_code=game_code)
+                         active_game_code=game_code)
     db.add(new_player)
     db.commit()
     db.refresh(new_player)
@@ -97,7 +103,7 @@ def update_player_score(db: Session, player_id: str, score: int) -> Players:
 def update_player_game_code(db: Session, player_id: str, game_code: str) -> Players:
     """Update the game code of a player."""
     player = get_player_by_ID(db, player_id)
-    player.game_code = game_code
+    player.active_game_code = game_code
     db.commit()
     db.refresh(player)
     return player
@@ -111,12 +117,51 @@ def delete_player(db: Session, player_id: str) -> None:
 def update_player_name(db: Session, player_id: str, player_name: str) -> Players:
     """Update the name of a player.""" 
     player = get_player_by_ID(db, player_id)
-    if player.game_code is not None:
+    if player.active_game_code is not None:
         raise ValueError("Cannot update player name while they are in a game")
     else:
         player.player_name = player_name
         db.commit()
         db.refresh(player)
     return player
-    # History CRUD operations -----------------------------------------------------------------------------------------------------
-    # Questions CRUD operations -----------------------------------------------------------------------------------------------------
+    # Session Player Assignment CRUD operations -----------------------------------------------------------------------------------------------------
+def assign_player_to_session(db: Session, player_id: str, session_code: str) -> None:
+    """Assign a player to a game session."""
+    assignment_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    assignment = SessionAssignment(assignment_id = assignment_id,
+                                   player_id= player_id, 
+                                   session_code= session_code,
+                                   session_start = datetime.now(),
+                                   session_end = None)
+    db.add(assignment)
+    db.commit()
+    db.refresh(assignment)
+
+    # Session Questions Assignment CRUD operations --------------------------------------------------------------------------------------------------------------
+def generate_question_id():
+    """Generate a unique question ID."""
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+
+def add_question_to_session(db: Session, session_code: str) -> None:
+    """Add a question to a game session."""
+    session = get_session_by_code(db, session_code)
+    if not session:
+        raise ValueError("Session not found")
+    game = get_game_by_code(db, session.game_code)
+    if not game:
+        raise ValueError("Game not found")
+    questions = db.query(Questions).filter(Questions.genre == game.genre).limit(session.number_of_questions).all()
+    if not questions:
+        raise ValueError("No questions available for this game genre")
+    for question in questions:
+        assignment = SessionQuestionAssignment(assignment_id=generate_question_id(),
+                                              question_id=question.question_id,
+                                              session_code=session_code)
+        db.add(assignment)
+        db.commit()
+        db.refresh(assignment)
+
+    
+    # Questions CRUD operations --------------------------------------------------------------------------------------------------------------
+
+    ##TODO: Implement the logic to add a question to the session

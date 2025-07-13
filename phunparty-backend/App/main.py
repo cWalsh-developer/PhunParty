@@ -2,8 +2,11 @@ from fastapi import FastAPI
 from app.config import Base, engine
 from app.models.game_model import Game
 from app.models.players_model import Players
-from app.models.history_model import GameHistory
+from app.models.game_session_model import GameSession
+from app.models.session_player_assignment_model import SessionAssignment
 from app.models.questions_model import Questions
+from app.models.session_question_assignment import SessionQuestionAssignment
+from app.models.scores_model import Scores
 from app.routes import game
 from app.routes import players
 from app.routes import history
