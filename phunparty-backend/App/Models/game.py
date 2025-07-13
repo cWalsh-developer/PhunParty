@@ -11,5 +11,5 @@ class GameSessionCreation(BaseModel):
     game_code: str
 
 class GameJoinRequest(BaseModel):
-    game_code: str
+    session_code: str
     player_id: str

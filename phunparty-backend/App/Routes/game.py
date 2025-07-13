@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 router = APIRouter()
 
-@router.post("/create/game", tags=["Game"])
+@router.post("/", tags=["Game"])
 def create_game(request: GameCreation, db: Session = Depends(get_db)):
   game = cg(db, request.rules, request.genre)
   return {"message": "Game created successfully.",
@@ -19,18 +19,12 @@ def create_game(request: GameCreation, db: Session = Depends(get_db)):
           "genre": game.genre,}
 
 @router.post("/create/session", tags=["Game"])
-def create_game_session(request: GameSessionCreation, db: Session = Depends(get_db)):
+def create_game_session_route(request: GameSessionCreation, db: Session = Depends(get_db)):
     """
     Create a new game session.
     """
     gameSession = create_game_session(db, request.host_name, request.number_of_questions, request.game_code)
-    return {
-        "message": "Game session created successfully.",
-        "session_code": gameSession.session_code,
-        "host_name": gameSession.host_name,
-        "number_of_questions": gameSession.number_of_questions,
-        "game_code": gameSession.game_code
-    }
+    return gameSession
 
 @router.get("/{game_code}", tags=["Game"])
 def get_game(game_code: str, db: Session = Depends(get_db)):
@@ -59,9 +53,9 @@ def join_game_route(req: GameJoinRequest, db: Session = Depends(get_db)):
     Join an existing game session.
     """
     try:
-        game = join_game(db, req.game_code, req.player_id)
+        game = join_game(db, req.session_code, req.player_id)
         return {
-            "message": f"{req.player_id} joined the game successfully.",
+            "message": f"{req.player_id} joined the {game.session_code} successfully.",
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

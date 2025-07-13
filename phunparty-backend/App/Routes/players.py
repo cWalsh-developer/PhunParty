@@ -80,5 +80,5 @@ def update_player_game_code_route(player_id: str, game_code: str, db: Session = 
     player = get_player_by_ID(db, player_id)
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
-    updated_player = update_player_game_code(db, player_id, game_code = None)
+    updated_player = update_player_game_code(db, player_id, game_code)
     return updated_player
