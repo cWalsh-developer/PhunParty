@@ -1,5 +1,4 @@
 from pydantic import BaseModel
-from datetime import datetime as DateTime
 
 class GameCreation(BaseModel):
     genre : str

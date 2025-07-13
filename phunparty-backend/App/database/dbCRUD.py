@@ -163,5 +163,3 @@ def add_question_to_session(db: Session, session_code: str) -> None:
 
     
     # Questions CRUD operations --------------------------------------------------------------------------------------------------------------
-
-    ##TODO: Implement the logic to add a question to the session

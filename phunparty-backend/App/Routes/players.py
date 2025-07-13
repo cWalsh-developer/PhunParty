@@ -1,6 +1,6 @@
 from app.database.dbCRUD import create_player, get_player_by_ID, get_all_players, delete_player, update_player_name, update_player_score, update_player_game_code
 from app.dependencies import get_db
-from app.models.players_model import Players
+##from app.models.players_model import Players
 from typing import List
 from fastapi import APIRouter, HTTPException, Depends
 from app.models.players import Player

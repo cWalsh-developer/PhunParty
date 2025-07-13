@@ -9,7 +9,6 @@ from app.models.session_question_assignment import SessionQuestionAssignment
 from app.models.scores_model import Scores
 from app.routes import game
 from app.routes import players
-from app.routes import history
 from app.routes import questions
 
 app = FastAPI(title="PhunParty Backend API")
