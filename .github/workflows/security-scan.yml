@@ -25,7 +25,7 @@ jobs:
         output: 'trivy-results.sarif'
     
     - name: Upload Trivy scan results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@v2
+      uses: github/codeql-action/upload-sarif@v3
       if: always()
       with:
         sarif_file: 'trivy-results.sarif'
@@ -46,9 +46,9 @@ jobs:
       uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: '3.13'
     
     - name: Install dependencies
       run: |
@@ -56,11 +56,11 @@ jobs:
         python -m pip install --upgrade pip
         pip install safety bandit
     
-    - name: Run Safety check for known vulnerabilities
+    - name: Run Safety scan for known vulnerabilities
       run: |
         cd phunparty-backend
-        safety check -r requirements.txt --json --output safety-report.json || true
-        safety check -r requirements.txt || echo "Safety check found vulnerabilities"
+        safety scan -r requirements.txt --json --output safety-report.json || true
+        safety scan -r requirements.txt || echo "Safety scan found vulnerabilities"
     
     - name: Run Bandit security linter
       run: |
@@ -69,7 +69,7 @@ jobs:
         bandit -r . || echo "Bandit found security issues"
     
     - name: Upload security reports
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: python-security-reports
@@ -112,7 +112,7 @@ jobs:
     
     - name: Upload npm security report
       if: steps.check-project.outputs.exists == 'true'
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: npm-security-report-${{ matrix.project }}
         path: ${{ matrix.project }}/npm-audit-report.json
