@@ -1,4 +1,5 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
+from app.dependencies import get_db
 from app.config import Base, engine
 from app.models.game_model import Game
 from app.models.players_model import Players
@@ -27,11 +28,11 @@ app.include_router(history.router,
                    prefix="/history",
                          tags=[{"name": "History",
                                 "description": "Endpoints for managing game history"}])
-
+"""
 app.include_router(questions.router, 
                    prefix="/questions",
                          tags=[{"name": "Questions",
                                 "description": "Endpoints for managing questions in each of the games"}])
-"""
+
 
 Base.metadata.create_all(bind=engine)
