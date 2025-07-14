@@ -62,13 +62,13 @@ jobs:
       run: |
         cd phunparty-backend
         export PYTHONPATH="${PYTHONPATH}:$(pwd)"
-        python -c "import App.main" || echo "Testing alternative import paths..."
-        if [ -f "App/main.py" ]; then
-          uvicorn App.main:app --host 0.0.0.0 --port 8000 &
+        python -c "import app.main" || echo "Testing alternative import paths..."
+        if [ -f "app/main.py" ]; then
+          uvicorn app.main:app --host 0.0.0.0 --port 8000 &
         elif [ -f "main.py" ]; then
           uvicorn main:app --host 0.0.0.0 --port 8000 &
         else
-          echo "Could not find main.py or App/main.py"
+          echo "Could not find main.py or app/main.py"
           find . -name "*.py" -path "*/main.py" | head -5
           exit 1
         fi
