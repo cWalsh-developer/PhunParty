@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 
 
 router = APIRouter()
+
+
 @router.get("/{session_code}", response_model=List[Scores], tags=["Scores"])
 def get_scores_by_session(session_code: str, db: Session = Depends(get_db)):
     """

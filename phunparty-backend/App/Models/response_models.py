@@ -1,10 +1,12 @@
 from pydantic import BaseModel
 from typing import Optional
 
+
 class GameResponse(BaseModel):
     game_code: str
     rules: str
     genre: str
+
 
 class PlayerResponse(BaseModel):
     player_id: str

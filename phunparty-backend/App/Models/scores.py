@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from sqlalchemy import Enum
 
+
 class Scores(BaseModel):
     score_id: str
     score: int

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 router = APIRouter()
 
+
 @router.get("/{question_id}", tags=["Questions"])
 def get_question_by_id_route(question_id: str, db: Session = Depends(get_db)):
     """
