@@ -2,6 +2,7 @@
   "name": "phunparty-web-host",
   "version": "0.1.0",
   "private": true,
+  "homepage": "https://jaynightmare.github.io/PhunParty",
   "dependencies": {
     "@testing-library/jest-dom": "^5.16.4",
     "@testing-library/react": "^13.3.0",
@@ -17,10 +18,8 @@
     "test": "react-scripts test",
     "lint": "eslint src --ext .js,.jsx,.ts,.tsx",
     "eject": "react-scripts eject",
-    "deploy:netlify": "npm run build && netlify deploy --prod --dir=build",
-    "deploy:vercel": "npm run build && vercel --prod",
-    "preview:netlify": "npm run build && netlify deploy --dir=build",
-    "serve": "npx serve -s build -l 3000"
+    "predeploy": "npm run build",
+    "deploy": "gh-pages -d build"
   },
   "eslintConfig": {
     "extends": [
@@ -41,6 +40,7 @@
     ]
   },
   "devDependencies": {
-    "eslint": "^8.0.0"
+    "eslint": "^8.0.0",
+    "gh-pages": "^6.0.0"
   }
 }
