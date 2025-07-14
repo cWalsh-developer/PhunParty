@@ -22,6 +22,11 @@ test("renders without crashing", () => {
 
 test("has correct structure", () => {
     render(<App />);
-    const appDiv = screen.getByText(/PhunParty Host UI/i).closest(".App");
-    expect(appDiv).toBeInTheDocument();
+    // Check for the main title element
+    const titleElement = screen.getByText(/PhunParty Host UI/i);
+    expect(titleElement).toBeInTheDocument();
+    
+    // Check for the status element
+    const statusElement = screen.getByTestId("game-status");
+    expect(statusElement).toBeInTheDocument();
 });
