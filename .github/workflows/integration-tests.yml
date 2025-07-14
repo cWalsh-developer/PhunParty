@@ -34,7 +34,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: '3.13'
         cache: 'pip'
         cache-dependency-path: 'phunparty-backend/requirements.txt'
     
@@ -63,10 +63,10 @@ jobs:
         cd phunparty-backend
         export PYTHONPATH="${PYTHONPATH}:$(pwd)"
         python -c "import App.main" || echo "Testing alternative import paths..."
-        if [ -f "main.py" ]; then
-          uvicorn main:App --host 0.0.0.0 --port 8000 &
-        elif [ -f "App/main.py" ]; then
-          uvicorn App.main:App --host 0.0.0.0 --port 8000 &
+        if [ -f "App/main.py" ]; then
+          uvicorn App.main:app --host 0.0.0.0 --port 8000 &
+        elif [ -f "main.py" ]; then
+          uvicorn main:app --host 0.0.0.0 --port 8000 &
         else
           echo "Could not find main.py or App/main.py"
           find . -name "*.py" -path "*/main.py" | head -5
@@ -100,7 +100,7 @@ jobs:
         
         # Test game session creation
         curl -X POST http://localhost:8000/api/v1/sessions \
-          -H "Content-Type: Application/json" \
+          -H "Content-Type: application/json" \
           -d '{"host_name": "TestHost", "game_type": "trivia"}' || echo "Session creation test failed"
     
     - name: Test WebSocket connections
