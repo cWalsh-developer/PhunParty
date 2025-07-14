@@ -19,3 +19,25 @@ def get_question_by_id_route(question_id: str, db: Session = Depends(get_db)):
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
     return question
+
+
+@router.post("/verify_answer", tags=["Questions"], response_model=AnswerVerification)
+def verify_answer_route(
+    answer_verification: AnswerVerification, db: Session = Depends(get_db)
+):
+    """
+    Verify the player's answer to a question.
+    """
+    question = get_question_by_id(answer_verification.question_id, db)
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    is_correct = (
+        str(question.answer).lower() == answer_verification.player_answer.lower()
+    )
+
+    return AnswerVerification(
+        question_id=answer_verification.question_id,
+        player_answer=answer_verification.player_answer,
+        is_correct=is_correct,
+    )

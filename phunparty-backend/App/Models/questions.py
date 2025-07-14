@@ -13,3 +13,4 @@ class Question(BaseModel):
 class AnswerVerification(BaseModel):
     question_id: str
     player_answer: str
+    is_correct: bool
