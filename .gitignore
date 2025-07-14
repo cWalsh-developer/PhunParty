@@ -8,6 +8,8 @@ env/
 
 # Configuration files
 *.env
+.env.*
+!.env.*.example
 
 # IDEs
 .vscode/

@@ -23,12 +23,12 @@ app.include_router(players.router,
                    prefix="/players", 
                    tags=[{"name": "Players",
                            "description": "Endpoints for managing players in the game"}])
-"""
-app.include_router(history.router, 
-                   prefix="/history",
-                         tags=[{"name": "History",
-                                "description": "Endpoints for managing game history"}])
-"""
+
+# app.include_router(history.router, 
+#                    prefix="/history",
+#                          tags=[{"name": "History",
+#                                 "description": "Endpoints for managing game history"}])
+
 app.include_router(questions.router, 
                    prefix="/questions",
                          tags=[{"name": "Questions",
