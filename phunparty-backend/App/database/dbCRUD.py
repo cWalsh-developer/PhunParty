@@ -163,5 +163,19 @@ def add_question_to_session(db: Session, session_code: str) -> None:
 
     
     # Questions CRUD operations --------------------------------------------------------------------------------------------------------------
+def get_questions_by_session_code(session_code: str, db: Session) -> list[Questions]:
+    """Retrieve questions for a specific game session."""
+    questions = (db.query(Questions)
+    .join(SessionQuestionAssignment, Questions.question_id == SessionQuestionAssignment.question_id)
+    .filter(SessionQuestionAssignment.session_code == session_code)
+    .all())
+    if not questions:
+        raise ValueError("No questions found for this session")
+    return questions
 
-    ##TODO: Implement the logic to add a question to the session
+def get_question_by_id(question_id: str, db: Session) -> Questions:
+    """Retrieve a question by its ID."""
+    question = db.query(Questions).filter(Questions.question_id == question_id).first()
+    return question
+
+    # Scores CRUD operations -----------------------------------------------------------------------------------------------------------------

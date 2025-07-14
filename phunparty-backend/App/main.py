@@ -1,4 +1,5 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
+from app.dependencies import get_db
 from app.config import Base, engine
 from app.models.game_model import Game
 from app.models.players_model import Players
@@ -9,7 +10,6 @@ from app.models.session_question_assignment import SessionQuestionAssignment
 from app.models.scores_model import Scores
 from app.routes import game
 from app.routes import players
-from app.routes import history
 from app.routes import questions
 
 app = FastAPI(title="PhunParty Backend API")
@@ -28,11 +28,11 @@ app.include_router(history.router,
                    prefix="/history",
                          tags=[{"name": "History",
                                 "description": "Endpoints for managing game history"}])
-
+"""
 app.include_router(questions.router, 
                    prefix="/questions",
                          tags=[{"name": "Questions",
                                 "description": "Endpoints for managing questions in each of the games"}])
-"""
+
 
 Base.metadata.create_all(bind=engine)
