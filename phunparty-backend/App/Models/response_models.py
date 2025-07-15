@@ -15,5 +15,10 @@ class PlayerResponse(BaseModel):
     player_mobile: str = None
     active_game_code: Optional[str] = None
 
+
+class AnswerVerificationResponseModel(BaseModel):
+    player_answer: str
+    is_correct: bool
+
     class Config:
         orm_mode = True

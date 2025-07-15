@@ -16,8 +16,3 @@ class AnswerVerification(BaseModel):
     player_id: str
     player_answer: str
     is_correct: bool
-
-
-class AnswerVerificationResponseModel(BaseModel):
-    player_answer: str
-    is_correct: bool

@@ -3,7 +3,8 @@ from app.dependencies import get_db
 from app.models.questions_model import Questions
 from typing import List
 from fastapi import APIRouter, HTTPException, Depends
-from app.models.questions import AnswerVerification, AnswerVerificationResponseModel
+from app.models.response_models import AnswerVerificationResponseModel
+from app.models.questions import AnswerVerification
 from app.models.session_question_assignment import SessionQuestionAssignment
 from sqlalchemy.orm import Session
 
