@@ -12,5 +12,12 @@ class Question(BaseModel):
 
 class AnswerVerification(BaseModel):
     question_id: str
+    session_code: str
+    player_id: str
+    player_answer: str
+    is_correct: bool
+
+
+class AnswerVerificationResponseModel(BaseModel):
     player_answer: str
     is_correct: bool

@@ -6,6 +6,7 @@ from app.models.session_player_assignment_model import SessionAssignment
 from app.models.session_question_assignment import SessionQuestionAssignment
 from app.models.players_model import Players
 from app.models.questions_model import Questions
+from app.models.scores_model import Scores
 import string, random
 from datetime import datetime
 
@@ -71,6 +72,7 @@ def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
         raise ValueError("Game session not found")
     update_player_game_code(db, player_id, gameSession.session_code)
     assign_player_to_session(db, player_id, session_code)
+    create_score(db, session_code, player_id)
     return gameSession
 
 
@@ -227,3 +229,38 @@ def get_question_by_id(question_id: str, db: Session) -> Questions:
     return question
 
     # Scores CRUD operations -----------------------------------------------------------------------------------------------------------------
+
+
+def get_scores_by_session_and_player(db: Session, session_code: str, player_id: str):
+    """Retrieve scores for a specific player in a game session."""
+    game_session = get_session_by_code(db, session_code)
+    if not game_session:
+        raise ValueError("Game session not found")
+    player = get_player_by_ID(db, player_id)
+    if not player:
+        raise ValueError("Player not found")
+    scores = db.query(Scores).filter(
+        Scores.session_code == session_code, Scores.player_id == player_id
+    )
+    return scores.first() if scores else None
+
+
+def update_scores(db: Session, session_code: str, player_id: str) -> Scores:
+    """Update the scores for a specific player in a game session."""
+    existing_score = get_scores_by_session_and_player(db, session_code, player_id)
+    existing_score.score += 1
+    db.commit()
+    db.refresh(existing_score)
+    return existing_score
+
+
+def create_score(db: Session, session_code: str, player_id: str) -> Scores:
+    """Create a new score entry for a player in a game session."""
+    score_id = "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    new_score = Scores(
+        score_id=score_id, session_code=session_code, player_id=player_id, score=0
+    )
+    db.add(new_score)
+    db.commit()
+    db.refresh(new_score)
+    return new_score

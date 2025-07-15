@@ -1,9 +1,9 @@
-from app.database.dbCRUD import get_question_by_id
+from app.database.dbCRUD import get_question_by_id, update_scores
 from app.dependencies import get_db
 from app.models.questions_model import Questions
 from typing import List
 from fastapi import APIRouter, HTTPException, Depends
-from app.models.questions import AnswerVerification
+from app.models.questions import AnswerVerification, AnswerVerificationResponseModel
 from app.models.session_question_assignment import SessionQuestionAssignment
 from sqlalchemy.orm import Session
 
@@ -21,9 +21,12 @@ def get_question_by_id_route(question_id: str, db: Session = Depends(get_db)):
     return question
 
 
-@router.post("/verify_answer", tags=["Questions"], response_model=AnswerVerification)
+@router.post(
+    "/verify_answer", tags=["Questions"], response_model=AnswerVerificationResponseModel
+)
 def verify_answer_route(
-    answer_verification: AnswerVerification, db: Session = Depends(get_db)
+    answer_verification: AnswerVerification,
+    db: Session = Depends(get_db),
 ):
     """
     Verify the player's answer to a question.
@@ -35,9 +38,13 @@ def verify_answer_route(
     is_correct = (
         str(question.answer).lower() == answer_verification.player_answer.lower()
     )
-
-    return AnswerVerification(
-        question_id=answer_verification.question_id,
+    if not is_correct:
+        raise HTTPException(status_code=400, detail="Incorrect answer")
+    else:
+        update_scores(
+            db, answer_verification.session_code, answer_verification.player_id
+        )
+    return AnswerVerificationResponseModel(
         player_answer=answer_verification.player_answer,
         is_correct=is_correct,
     )
