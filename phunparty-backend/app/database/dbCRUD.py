@@ -264,3 +264,11 @@ def create_score(db: Session, session_code: str, player_id: str) -> Scores:
     db.commit()
     db.refresh(new_score)
     return new_score
+
+
+def get_scores_by_session(db: Session, session_code: str) -> list[Scores]:
+    """Retrieve scores for a specific game session."""
+    scores = db.query(Scores).filter(Scores.session_code == session_code).all()
+    if not scores:
+        raise ValueError("No scores found for this session")
+    return scores
