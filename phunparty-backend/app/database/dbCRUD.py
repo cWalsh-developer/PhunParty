@@ -336,5 +336,4 @@ def calculate_game_results(db: Session, session_code: str):
             s.result = "lose"
     db.commit()
     db.refresh(session_scores)
-    calculate_game_results(db, session_code)
     return session_scores
