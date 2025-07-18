@@ -53,5 +53,18 @@ app.include_router(
     ],
 )
 
+# Initialize database tables
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as e:
+    print(f"Warning: Could not create database tables: {e}")
 
-Base.metadata.create_all(bind=engine)
+
+@app.get("/")
+def read_root():
+    return {"message": "PhunParty Backend API is running!"}
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy"}
