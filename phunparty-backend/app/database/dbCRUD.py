@@ -240,6 +240,15 @@ def add_question_to_session(db: Session, session_code: str) -> None:
         db.commit()
         db.refresh(assignment)
 
+
+def submit_questions(db: Session, question: Questions) -> Questions:
+    """Submit a question to the database."""
+    question.question_id = generate_question_id()
+    db.add(question)
+    db.commit()
+    db.refresh(question)
+    return question
+
     # Questions CRUD operations --------------------------------------------------------------------------------------------------------------
 
 
