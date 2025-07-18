@@ -2,7 +2,7 @@ name: Web Frontend CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ frontend-web ]
     paths: [ 'web-host-ui/**' ]
   pull_request:
     branches: [ main ]

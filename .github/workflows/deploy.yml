@@ -2,7 +2,7 @@ name: Deploy Web Host UI to GitHub Pages
 
 on:
     push:
-        branches: [main]
+        branches: [github-pages]
         paths:
             - "web-host-ui/**"
     workflow_dispatch:
