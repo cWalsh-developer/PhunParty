@@ -1,4 +1,7 @@
-from app.database.dbCRUD import get_question_by_id, update_scores
+from app.database.dbCRUD import (
+    get_question_by_id,
+    update_scores,
+)
 from app.dependencies import get_db
 from app.models.questions_model import Questions
 from typing import List

@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional
+from app.models.enums import ResultType
 
 
 class GameResponse(BaseModel):
@@ -19,6 +20,11 @@ class PlayerResponse(BaseModel):
 class AnswerVerificationResponseModel(BaseModel):
     player_answer: str
     is_correct: bool
+
+
+class ScoresResponseModel(BaseModel):
+    score: int
+    result: Optional[ResultType] = None
 
     class Config:
         orm_mode = True

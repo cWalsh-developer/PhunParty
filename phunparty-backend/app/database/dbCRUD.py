@@ -76,7 +76,30 @@ def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
     return gameSession
 
 
+def end_game_session(db: Session, session_code: str) -> None:
+    """End a game session and reset the active game code for players. And calculate the results"""
+    gameSession = get_session_by_code(db, session_code)
+    if not gameSession:
+        raise ValueError("Game session not found")
+
+    # Reset active game code for players
+    players = db.query(Players).filter(Players.active_game_code == session_code).all()
+    session_end_time = (
+        db.query(SessionAssignment)
+        .filter(SessionAssignment.session_code == session_code)
+        .first()
+    )
+    if not session_end_time:
+        raise ValueError("Session end time not found")
+    session_end_time.session_end = datetime.now()
+    for player in players:
+        player.active_game_code = None
+        db.commit()
+
+
 # Players CRUD operations -----------------------------------------------------------------------------------------------------
+
+
 def create_player_id() -> str:
     """Generate a unique player ID."""
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
@@ -153,6 +176,19 @@ def update_player_name(db: Session, player_id: str, player_name: str) -> Players
         db.commit()
         db.refresh(player)
     return player
+
+
+def get_number_of_players_in_session(db: Session, session_code: str) -> int:
+    """Retrieve the number of players in a specific game session."""
+    session = get_session_by_code(db, session_code)
+    if not session:
+        raise ValueError("Session not found")
+    return (
+        db.query(SessionAssignment)
+        .filter(SessionAssignment.session_code == session_code)
+        .count()
+    )
+
     # Session Player Assignment CRUD operations -----------------------------------------------------------------------------------------------------
 
 
@@ -228,6 +264,14 @@ def get_question_by_id(question_id: str, db: Session) -> Questions:
     question = db.query(Questions).filter(Questions.question_id == question_id).first()
     return question
 
+
+def retrieve_number_of_questions_value(db: Session, session_code: str) -> int:
+    """Retrieve the number of questions for a specific game session."""
+    session = get_session_by_code(db, session_code)
+    if not session:
+        raise ValueError("Session not found")
+    return session.number_of_questions
+
     # Scores CRUD operations -----------------------------------------------------------------------------------------------------------------
 
 
@@ -264,3 +308,32 @@ def create_score(db: Session, session_code: str, player_id: str) -> Scores:
     db.commit()
     db.refresh(new_score)
     return new_score
+
+
+def get_scores_by_session(db: Session, session_code: str) -> list[Scores]:
+    """Retrieve scores for a specific game session."""
+    scores = db.query(Scores).filter(Scores.session_code == session_code).all()
+    if not scores:
+        raise ValueError("No scores found for this session")
+    return scores
+
+
+def calculate_game_results(db: Session, session_code: str):
+    """Determine the game results (win, lose, draw) for a session and update the DB."""
+
+    session_scores = db.query(Scores).filter(Scores.session_code == session_code).all()
+    if not session_scores:
+        raise ValueError("No scores found for session")
+
+    max_score = max(score.score for score in session_scores)
+
+    top_scorers = [s for s in session_scores if s.score == max_score]
+
+    for s in session_scores:
+        if s.score == max_score:
+            s.result = "draw" if len(top_scorers) > 1 else "win"
+        else:
+            s.result = "lose"
+    db.commit()
+    db.refresh(session_scores)
+    return session_scores

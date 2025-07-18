@@ -11,6 +11,7 @@ from app.models.scores_model import Scores
 from app.routes import game
 from app.routes import players
 from app.routes import questions
+from app.routes import scores
 
 app = FastAPI(title="PhunParty Backend API")
 
@@ -32,12 +33,15 @@ app.include_router(
         {"name": "Players", "description": "Endpoints for managing players in the game"}
     ],
 )
-"""
-app.include_router(history.router, 
-                   prefix="/history",
-                         tags=[{"name": "History",
-                                "description": "Endpoints for managing game history"}])
-"""
+
+app.include_router(
+    scores.router,
+    prefix="/scores",
+    tags=[
+        {"name": "Scores", "description": "Endpoints for managing scores in the game"}
+    ],
+)
+
 app.include_router(
     questions.router,
     prefix="/questions",
@@ -49,5 +53,18 @@ app.include_router(
     ],
 )
 
+# Initialize database tables
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as e:
+    print(f"Warning: Could not create database tables: {e}")
 
-Base.metadata.create_all(bind=engine)
+
+@app.get("/")
+def read_root():
+    return {"message": "PhunParty Backend API is running!"}
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy"}
