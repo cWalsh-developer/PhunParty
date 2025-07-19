@@ -62,7 +62,126 @@ except Exception as e:
 
 @app.get("/")
 def read_root():
-    return {"message": "PhunParty Backend API is running!"}
+    return {
+        "message": "PhunParty Backend API - Welcome!",
+        "version": "1.0.0",
+        "description": "A fun party trivia game backend API",
+        "documentation": "/docs",
+        "available_endpoints": [
+            {
+                "entity": "Game Management",
+                "base_path": "/game",
+                "description": "Manage game sessions and game types",
+                "endpoints": [
+                    {
+                        "method": "POST",
+                        "endpoint": "/game/",
+                        "description": "Create a new game type",
+                        "example": "POST http://localhost:8000/game/",
+                    },
+                    {
+                        "method": "POST",
+                        "endpoint": "/game/create/session",
+                        "description": "Create a new game session",
+                        "example": "POST http://localhost:8000/game/create/session",
+                    },
+                    {
+                        "method": "GET",
+                        "endpoint": "/game/{game_code}",
+                        "description": "Get game details by game code",
+                        "example": "GET http://localhost:8000/game/TRIVIA001",
+                    },
+                    {
+                        "method": "GET",
+                        "endpoint": "/game/",
+                        "description": "Get all available games",
+                        "example": "GET http://localhost:8000/game/",
+                    },
+                    {
+                        "method": "POST",
+                        "endpoint": "/game/join",
+                        "description": "Join an existing game session",
+                        "example": "POST http://localhost:8000/game/join",
+                    },
+                ],
+            },
+            {
+                "entity": "Player Management",
+                "base_path": "/players",
+                "description": "Manage players in the game",
+                "endpoints": [
+                    {
+                        "method": "POST",
+                        "endpoint": "/players/create",
+                        "description": "Create a new player",
+                        "example": "POST http://localhost:8000/players/create",
+                    },
+                    {
+                        "method": "GET",
+                        "endpoint": "/players/{player_id}",
+                        "description": "Get player details by ID",
+                        "example": "GET http://localhost:8000/players/PLAYER123",
+                    },
+                    {
+                        "method": "GET",
+                        "endpoint": "/players/",
+                        "description": "Get all players",
+                        "example": "GET http://localhost:8000/players/",
+                    },
+                    {
+                        "method": "DELETE",
+                        "endpoint": "/players/{player_id}",
+                        "description": "Delete a player",
+                        "example": "DELETE http://localhost:8000/players/PLAYER123",
+                    },
+                    {
+                        "method": "PUT",
+                        "endpoint": "/players/{player_id}/name",
+                        "description": "Update player name",
+                        "example": "PUT http://localhost:8000/players/PLAYER123/name",
+                    },
+                ],
+            },
+            {
+                "entity": "Questions Management",
+                "base_path": "/questions",
+                "description": "Manage trivia questions",
+                "endpoints": [
+                    {
+                        "method": "GET",
+                        "endpoint": "/questions/{question_id}",
+                        "description": "Get question by ID",
+                        "example": "GET http://localhost:8000/questions/Q001",
+                    },
+                    {
+                        "method": "POST",
+                        "endpoint": "/questions/verify_answer",
+                        "description": "Verify a player's answer to a question",
+                        "example": "POST http://localhost:8000/questions/verify_answer",
+                    },
+                    {
+                        "method": "POST",
+                        "endpoint": "/questions/add",
+                        "description": "Add a new question",
+                        "example": "POST http://localhost:8000/questions/add",
+                    },
+                ],
+            },
+            {
+                "entity": "Scores Management",
+                "base_path": "/scores",
+                "description": "Manage player scores and game results",
+                "endpoints": [
+                    {
+                        "method": "GET",
+                        "endpoint": "/scores/session/{session_code}",
+                        "description": "Get scores for a game session",
+                        "example": "GET http://localhost:8000/scores/session/SESSION123",
+                    }
+                ],
+            },
+        ],
+    }
 
 
 @app.get("/health")

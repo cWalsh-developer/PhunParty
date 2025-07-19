@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional
-from app.models.enums import ResultType
+from app.models.enums import ResultType, DifficultyLevel
 
 
 class GameResponse(BaseModel):
@@ -26,5 +26,20 @@ class ScoresResponseModel(BaseModel):
     score: int
     result: Optional[ResultType] = None
 
+
+class QuestionRequest(BaseModel):
+    difficulty: DifficultyLevel
+    question: str
+    answer: str
+    genre: str
+
+
+class QuestionsAddedResponseModel(BaseModel):
+    message: str
+    question: str
+    answer: str
+    difficulty: DifficultyLevel
+    genre: str
+
     class Config:
-        orm_mode = True
+        from_attributes = True

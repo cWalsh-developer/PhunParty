@@ -1,12 +1,13 @@
-from app.database.dbCRUD import (
-    get_question_by_id,
-    update_scores,
-)
+from app.database.dbCRUD import get_question_by_id, update_scores, submit_questions
 from app.dependencies import get_db
 from app.models.questions_model import Questions
 from typing import List
 from fastapi import APIRouter, HTTPException, Depends
-from app.models.response_models import AnswerVerificationResponseModel
+from app.models.response_models import (
+    AnswerVerificationResponseModel,
+    QuestionsAddedResponseModel,
+    QuestionRequest,
+)
 from app.models.questions import AnswerVerification
 from app.models.session_question_assignment import SessionQuestionAssignment
 from sqlalchemy.orm import Session
@@ -51,4 +52,29 @@ def verify_answer_route(
     return AnswerVerificationResponseModel(
         player_answer=answer_verification.player_answer,
         is_correct=is_correct,
+    )
+
+
+@router.post("/add", tags=["Questions"], response_model=QuestionsAddedResponseModel)
+def add_question_route(
+    question_request: QuestionRequest, db: Session = Depends(get_db)
+):
+    """
+    Add a new question.
+    """
+    # Create SQLAlchemy model from Pydantic request
+    question = Questions(
+        question=question_request.question,
+        answer=question_request.answer,
+        genre=question_request.genre,
+        difficulty=question_request.difficulty,
+    )
+
+    submitted_question = submit_questions(db, question)
+    return QuestionsAddedResponseModel(
+        message="Question added successfully",
+        question=submitted_question.question,
+        answer=submitted_question.answer,
+        genre=submitted_question.genre,
+        difficulty=submitted_question.difficulty,
     )
