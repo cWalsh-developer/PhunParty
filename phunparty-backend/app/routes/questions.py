@@ -64,25 +64,17 @@ def add_question_route(
     """
     # Create SQLAlchemy model from Pydantic request
     question = Questions(
-        question_id=question_request.question_id,
         question=question_request.question,
-        option_a=question_request.option_a,
-        option_b=question_request.option_b,
-        option_c=question_request.option_c,
-        option_d=question_request.option_d,
-        correct_answer=question_request.correct_answer,
+        answer=question_request.answer,
         genre=question_request.genre,
+        difficulty=question_request.difficulty,
     )
 
     submitted_question = submit_questions(db, question)
     return QuestionsAddedResponseModel(
         message="Question added successfully",
-        question_id=submitted_question.question_id,
         question=submitted_question.question,
-        option_a=submitted_question.option_a,
-        option_b=submitted_question.option_b,
-        option_c=submitted_question.option_c,
-        option_d=submitted_question.option_d,
-        correct_answer=submitted_question.correct_answer,
+        answer=submitted_question.answer,
         genre=submitted_question.genre,
+        difficulty=submitted_question.difficulty,
     )

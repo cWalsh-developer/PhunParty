@@ -28,25 +28,17 @@ class ScoresResponseModel(BaseModel):
 
 
 class QuestionRequest(BaseModel):
-    question_id: str
+    difficulty: DifficultyLevel
     question: str
-    option_a: str
-    option_b: str
-    option_c: str
-    option_d: str
-    correct_answer: str
+    answer: str
     genre: str
 
 
 class QuestionsAddedResponseModel(BaseModel):
     message: str
-    question_id: str
     question: str
-    option_a: str
-    option_b: str
-    option_c: str
-    option_d: str
-    correct_answer: str
+    answer: str
+    difficulty: DifficultyLevel
     genre: str
 
     class Config:
