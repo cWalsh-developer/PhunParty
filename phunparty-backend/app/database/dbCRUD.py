@@ -243,7 +243,9 @@ def add_question_to_session(db: Session, session_code: str) -> None:
 
 def submit_questions(db: Session, question: Questions) -> Questions:
     """Submit a question to the database."""
-    question.question_id = generate_question_id()
+    # Only generate a new ID if one wasn't provided
+    if not question.question_id:
+        question.question_id = generate_question_id()
     db.add(question)
     db.commit()
     db.refresh(question)

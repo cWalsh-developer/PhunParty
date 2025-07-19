@@ -3,7 +3,11 @@ from app.dependencies import get_db
 from app.models.questions_model import Questions
 from typing import List
 from fastapi import APIRouter, HTTPException, Depends
-from app.models.response_models import AnswerVerificationResponseModel
+from app.models.response_models import (
+    AnswerVerificationResponseModel,
+    QuestionsAddedResponseModel,
+    QuestionRequest,
+)
 from app.models.questions import AnswerVerification
 from app.models.session_question_assignment import SessionQuestionAssignment
 from sqlalchemy.orm import Session
@@ -51,17 +55,34 @@ def verify_answer_route(
     )
 
 
-@router.post("/add", tags=["Questions"])
-def add_question_route(question: Questions, db: Session = Depends(get_db)):
+@router.post("/add", tags=["Questions"], response_model=QuestionsAddedResponseModel)
+def add_question_route(
+    question_request: QuestionRequest, db: Session = Depends(get_db)
+):
     """
     Add a new question.
     """
+    # Create SQLAlchemy model from Pydantic request
+    question = Questions(
+        question_id=question_request.question_id,
+        question=question_request.question,
+        option_a=question_request.option_a,
+        option_b=question_request.option_b,
+        option_c=question_request.option_c,
+        option_d=question_request.option_d,
+        correct_answer=question_request.correct_answer,
+        genre=question_request.genre,
+    )
+
     submitted_question = submit_questions(db, question)
-    return {
-        "message": "Question added successfully.",
-        "question_id": submitted_question.question_id,
-        "question": submitted_question.question,
-        "answer": submitted_question.answer,
-        "genre": submitted_question.genre,
-        "difficulty": submitted_question.difficulty.name,
-    }
+    return QuestionsAddedResponseModel(
+        message="Question added successfully",
+        question_id=submitted_question.question_id,
+        question=submitted_question.question,
+        option_a=submitted_question.option_a,
+        option_b=submitted_question.option_b,
+        option_c=submitted_question.option_c,
+        option_d=submitted_question.option_d,
+        correct_answer=submitted_question.correct_answer,
+        genre=submitted_question.genre,
+    )
