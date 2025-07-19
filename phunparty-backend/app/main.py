@@ -174,7 +174,7 @@ def read_root():
                 "endpoints": [
                     {
                         "method": "GET",
-                        "endpoint": "/scores/session/{session_code}",
+                        "endpoint": "/scores/{session_code}",
                         "description": "Get scores for a game session",
                         "example": "GET http://localhost:8000/scores/session/SESSION123",
                     }
