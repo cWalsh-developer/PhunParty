@@ -108,7 +108,7 @@ def check_and_advance_game(
 
 def get_current_question_for_session(db: Session, session_code: str) -> dict:
     """
-    Get the current question for a game session with proper business logic
+    Get the current question for a game session
     """
     # Get current game state
     game_state = get_game_session_state(db, session_code)

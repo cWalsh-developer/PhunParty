@@ -149,6 +149,7 @@ def read_root():
                         "example": "DELETE http://localhost:8000/players/PLAYER123",
                     },
                     {
+                        "(This endpoint will be updated to reflect updating the entire user profile)"
                         "method": "PUT",
                         "endpoint": "/players/{player_id}/name",
                         "description": "Update player name",
@@ -182,9 +183,9 @@ def read_root():
                 "endpoints": [
                     {
                         "method": "GET",
-                        "endpoint": "/scores/session/{session_code}",
+                        "endpoint": "/scores/{session_code}",
                         "description": "Get scores for a game session",
-                        "example": "GET http://localhost:8000/scores/session/SESSION123",
+                        "example": "GET http://localhost:8000/scores/3ERH4I225",
                     }
                 ],
             },
@@ -204,12 +205,6 @@ def read_root():
                         "endpoint": "/game-logic/status/{session_code}",
                         "description": "Get current game status and progression",
                         "example": "GET http://localhost:8000/game-logic/status/SESSION123",
-                    },
-                    {
-                        "method": "POST",
-                        "endpoint": "/game-logic/initialize/{session_code}",
-                        "description": "Initialize game state tracking for a session",
-                        "example": "POST http://localhost:8000/game-logic/initialize/SESSION123",
                     },
                     {
                         "method": "GET",

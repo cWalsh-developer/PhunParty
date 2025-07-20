@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.logic.game_logic import submit_player_answer, get_current_question_for_session
-from app.database.dbCRUD import create_game_session_state, get_current_question_details
+from app.database.dbCRUD import get_current_question_details
 from app.models.response_models import SubmitAnswerRequest, GameStatusResponse
 
 router = APIRouter()
@@ -48,28 +48,6 @@ def get_session_status(session_code: str, db: Session = Depends(get_db)):
         return status
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting status: {str(e)}")
-
-
-@router.post("/initialize/{session_code}", tags=["Game Logic"])
-def initialize_session(session_code: str, db: Session = Depends(get_db)):
-    """
-    Initialize game state tracking for a session.
-    Should be called when a game session is created.
-    """
-    try:
-        game_state = create_game_session_state(db, session_code)
-        return {
-            "message": "Game session initialized",
-            "session_code": session_code,
-            "current_question_id": game_state.current_question_id,
-            "total_questions": game_state.total_questions,
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Error initializing session: {str(e)}"
-        )
 
 
 @router.get("/current-question/{session_code}", tags=["Game Logic"])
