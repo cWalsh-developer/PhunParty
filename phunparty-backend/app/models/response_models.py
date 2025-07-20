@@ -38,8 +38,27 @@ class QuestionsAddedResponseModel(BaseModel):
     message: str
     question: str
     answer: str
-    difficulty: DifficultyLevel
     genre: str
+    difficulty: DifficultyLevel
 
     class Config:
         from_attributes = True
+
+
+class SubmitAnswerRequest(BaseModel):
+    session_code: str
+    player_id: str
+    question_id: str
+    player_answer: str
+
+
+class GameStatusResponse(BaseModel):
+    session_code: str
+    is_active: bool
+    is_waiting_for_players: bool
+    current_question_index: int
+    total_questions: int
+    current_question: dict
+    players: dict
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None

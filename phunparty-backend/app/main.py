@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends
+from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.config import Base, engine
 from app.models.game_model import Game
@@ -8,10 +9,12 @@ from app.models.session_player_assignment_model import SessionAssignment
 from app.models.questions_model import Questions
 from app.models.session_question_assignment import SessionQuestionAssignment
 from app.models.scores_model import Scores
+from app.models.game_state_models import PlayerResponse, GameSessionState
 from app.routes import game
 from app.routes import players
 from app.routes import questions
 from app.routes import scores
+from app.routes import game_logic
 
 app = FastAPI(title="PhunParty Backend API")
 
@@ -49,6 +52,17 @@ app.include_router(
         {
             "name": "Questions",
             "description": "Endpoints for managing questions in each of the games",
+        }
+    ],
+)
+
+app.include_router(
+    game_logic.router,
+    prefix="/game-logic",
+    tags=[
+        {
+            "name": "Game Logic",
+            "description": "Endpoints for game progression and automatic advancement",
         }
     ],
 )
@@ -155,12 +169,6 @@ def read_root():
                     },
                     {
                         "method": "POST",
-                        "endpoint": "/questions/verify_answer",
-                        "description": "Verify a player's answer to a question",
-                        "example": "POST http://localhost:8000/questions/verify_answer",
-                    },
-                    {
-                        "method": "POST",
                         "endpoint": "/questions/add",
                         "description": "Add a new question",
                         "example": "POST http://localhost:8000/questions/add",
@@ -174,10 +182,41 @@ def read_root():
                 "endpoints": [
                     {
                         "method": "GET",
-                        "endpoint": "/scores/{session_code}",
+                        "endpoint": "/scores/session/{session_code}",
                         "description": "Get scores for a game session",
                         "example": "GET http://localhost:8000/scores/session/SESSION123",
                     }
+                ],
+            },
+            {
+                "entity": "Game Logic & Progression",
+                "base_path": "/game-logic",
+                "description": "Handle automatic game progression and player responses",
+                "endpoints": [
+                    {
+                        "method": "POST",
+                        "endpoint": "/game-logic/submit-answer",
+                        "description": "Submit a player's answer (auto-advances game when all players answer)",
+                        "example": "POST http://localhost:8000/game-logic/submit-answer",
+                    },
+                    {
+                        "method": "GET",
+                        "endpoint": "/game-logic/status/{session_code}",
+                        "description": "Get current game status and progression",
+                        "example": "GET http://localhost:8000/game-logic/status/SESSION123",
+                    },
+                    {
+                        "method": "POST",
+                        "endpoint": "/game-logic/initialize/{session_code}",
+                        "description": "Initialize game state tracking for a session",
+                        "example": "POST http://localhost:8000/game-logic/initialize/SESSION123",
+                    },
+                    {
+                        "method": "GET",
+                        "endpoint": "/game-logic/current-question/{session_code}",
+                        "description": "Get the current question for a session",
+                        "example": "GET http://localhost:8000/game-logic/current-question/SESSION123",
+                    },
                 ],
             },
         ],
