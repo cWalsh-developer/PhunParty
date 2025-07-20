@@ -206,7 +206,7 @@ sudo systemctl enable postgresql
 ## 📌 Goals
 
 - [x] Define MVP game loop
-- [ ] Build core REST API
+- [x] Build core REST API
 - [ ] Build React Native player app
 - [ ] Build React host UI
 - [ ] Add audio quiz mode
