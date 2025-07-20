@@ -149,11 +149,10 @@ def read_root():
                         "example": "DELETE http://localhost:8000/players/PLAYER123",
                     },
                     {
-                        "(This endpoint will be updated to reflect updating the entire user profile)"
                         "method": "PUT",
-                        "endpoint": "/players/{player_id}/name",
-                        "description": "Update player name",
-                        "example": "PUT http://localhost:8000/players/PLAYER123/name",
+                        "endpoint": "/players/{player_id}",
+                        "description": "Update player profile",
+                        "example": "PUT http://localhost:8000/players/PLAYER123",
                     },
                 ],
             },

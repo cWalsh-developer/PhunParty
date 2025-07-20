@@ -5,6 +5,7 @@ from app.models.game_session_model import GameSession
 from app.models.session_player_assignment_model import SessionAssignment
 from app.models.session_question_assignment import SessionQuestionAssignment
 from app.models.players_model import Players
+from app.models.players import Player
 from app.models.questions_model import Questions
 from app.models.scores_model import Scores
 from app.models.game_state_models import PlayerResponse, GameSessionState
@@ -175,19 +176,6 @@ def create_player(
     return new_player
 
 
-def update_player_score(db: Session, player_id: str, score: int) -> Players:
-    """Update the score of a player."""
-    player = get_player_by_ID(db, player_id)
-    game = get_game_by_code(db, player.game_code)
-    if not game:
-        raise ValueError("Game not found")
-    game.scores[player.player_name] = score
-    flag_modified(game, "scores")
-    db.commit()
-    db.refresh(game)
-    return player
-
-
 def update_player_game_code(db: Session, player_id: str, game_code: str) -> Players:
     """Update the game code of a player."""
     player = get_player_by_ID(db, player_id)
@@ -204,16 +192,18 @@ def delete_player(db: Session, player_id: str) -> None:
     db.commit()
 
 
-def update_player_name(db: Session, player_id: str, player_name: str) -> Players:
+def update_player(db: Session, player_id: str, player: Player) -> Players:
     """Update the name of a player."""
-    player = get_player_by_ID(db, player_id)
-    if player.active_game_code is not None:
+    new_player = get_player_by_ID(db, player_id)
+    if new_player.active_game_code is not None:
         raise ValueError("Cannot update player name while they are in a game")
     else:
-        player.player_name = player_name
+        new_player.player_name = player.player_name
+        new_player.player_email = player.player_email
+        new_player.player_mobile = player.player_mobile
         db.commit()
-        db.refresh(player)
-    return player
+        db.refresh(new_player)
+    return new_player
 
 
 def get_number_of_players_in_session(db: Session, session_code: str) -> int:
