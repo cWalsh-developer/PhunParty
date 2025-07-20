@@ -80,6 +80,9 @@ def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
     gameSession = get_session_by_code(db, session_code)
     if not gameSession:
         raise ValueError("Game session not found")
+    player = get_player_by_ID(db, player_id)
+    if player.active_game_code is not None:
+        raise ValueError("Player is already in a game session")
     update_player_game_code(db, player_id, gameSession.session_code)
     assign_player_to_session(db, player_id, session_code)
     create_score(db, session_code, player_id)
