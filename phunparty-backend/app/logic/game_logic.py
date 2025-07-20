@@ -80,7 +80,7 @@ def check_and_advance_game(
     result = {
         "players_total": players_in_session,
         "players_answered": responses_to_question,
-        "waiting_for_players": game_state.is_waiting_for_players,
+        "waiting_for_players": responses_to_question < players_in_session,
         "current_question_index": game_state.current_question_index,
         "total_questions": game_state.total_questions,
         "game_status": "active",
@@ -95,15 +95,6 @@ def check_and_advance_game(
         if game_state.current_question_index + 1 < game_state.total_questions:
             # Advance to next question
             advancement_result = advance_to_next_question(db, session_code)
-            
-            # Get updated game state after advancement to reflect new waiting status
-            updated_game_state = get_game_session_state(db, session_code)
-            
-            # Update result with the new game state
-            result.update({
-                "waiting_for_players": updated_game_state.is_waiting_for_players,
-                "current_question_index": updated_game_state.current_question_index,
-            })
             result.update(advancement_result)
         else:
             # No more questions, end the game

@@ -5,7 +5,6 @@ from app.database.dbCRUD import (
     delete_player,
     update_player_name,
     update_player_score,
-    update_player_game_code,
 )
 from app.dependencies import get_db
 
@@ -91,18 +90,4 @@ def update_player_name_route(
     updated_player = update_player_name(db, player_id, player_name)
     if not updated_player:
         raise HTTPException(status_code=400, detail="Failed to update player name")
-    return updated_player
-
-
-@router.put("/{player_id}/game_code", tags=["Players"])
-def update_player_game_code_route(
-    player_id: str, game_code: str, db: Session = Depends(get_db)
-):
-    """
-    Update the game code of a player.
-    """
-    player = get_player_by_ID(db, player_id)
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
-    updated_player = update_player_game_code(db, player_id, game_code)
     return updated_player
