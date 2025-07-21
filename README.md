@@ -199,14 +199,14 @@ sudo systemctl enable postgresql
 
 ## 📍 Status
 
-🚧 This project is in active development. Initial backend is being built with FastAPI.
+🚧 This project is in active development. The API with fastAPI is complete and the React web app and React-Native mobile app development are underway.
 
 ---
 
 ## 📌 Goals
 
 - [x] Define MVP game loop
-- [ ] Build core REST API
+- [x] Build core REST API
 - [ ] Build React Native player app
 - [ ] Build React host UI
 - [ ] Add audio quiz mode
