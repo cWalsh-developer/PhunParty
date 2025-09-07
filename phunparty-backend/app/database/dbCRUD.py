@@ -18,6 +18,7 @@ from app.utils.id_generator import (
     generate_score_id,
     generate_assignment_id,
 )
+from app.utils.hash_password import hash_password
 from datetime import datetime
 
 
@@ -157,20 +158,28 @@ def get_all_players(db: Session) -> list[Players]:
     return db.query(Players).all()
 
 
+def get_player_by_email(db: Session, player_email: str) -> Players:
+    """Retrieve a player by their email."""
+    return db.query(Players).filter(Players.player_email == player_email).first()
+
+
 def create_player(
     db: Session,
     player_name: str,
     player_email: str,
     player_mobile: str,
+    hashed_password: str,
     game_code: str = None,
 ) -> Players:
     """Create a new player and add them to a game."""
     player_id = generate_player_id()
+    hashed_password = hash_password(hashed_password)
     new_player = Players(
         player_id=player_id,
         player_name=player_name,
         player_email=player_email,
         player_mobile=player_mobile,
+        hashed_password=hashed_password,
         active_game_code=game_code,
     )
     db.add(new_player)

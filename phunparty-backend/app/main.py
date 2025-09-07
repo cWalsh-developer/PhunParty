@@ -15,6 +15,7 @@ from app.routes import players
 from app.routes import questions
 from app.routes import scores
 from app.routes import game_logic
+from app.routes import authentication
 
 app = FastAPI(title="PhunParty Backend API")
 
@@ -63,6 +64,17 @@ app.include_router(
         {
             "name": "Game Logic",
             "description": "Endpoints for game progression and automatic advancement",
+        }
+    ],
+)
+
+app.include_router(
+    authentication.router,
+    prefix="/authentication",
+    tags=[
+        {
+            "name": "Authentication",
+            "description": "Endpoints for player authentication and login",
         }
     ],
 )
@@ -210,6 +222,19 @@ def read_root():
                         "endpoint": "/game-logic/current-question/{session_code}",
                         "description": "Get the current question for a session",
                         "example": "GET http://localhost:8000/game-logic/current-question/SESSION123",
+                    },
+                ],
+            },
+            {
+                "entity": "Authentication",
+                "base_path": "/auth",
+                "description": "User authentication endpoints",
+                "endpoints": [
+                    {
+                        "method": "POST",
+                        "endpoint": "/auth/login",
+                        "description": "Login a player",
+                        "example": "POST http://localhost:8000/auth/login",
                     },
                 ],
             },

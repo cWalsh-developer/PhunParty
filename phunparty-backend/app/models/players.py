@@ -6,4 +6,5 @@ class Player(BaseModel):
     game_code: Optional[str] = None
     player_name: str
     player_email: str
+    hashed_password: str
     player_mobile: Optional[str] = None

@@ -4,14 +4,18 @@ from app.database.dbCRUD import (
     get_all_players,
     delete_player,
     update_player,
+    get_player_by_email,
 )
 from app.dependencies import get_db
+from app.utils.hash_password import verify_password
+from app.utils.generateJWT import create_access_token
 
 ##from app.models.players_model import Players
 from typing import List
 from fastapi import APIRouter, HTTPException, Depends
 from app.models.players import Player
 from app.models.response_models import PlayerResponse
+from app.models.loginRequest import LoginRequest
 from sqlalchemy.orm import Session
 
 router = APIRouter()
@@ -23,7 +27,11 @@ def create_player_route(player: Player, db: Session = Depends(get_db)):
     Create a new player in the game.
     """
     game = create_player(
-        db, player.player_name, player.player_email, player.player_mobile
+        db,
+        player.player_name,
+        player.player_email,
+        player.player_mobile,
+        player.hashed_password,
     )
     return game
 
