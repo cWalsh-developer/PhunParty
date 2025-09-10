@@ -70,7 +70,7 @@ app.include_router(
 
 app.include_router(
     authentication.router,
-    prefix="/authentication",
+    prefix="/auth",
     tags=[
         {
             "name": "Authentication",
