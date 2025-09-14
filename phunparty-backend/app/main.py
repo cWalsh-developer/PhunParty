@@ -10,12 +10,14 @@ from app.models.questions_model import Questions
 from app.models.session_question_assignment import SessionQuestionAssignment
 from app.models.scores_model import Scores
 from app.models.game_state_models import PlayerResponse, GameSessionState
+from app.models.passwordReset import PasswordReset
 from app.routes import game
 from app.routes import players
 from app.routes import questions
 from app.routes import scores
 from app.routes import game_logic
 from app.routes import authentication
+from app.routes import passwordReset
 
 app = FastAPI(title="PhunParty Backend API")
 
@@ -77,6 +79,10 @@ app.include_router(
             "description": "Endpoints for player authentication and login",
         }
     ],
+)
+
+app.include_router(
+    passwordReset.router, prefix="/password-reset", tags=["Password Reset"]
 )
 
 # Initialize database tables
@@ -235,6 +241,19 @@ def read_root():
                         "endpoint": "/auth/login",
                         "description": "Login a player",
                         "example": "POST http://localhost:8000/auth/login",
+                    },
+                ],
+            },
+            {
+                "entity": "Password Reset",
+                "base_path": "/password-reset",
+                "description": "Password reset via OTP",
+                "endpoints": [
+                    {
+                        "method": "POST",
+                        "endpoint": "/password-reset/request",
+                        "description": "Request a password reset OTP",
+                        "example": "POST http://localhost:8000/password-reset/request",
                     },
                 ],
             },

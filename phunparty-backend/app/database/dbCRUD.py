@@ -5,6 +5,7 @@ from app.models.game_session_model import GameSession
 from app.models.session_player_assignment_model import SessionAssignment
 from app.models.session_question_assignment import SessionQuestionAssignment
 from app.models.players_model import Players
+from app.models.passwordReset import PasswordReset
 from app.models.players import Player
 from app.models.questions_model import Questions
 from app.models.scores_model import Scores
@@ -19,7 +20,7 @@ from app.utils.id_generator import (
     generate_assignment_id,
 )
 from app.utils.hash_password import hash_password
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def create_game(db: Session, rules: str, genre: str) -> Game:
@@ -569,3 +570,50 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
         ),
         "ended_at": game_state.ended_at.isoformat() if game_state.ended_at else None,
     }
+
+
+## Password Reset CRUD operations --------------------------------------------------------------------------------------------------------------
+
+
+def store_otp(db: Session, phone: str, otp: str, expires_at: datetime):
+    record = PasswordReset(mobile=phone, code=otp, expires_at=expires_at)
+    db.add(record)
+    db.commit()
+    return record
+
+
+def verify_otp(db: Session, phone: str, otp: str) -> bool:
+    record = (
+        db.query(PasswordReset)
+        .filter(
+            PasswordReset.mobile == phone,
+            PasswordReset.code == otp,
+            PasswordReset.used == False,
+            PasswordReset.expires_at > datetime.now(timezone.utc),
+        )
+        .first()
+    )
+    if record:
+        record.used = True
+        db.commit()
+        return True
+    return False
+
+
+def delete_expired_otps(db: Session):
+    db.query(PasswordReset).filter(
+        PasswordReset.expires_at < datetime.now(timezone.utc)
+    ).delete()
+    db.commit()
+
+
+def verify_and_reset_password(
+    db: Session, phone: str, otp: str, new_password: str
+) -> bool:
+    if verify_otp(db, phone, otp):
+        player = db.query(Players).filter(Players.player_mobile == phone).first()
+        if player:
+            player.hashed_password = hash_password(new_password)
+            db.commit()
+            return True
+    return False

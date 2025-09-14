@@ -26,13 +26,21 @@ def create_player_route(player: Player, db: Session = Depends(get_db)):
     """
     Create a new player in the game.
     """
-    game = create_player(
-        db,
-        player.player_name,
-        player.player_email,
-        player.player_mobile,
-        player.hashed_password,
-    )
+    existing_player = get_player_by_email(db, player.player_email)
+    if existing_player:
+        raise HTTPException(
+            status_code=400, detail="Player with this email already exists"
+        )
+    try:
+        game = create_player(
+            db,
+            player.player_name,
+            player.player_email,
+            player.player_mobile,
+            player.hashed_password,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to create player")
     return game
 
 
