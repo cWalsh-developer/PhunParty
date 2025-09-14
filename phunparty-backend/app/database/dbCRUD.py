@@ -572,6 +572,11 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
     }
 
 
+def get_player_by_phone(db: Session, phone: str) -> Players:
+    """Retrieve a player by their phone number."""
+    return db.query(Players).filter(Players.player_mobile == phone).first()
+
+
 ## Password Reset CRUD operations --------------------------------------------------------------------------------------------------------------
 
 
@@ -616,4 +621,13 @@ def verify_and_reset_password(
             player.hashed_password = hash_password(new_password)
             db.commit()
             return True
+    return False
+
+
+def update_password(db: Session, phone: str, new_password: str) -> bool:
+    player = db.query(Players).filter(Players.player_mobile == phone).first()
+    if player:
+        player.hashed_password = hash_password(new_password)
+        db.commit()
+        return True
     return False

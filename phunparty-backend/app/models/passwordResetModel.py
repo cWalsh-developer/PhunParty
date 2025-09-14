@@ -8,3 +8,8 @@ class PasswordResetRequest(BaseModel):
 class PasswordVerifyRequest(BaseModel):
     phone_number: str
     otp: str
+
+
+class PasswordUpdateRequest(BaseModel):
+    phone_number: str
+    new_password: str

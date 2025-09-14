@@ -1,11 +1,21 @@
 from fastapi import APIRouter, HTTPException, Depends
 from datetime import datetime, timedelta, timezone
 import random
-from app.database.dbCRUD import store_otp, verify_otp, delete_expired_otps
+from app.database.dbCRUD import (
+    store_otp,
+    verify_otp,
+    update_password as updatePassword,
+    get_player_by_phone,
+)
+from app.utils.generateJWT import create_access_token
 from app.dependencies import get_db
 from sqlalchemy.orm import Session
 from app.utils.sendSMS import send_sms, format_number_uk
-from app.models.passwordResetModel import PasswordResetRequest, PasswordVerifyRequest
+from app.models.passwordResetModel import (
+    PasswordResetRequest,
+    PasswordUpdateRequest,
+    PasswordVerifyRequest,
+)
 
 router = APIRouter()
 
@@ -47,3 +57,29 @@ def verify_otp_route(phone: PasswordVerifyRequest, db: Session = Depends(get_db)
     if not is_valid:
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
     return {"message": "OTP verified successfully"}
+
+
+@router.put("/update", tags=["Password Reset"])
+def update_password(phone: PasswordUpdateRequest, db: Session = Depends(get_db)):
+    is_updated = updatePassword(db, phone.phone_number, phone.new_password)
+    if not is_updated:
+        raise HTTPException(
+            status_code=400,
+            detail="Failed to update password. Please try again.",
+        )
+    player = get_player_by_phone(db, phone.phone_number)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+    access_token = create_access_token(
+        data={
+            "sub": player.player_id,
+            "email": player.player_email,
+            "name": player.player_name,
+            "mobile": player.player_mobile,
+        }
+    )
+    return {
+        "message": "Password updated successfully",
+        "access_token": access_token,
+        "token_type": "bearer",
+    }

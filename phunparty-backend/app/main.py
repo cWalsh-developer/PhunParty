@@ -256,6 +256,22 @@ def read_root():
                         "example": "POST http://localhost:8000/password-reset/request",
                     },
                 ],
+                "endpoints": [
+                    {
+                        "method": "POST",
+                        "endpoint": "/password-reset/verify",
+                        "description": "Verify the OTP received via SMS",
+                        "example": "POST http://localhost:8000/password-reset/verify",
+                    },
+                ],
+                "endpoints": [
+                    {
+                        "method": "PUT",
+                        "endpoint": "/password-reset/update",
+                        "description": "Update password using verified OTP",
+                        "example": "PUT http://localhost:8000/password-reset/update",
+                    },
+                ],
             },
         ],
     }
