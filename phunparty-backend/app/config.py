@@ -21,7 +21,12 @@ if not DatabaseURL:
     db_name = os.getenv("DB_Name")
     DatabaseURL = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
-engine = create_engine(DatabaseURL)
+engine = create_engine(
+    DatabaseURL,
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
