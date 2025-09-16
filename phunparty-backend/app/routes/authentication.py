@@ -25,9 +25,6 @@ def login_route(login_request: LoginRequest, db: Session = Depends(get_db)):
         access_token = create_access_token(
             data={
                 "sub": player.player_id,
-                "email": player.player_email,
-                "name": player.player_name,
-                "mobile": player.player_mobile,
             }
         )
         return {"access_token": access_token, "token_type": "bearer"}
