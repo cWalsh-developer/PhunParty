@@ -13,7 +13,7 @@ from app.utils.generateJWT import create_access_token
 ##from app.models.players_model import Players
 from typing import List
 from fastapi import APIRouter, HTTPException, Depends
-from app.models.players import Player
+from app.models.players import PlayerUpdate, Player
 from app.models.response_models import PlayerResponse
 from app.models.loginRequest import LoginRequest
 from sqlalchemy.orm import Session
@@ -79,7 +79,9 @@ def delete_player_route(player_id: str, db: Session = Depends(get_db)):
 
 
 @router.put("/{player_id}", tags=["Players"])
-def update_player_route(player_id: str, player: Player, db: Session = Depends(get_db)):
+def update_player_route(
+    player_id: str, player: PlayerUpdate, db: Session = Depends(get_db)
+):
     """
     Update the name of a player.
     """
