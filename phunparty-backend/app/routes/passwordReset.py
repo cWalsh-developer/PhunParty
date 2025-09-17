@@ -73,9 +73,6 @@ def update_password(phone: PasswordUpdateRequest, db: Session = Depends(get_db))
     access_token = create_access_token(
         data={
             "sub": player.player_id,
-            "email": player.player_email,
-            "name": player.player_name,
-            "mobile": player.player_mobile,
         }
     )
     return {
