@@ -8,9 +8,11 @@ from app.database.dbCRUD import get_player_by_phone, store_otp
 from app.database.dbCRUD import update_password as updatePassword
 from app.database.dbCRUD import verify_otp
 from app.dependencies import get_api_key, get_db
-from app.models.passwordResetModel import (PasswordResetRequest,
-                                           PasswordUpdateRequest,
-                                           PasswordVerifyRequest)
+from app.models.passwordResetModel import (
+    PasswordResetRequest,
+    PasswordUpdateRequest,
+    PasswordVerifyRequest,
+)
 from app.utils.generateJWT import create_access_token
 from app.utils.sendSMS import format_number_uk, send_sms
 

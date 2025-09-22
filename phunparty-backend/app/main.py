@@ -12,8 +12,15 @@ from app.models.questions_model import Questions
 from app.models.scores_model import Scores
 from app.models.session_player_assignment_model import SessionAssignment
 from app.models.session_question_assignment import SessionQuestionAssignment
-from app.routes import (authentication, game, game_logic, passwordReset,
-                        players, questions, scores)
+from app.routes import (
+    authentication,
+    game,
+    game_logic,
+    passwordReset,
+    players,
+    questions,
+    scores,
+)
 
 app = FastAPI(title="PhunParty Backend API")
 

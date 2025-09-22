@@ -5,14 +5,17 @@ All database operations are delegated to dbCRUD.py
 
 from sqlalchemy.orm import Session
 
-from app.database.dbCRUD import (advance_to_next_question,
-                                 count_responses_for_question,
-                                 create_player_response,
-                                 get_game_session_state,
-                                 get_number_of_players_in_session,
-                                 get_player_response, get_question_by_id,
-                                 update_game_state_waiting_status,
-                                 update_scores)
+from app.database.dbCRUD import (
+    advance_to_next_question,
+    count_responses_for_question,
+    create_player_response,
+    get_game_session_state,
+    get_number_of_players_in_session,
+    get_player_response,
+    get_question_by_id,
+    update_game_state_waiting_status,
+    update_scores,
+)
 
 
 def submit_player_answer(
