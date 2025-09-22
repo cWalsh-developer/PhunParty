@@ -12,9 +12,10 @@ from typing import List
 from fastapi import APIRouter, HTTPException, Depends
 from app.models.game import GameCreation, GameSessionCreation, GameJoinRequest
 from sqlalchemy.orm import Session
+from app.dependencies import get_api_key
 
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_api_key)])
 
 
 @router.post("/", tags=["Game"])

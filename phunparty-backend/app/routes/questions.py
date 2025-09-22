@@ -1,5 +1,5 @@
 from app.database.dbCRUD import get_question_by_id, submit_questions
-from app.dependencies import get_db
+from app.dependencies import get_db, get_api_key
 from app.models.questions_model import Questions
 from app.models.enums import DifficultyLevel
 from typing import List
@@ -11,7 +11,7 @@ from app.models.response_models import (
 from app.models.session_question_assignment import SessionQuestionAssignment
 from sqlalchemy.orm import Session
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_api_key)])
 
 
 @router.get("/{question_id}", tags=["Questions"])

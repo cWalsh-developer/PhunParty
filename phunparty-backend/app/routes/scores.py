@@ -1,5 +1,5 @@
 from app.database.dbCRUD import *
-from app.dependencies import get_db
+from app.dependencies import get_db, get_api_key
 from app.models.scores_model import Scores
 from app.models.response_models import ScoresResponseModel
 from fastapi import APIRouter, HTTPException, Depends
@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from typing import List
 
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_api_key)])
 
 
 @router.get(

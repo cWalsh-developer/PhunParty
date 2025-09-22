@@ -8,7 +8,7 @@ from app.database.dbCRUD import (
     get_player_by_phone,
 )
 from app.utils.generateJWT import create_access_token
-from app.dependencies import get_db
+from app.dependencies import get_db, get_api_key
 from sqlalchemy.orm import Session
 from app.utils.sendSMS import send_sms, format_number_uk
 from app.models.passwordResetModel import (
@@ -17,7 +17,7 @@ from app.models.passwordResetModel import (
     PasswordVerifyRequest,
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_api_key)])
 
 
 def generate_otp():

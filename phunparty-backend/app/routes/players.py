@@ -17,8 +17,9 @@ from app.models.players import PlayerUpdate, Player
 from app.models.response_models import PlayerResponse
 from app.models.loginRequest import LoginRequest
 from sqlalchemy.orm import Session
+from app.dependencies import get_api_key
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_api_key)])
 
 
 @router.post("/create", tags=["Players"])

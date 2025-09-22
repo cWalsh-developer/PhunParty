@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.dependencies import get_db
+from app.dependencies import get_db, get_api_key
 from app.logic.game_logic import submit_player_answer, get_current_question_for_session
 from app.database.dbCRUD import get_current_question_details
 from app.models.response_models import SubmitAnswerRequest, GameStatusResponse
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_api_key)])
 
 
 @router.post("/submit-answer", tags=["Game Logic"])
