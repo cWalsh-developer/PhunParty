@@ -2,7 +2,7 @@ name: Mobile App CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ mobile-app ]
     paths: [ 'mobile-app/**' ]
   pull_request:
     branches: [ main ]
