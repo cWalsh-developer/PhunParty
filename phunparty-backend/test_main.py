@@ -8,22 +8,22 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 # Test environment variables
 test_env_vars = {
-    "DB_User": "test_user",
-    "DB_Password": "test_password",
-    "DB_Host": "localhost",
-    "DB_Port": "5432",
-    "DB_Name": "test_db",
+    "DB_USER": "test_user",
+    "DB_PASSWORD": "test_password",
+    "DB_HOST": "localhost",
+    "DB_PORT": "5432",
+    "DB_NAME": "test_db",
 }
 
 
 def test_environment_variables():
     """Test that environment variables are properly set."""
     with patch.dict(os.environ, test_env_vars):
-        assert os.getenv("DB_User") == "test_user"
-        assert os.getenv("DB_Password") == "test_password"
-        assert os.getenv("DB_Host") == "localhost"
-        assert os.getenv("DB_Port") == "5432"
-        assert os.getenv("DB_Name") == "test_db"
+        assert os.getenv("DB_USER") == "test_user"
+        assert os.getenv("DB_PASSWORD") == "test_password"
+        assert os.getenv("DB_HOST") == "localhost"
+        assert os.getenv("DB_PORT") == "5432"
+        assert os.getenv("DB_NAME") == "test_db"
 
 
 def test_database_url_construction():
