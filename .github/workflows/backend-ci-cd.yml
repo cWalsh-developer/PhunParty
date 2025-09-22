@@ -3,10 +3,10 @@ name: Backend CI/CD
 on:
     push:
         branches: [main, develop]
-        paths: ["phunparty-backend/**"]
+        paths: ["phunparty-backend/**", ".github/workflows/backend-ci-cd.yml"]
     pull_request:
         branches: [main]
-        paths: ["phunparty-backend/**"]
+        paths: ["phunparty-backend/**", ".github/workflows/backend-ci-cd.yml"]
 
 jobs:
     test:
