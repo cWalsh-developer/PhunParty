@@ -41,11 +41,13 @@ jobs:
           ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
 
       - name: Rsync code to server
+        working-directory: PhunParty
         run: |
           rsync -az --delete \
-            --exclude ".git" \
-            --exclude ".github" \
-            PhunParty/ "$SSH_USER@$SSH_HOST:$TARGET_DIR/"
+          --exclude ".git" \
+          --exclude ".github" \
+          ./ "$SSH_USER@$SSH_HOST:$TARGET_DIR/"
+
 
       - name: Install backend deps on server
         run: |
