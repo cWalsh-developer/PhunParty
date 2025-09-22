@@ -3,7 +3,8 @@ from sqlalchemy.orm import Session
 
 from app.database.dbCRUD import get_current_question_details
 from app.dependencies import get_api_key, get_db
-from app.logic.game_logic import get_current_question_for_session, submit_player_answer
+from app.logic.game_logic import (get_current_question_for_session,
+                                  submit_player_answer)
 from app.models.response_models import GameStatusResponse, SubmitAnswerRequest
 
 router = APIRouter(dependencies=[Depends(get_api_key)])

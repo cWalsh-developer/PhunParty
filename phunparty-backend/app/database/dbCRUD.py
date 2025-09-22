@@ -14,15 +14,10 @@ from app.models.scores_model import Scores
 from app.models.session_player_assignment_model import SessionAssignment
 from app.models.session_question_assignment import SessionQuestionAssignment
 from app.utils.hash_password import hash_password
-from app.utils.id_generator import (
-    generate_assignment_id,
-    generate_game_code,
-    generate_player_id,
-    generate_question_id,
-    generate_response_id,
-    generate_score_id,
-    generate_session_code,
-)
+from app.utils.id_generator import (generate_assignment_id, generate_game_code,
+                                    generate_player_id, generate_question_id,
+                                    generate_response_id, generate_score_id,
+                                    generate_session_code)
 
 
 def create_game(db: Session, rules: str, genre: str) -> Game:

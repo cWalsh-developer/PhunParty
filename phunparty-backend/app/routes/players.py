@@ -4,14 +4,9 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.database.dbCRUD import (
-    create_player,
-    delete_player,
-    get_all_players,
-    get_player_by_email,
-    get_player_by_ID,
-    update_player,
-)
+from app.database.dbCRUD import (create_player, delete_player, get_all_players,
+                                 get_player_by_email, get_player_by_ID,
+                                 update_player)
 from app.dependencies import get_api_key, get_db
 from app.models.loginRequest import LoginRequest
 from app.models.players import Player, PlayerUpdate
