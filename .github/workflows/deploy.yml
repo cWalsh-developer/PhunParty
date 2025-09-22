@@ -1,81 +1,54 @@
-name: Deploy FastAPI to Linode
+name: Deploy to Production
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "PhunParty/**"
-      - ".github/workflows/deploy.yml"
-  workflow_dispatch:
-
-concurrency:
-  group: deploy-phun-api
-  cancel-in-progress: true
-
-permissions:
-  contents: read
+    push:
+        branches: [main]
+    workflow_dispatch:
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
+    deploy:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Linode Deploy
+              uses: appleboy/ssh-action@v0.1.9
+              with:
+                  host: ${{ secrets.SSH_HOST }}
+                  username: ${{ secrets.SSH_USER }}
+                  key: ${{ secrets.SSH_KEY }}
+                  port: ${{ secrets.SSH_PORT }}
+                  script_stop: true
+                  script: |
+                      set -euo pipefail
+                      TARGET_DIR=/home/jay/apps/phun-api/PhunParty
+                      BRANCH=main
 
-    env:
-      SSH_HOST: ${{ secrets.SSH_HOST }}
-      SSH_PORT: ${{ secrets.SSH_PORT }}
-      SSH_USER: ${{ secrets.SSH_USER }}
-      TARGET_DIR: ${{ secrets.TARGET_DIR }}
-      PYTHON: ${{ secrets.PYTHON }}
-      PIP: ${{ secrets.PIP }}
+                      # Ensure repo present and up-to-date
+                      if [ -d "$TARGET_DIR/.git" ]; then
+                        cd "$TARGET_DIR"
+                        git fetch --prune --tags
+                        git checkout "$BRANCH"
+                        git reset --hard "origin/$BRANCH"
+                      else
+                        mkdir -p "$TARGET_DIR"
+                        git clone --depth=1 -b "$BRANCH" "git@github.com:${{ github.repository }}.git" "$TARGET_DIR"
+                        cd "$TARGET_DIR"
+                      fi
 
-    steps:
-      - name: Checkout
-      - uses: actions/checkout@v4
+                      # Python deps in venv
+                      [ -x .venv/bin/python ] || python3 -m venv .venv
+                      . .venv/bin/activate
+                      if [ -f phunparty-backend/requirements.txt ]; then
+                        pip install --upgrade pip wheel
+                        pip install -r phunparty-backend/requirements.txt
+                      fi
 
-      - name: Set up SSH
-        run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          # trust host key
-          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+                      # Optional: run DB migrations if you use Alembic
+                      if [ -f phunparty-backend/alembic.ini ]; then
+                        cd phunparty-backend
+                        alembic upgrade head
+                        cd ..
+                      fi
 
-      - name: Rsync code to server
-        run: |
-          rsync -az --delete \
-            --exclude ".git" \
-            --exclude ".github" \
-            PhunParty/ "$SSH_USER@$SSH_HOST:$TARGET_DIR/"
-
-      - name: Install backend deps on server
-        run: |
-          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" bash -lc '
-            set -e
-            cd "$TARGET_DIR"
-            # ensure venv exists (idempotent)
-            [ -x .venv/bin/python ] || python3 -m venv .venv
-            . .venv/bin/activate
-            if [ -f phunparty-backend/requirements.txt ]; then
-              pip install --upgrade pip wheel
-              pip install -r phunparty-backend/requirements.txt
-            fi
-          '
-
-      - name: Run Alembic (if present)
-        run: |
-          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" bash -lc '
-            set -e
-            cd "$TARGET_DIR"
-            . .venv/bin/activate
-            if [ -f phunparty-backend/alembic.ini ]; then
-              cd phunparty-backend
-              alembic upgrade head
-            fi
-          '
-
-      - name: Restart systemd service
-        run: |
-          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" bash -lc '
-            sudo systemctl restart phun-api
-            sudo systemctl is-active phun-api
-          '
+                      # Restart FastAPI service
+                      sudo systemctl restart phun-api
+                      sudo systemctl is-active phun-api
