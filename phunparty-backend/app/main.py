@@ -1,23 +1,26 @@
-from fastapi import FastAPI, Depends
+from fastapi import Depends, FastAPI
 from sqlalchemy.orm import Session
-from app.dependencies import get_db
+
 from app.config import Base, engine
+from app.dependencies import get_db
 from app.models.game_model import Game
-from app.models.players_model import Players
 from app.models.game_session_model import GameSession
-from app.models.session_player_assignment_model import SessionAssignment
-from app.models.questions_model import Questions
-from app.models.session_question_assignment import SessionQuestionAssignment
-from app.models.scores_model import Scores
-from app.models.game_state_models import PlayerResponse, GameSessionState
+from app.models.game_state_models import GameSessionState, PlayerResponse
 from app.models.passwordReset import PasswordReset
-from app.routes import game
-from app.routes import players
-from app.routes import questions
-from app.routes import scores
-from app.routes import game_logic
-from app.routes import authentication
-from app.routes import passwordReset
+from app.models.players_model import Players
+from app.models.questions_model import Questions
+from app.models.scores_model import Scores
+from app.models.session_player_assignment_model import SessionAssignment
+from app.models.session_question_assignment import SessionQuestionAssignment
+from app.routes import (
+    authentication,
+    game,
+    game_logic,
+    passwordReset,
+    players,
+    questions,
+    scores,
+)
 
 app = FastAPI(title="PhunParty Backend API")
 

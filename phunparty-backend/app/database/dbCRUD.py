@@ -1,26 +1,28 @@
+from datetime import datetime, timezone
+
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
+
 from app.models.game_model import Game
 from app.models.game_session_model import GameSession
-from app.models.session_player_assignment_model import SessionAssignment
-from app.models.session_question_assignment import SessionQuestionAssignment
-from app.models.players_model import Players
+from app.models.game_state_models import GameSessionState, PlayerResponse
 from app.models.passwordReset import PasswordReset
 from app.models.players import Player
+from app.models.players_model import Players
 from app.models.questions_model import Questions
 from app.models.scores_model import Scores
-from app.models.game_state_models import PlayerResponse, GameSessionState
+from app.models.session_player_assignment_model import SessionAssignment
+from app.models.session_question_assignment import SessionQuestionAssignment
+from app.utils.hash_password import hash_password
 from app.utils.id_generator import (
+    generate_assignment_id,
     generate_game_code,
-    generate_session_code,
     generate_player_id,
     generate_question_id,
     generate_response_id,
     generate_score_id,
-    generate_assignment_id,
+    generate_session_code,
 )
-from app.utils.hash_password import hash_password
-from datetime import datetime, timezone
 
 
 def create_game(db: Session, rules: str, genre: str) -> Game:

@@ -1,19 +1,16 @@
-from app.database.dbCRUD import (
-    create_game as cg,
-    get_game_by_code,
-    get_all_games as gag,
-    join_game,
-    create_game_session,
-)
-from app.dependencies import get_db
-from app.models.response_models import GameResponse
-from app.models.game_model import Game
 from typing import List
-from fastapi import APIRouter, HTTPException, Depends
-from app.models.game import GameCreation, GameSessionCreation, GameJoinRequest
-from sqlalchemy.orm import Session
-from app.dependencies import get_api_key
 
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.database.dbCRUD import create_game as cg
+from app.database.dbCRUD import create_game_session
+from app.database.dbCRUD import get_all_games as gag
+from app.database.dbCRUD import get_game_by_code, join_game
+from app.dependencies import get_api_key, get_db
+from app.models.game import GameCreation, GameJoinRequest, GameSessionCreation
+from app.models.game_model import Game
+from app.models.response_models import GameResponse
 
 router = APIRouter(dependencies=[Depends(get_api_key)])
 

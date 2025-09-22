@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from sqlalchemy import Enum
+
 from app.models.enums import DifficultyLevel
 
 

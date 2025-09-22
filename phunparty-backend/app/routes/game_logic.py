@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.dependencies import get_db, get_api_key
-from app.logic.game_logic import submit_player_answer, get_current_question_for_session
+
 from app.database.dbCRUD import get_current_question_details
-from app.models.response_models import SubmitAnswerRequest, GameStatusResponse
+from app.dependencies import get_api_key, get_db
+from app.logic.game_logic import get_current_question_for_session, submit_player_answer
+from app.models.response_models import GameStatusResponse, SubmitAnswerRequest
 
 router = APIRouter(dependencies=[Depends(get_api_key)])
 

@@ -3,8 +3,8 @@ Utility functions for generating unique identifiers across the application.
 This module provides consistent ID generation to avoid code duplication.
 """
 
-import string
 import random
+import string
 import uuid
 
 
