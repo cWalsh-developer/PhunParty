@@ -22,10 +22,6 @@ jobs:
                   filters: |
                       backend:
                         - 'phunparty-backend/**'
-                      web:
-                        - 'web-host-ui/**'
-                      mobile:
-                        - 'mobile-app/**'
 
     backend-checks:
         needs: detect-changes
