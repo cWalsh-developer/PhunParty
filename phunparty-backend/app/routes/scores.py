@@ -1,11 +1,12 @@
-from app.database.dbCRUD import *
-from app.dependencies import get_db, get_api_key
-from app.models.scores_model import Scores
-from app.models.response_models import ScoresResponseModel
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.orm import Session
 from typing import List
 
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.database.dbCRUD import *
+from app.dependencies import get_api_key, get_db
+from app.models.response_models import ScoresResponseModel
+from app.models.scores_model import Scores
 
 router = APIRouter(dependencies=[Depends(get_api_key)])
 

@@ -1,9 +1,10 @@
-from dotenv import load_dotenv
 import os
 from pathlib import Path
+
 import psycopg2
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 # Load environment variables from credentials.env file (for local development)
 env_path = Path(__file__).resolve().parents[1] / "credentials.env"

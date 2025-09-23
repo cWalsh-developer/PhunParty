@@ -1,12 +1,11 @@
-from app.database.dbCRUD import (
-    get_player_by_email,
-)
-from app.dependencies import get_db
-from app.utils.hash_password import verify_password
-from app.utils.generateJWT import create_access_token
-from fastapi import APIRouter, HTTPException, Depends
-from app.models.loginRequest import LoginRequest
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+
+from app.database.dbCRUD import get_player_by_email
+from app.dependencies import get_db
+from app.models.loginRequest import LoginRequest
+from app.utils.generateJWT import create_access_token
+from app.utils.hash_password import verify_password
 
 router = APIRouter()
 
