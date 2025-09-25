@@ -17,6 +17,17 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
+# DiceBear avatar styles for generated avatars
+DICEBEAR_STYLES = [
+    "adventurer",
+    "avataaars",
+    "big-ears",
+    "bottts",
+    "identicon",
+    "initials",
+    "personas",
+]
+
 router = APIRouter(dependencies=[Depends(get_api_key)])
 
 
@@ -137,35 +148,31 @@ async def delete_player_photo(player_id: str, db: Session = Depends(get_db)):
 
 @router.post("/avatar/{player_id}", tags=["Photos"])
 async def set_player_avatar(
-    player_id: str, avatar_name: str, db: Session = Depends(get_db)
+    player_id: str,
+    avatar_style: str,
+    avatar_seed: str = "default",
+    db: Session = Depends(get_db),
 ):
     """
-    Set a preset avatar for a player.
+    Set a DiceBear generated avatar for a player.
     """
     # Check if player exists
     player = get_player_by_ID(db, player_id)
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    # List of available avatars
-    available_avatars = [
-        "avatar1.png",
-        "avatar2.png",
-        "avatar3.png",
-        "avatar4.png",
-        "avatar5.png",
-        "avatar6.png",
-    ]
-
-    if avatar_name not in available_avatars:
+    # Validate avatar style
+    if avatar_style not in DICEBEAR_STYLES:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid avatar. Available: {', '.join(available_avatars)}",
+            detail=f"Invalid avatar style. Available: {', '.join(DICEBEAR_STYLES)}",
         )
 
     try:
-        # Set avatar URL
-        avatar_url = f"/avatars/{avatar_name}"
+        # Generate DiceBear avatar URL
+        avatar_url = (
+            f"https://api.dicebear.com/7.x/{avatar_style}/svg?seed={avatar_seed}"
+        )
 
         # Update player in database
         from app.database.dbCRUD import update_player_photo
@@ -175,7 +182,8 @@ async def set_player_avatar(
         return {
             "message": "Avatar set successfully",
             "photo_url": avatar_url,
-            "avatar_name": avatar_name,
+            "avatar_style": avatar_style,
+            "avatar_seed": avatar_seed,
         }
 
     except Exception as e:
@@ -185,14 +193,57 @@ async def set_player_avatar(
 @router.get("/avatars", tags=["Photos"])
 async def get_available_avatars():
     """
-    Get list of available preset avatars.
+    Get list of available DiceBear generated avatars.
     """
-    avatars = [
-        {"name": "avatar1.png", "url": "/avatars/avatar1.png"},
-        {"name": "avatar2.png", "url": "/avatars/avatar2.png"},
-        {"name": "avatar3.png", "url": "/avatars/avatar3.png"},
-        {"name": "avatar4.png", "url": "/avatars/avatar4.png"},
-        {"name": "avatar5.png", "url": "/avatars/avatar5.png"},
-        {"name": "avatar6.png", "url": "/avatars/avatar6.png"},
-    ]
-    return {"avatars": avatars}
+    avatars = []
+    for style in DICEBEAR_STYLES:
+        # Generate 20 different avatars per style using numeric seeds
+        for seed in range(1, 21):
+            avatars.append(
+                {
+                    "name": f"{style}-{seed}",
+                    "style": style,
+                    "seed": str(seed),
+                    "url": f"https://api.dicebear.com/7.x/{style}/svg?seed={seed}",
+                    "preview_url": f"https://api.dicebear.com/7.x/{style}/svg?seed={seed}&size=64",  # Small preview
+                }
+            )
+
+    return {"avatars": avatars, "total_count": len(avatars), "styles": DICEBEAR_STYLES}
+
+
+@router.get("/avatars/styles", tags=["Photos"])
+async def get_avatar_styles():
+    """
+    Get available avatar styles only.
+    """
+    return {
+        "styles": [
+            {
+                "name": style,
+                "example_url": f"https://api.dicebear.com/7.x/{style}/svg?seed=example",
+                "description": f"DiceBear {style} style avatars",
+            }
+            for style in DICEBEAR_STYLES
+        ]
+    }
+
+
+@router.get("/avatars/generate/{style}", tags=["Photos"])
+async def generate_avatar_preview(style: str, seed: str = "preview", size: int = 128):
+    """
+    Generate a preview of an avatar with specific style and seed.
+    """
+    if style not in DICEBEAR_STYLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid avatar style. Available: {', '.join(DICEBEAR_STYLES)}",
+        )
+
+    # Validate size (DiceBear supports sizes up to 512)
+    if size < 16 or size > 512:
+        size = 128
+
+    avatar_url = f"https://api.dicebear.com/7.x/{style}/svg?seed={seed}&size={size}"
+
+    return {"style": style, "seed": seed, "size": size, "url": avatar_url}
