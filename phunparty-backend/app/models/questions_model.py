@@ -1,4 +1,5 @@
-from sqlalchemy import Column, String, Enum
+from sqlalchemy import Column, Enum, String
+
 from app.config import Base
 from app.models.enums import DifficultyLevel
 

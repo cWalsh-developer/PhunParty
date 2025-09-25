@@ -1,23 +1,23 @@
-from app.database.dbCRUD import (
-    create_player,
-    get_player_by_ID,
-    get_all_players,
-    delete_player,
-    update_player,
-    get_player_by_email,
-)
-from app.dependencies import get_db
-from app.utils.hash_password import verify_password
-from app.utils.generateJWT import create_access_token
-
 ##from app.models.players_model import Players
 from typing import List
-from fastapi import APIRouter, HTTPException, Depends
-from app.models.players import PlayerUpdate, Player
-from app.models.response_models import PlayerResponse
-from app.models.loginRequest import LoginRequest
+
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.dependencies import get_api_key
+
+from app.database.dbCRUD import (
+    create_player,
+    delete_player,
+    get_all_players,
+    get_player_by_email,
+    get_player_by_ID,
+    update_player,
+)
+from app.dependencies import get_api_key, get_db
+from app.models.loginRequest import LoginRequest
+from app.models.players import Player, PlayerUpdate
+from app.models.response_models import PlayerResponse
+from app.utils.generateJWT import create_access_token
+from app.utils.hash_password import verify_password
 
 router = APIRouter(dependencies=[Depends(get_api_key)])
 

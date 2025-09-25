@@ -1,7 +1,7 @@
 import os
 import sys
-from unittest.mock import patch, MagicMock, Mock
 from pathlib import Path
+from unittest.mock import MagicMock, Mock, patch
 
 # Add the current directory to Python path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -109,8 +109,9 @@ def test_fastapi_basic_functionality():
                         mock_get_db.return_value = mock_db_session
 
                         try:
-                            from app.main import app
                             from fastapi.testclient import TestClient
+
+                            from app.main import app
 
                             client = TestClient(app)
 

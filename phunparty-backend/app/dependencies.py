@@ -1,9 +1,11 @@
-from app.config import SessionLocal
-from sqlalchemy.orm import Session
+import os
+
+from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, Security
 from fastapi.security.api_key import APIKeyHeader
-import os
-from dotenv import load_dotenv
+from sqlalchemy.orm import Session
+
+from app.config import SessionLocal
 
 load_dotenv("credentials.env")
 

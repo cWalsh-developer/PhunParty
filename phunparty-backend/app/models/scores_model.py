@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Enum, String, ForeignKey, Integer
+from sqlalchemy import Column, Enum, ForeignKey, Integer, String
+
 from app.config import Base
 from app.models.enums import ResultType
 
