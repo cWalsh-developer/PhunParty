@@ -151,7 +151,7 @@ async def set_player_avatar(
     try:
         # Generate DiceBear avatar URL
         avatar_url = (
-            f"https://api.dicebear.com/7.x/{avatar_style}/svg?seed={avatar_seed}"
+            f"https://api.dicebear.com/7.x/{avatar_style}/png?seed={avatar_seed}"
         )
 
         # Update player in database
@@ -184,8 +184,8 @@ async def get_available_avatars():
                     "name": f"{style}-{seed}",
                     "style": style,
                     "seed": str(seed),
-                    "url": f"https://api.dicebear.com/7.x/{style}/svg?seed={seed}",
-                    "preview_url": f"https://api.dicebear.com/7.x/{style}/svg?seed={seed}&size=64",  # Small preview
+                    "url": f"https://api.dicebear.com/7.x/{style}/png?seed={seed}",
+                    "preview_url": f"https://api.dicebear.com/7.x/{style}/png?seed={seed}&size=64",  # Small preview
                 }
             )
 
@@ -201,7 +201,7 @@ async def get_avatar_styles():
         "styles": [
             {
                 "name": style,
-                "example_url": f"https://api.dicebear.com/7.x/{style}/svg?seed=example",
+                "example_url": f"https://api.dicebear.com/7.x/{style}/png?seed=example",
                 "description": f"DiceBear {style} style avatars",
             }
             for style in DICEBEAR_STYLES
@@ -224,7 +224,7 @@ async def generate_avatar_preview(style: str, seed: str = "preview", size: int =
     if size < 16 or size > 512:
         size = 128
 
-    avatar_url = f"https://api.dicebear.com/7.x/{style}/svg?seed={seed}&size={size}"
+    avatar_url = f"https://api.dicebear.com/7.x/{style}/png?seed={seed}&size={size}"
 
     return {"style": style, "seed": seed, "size": size, "url": avatar_url}
 
