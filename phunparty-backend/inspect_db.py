@@ -5,6 +5,7 @@ Run this to check your database tables and the new photo column
 
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
