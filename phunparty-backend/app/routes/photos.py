@@ -94,26 +94,6 @@ async def upload_player_photo(
         raise HTTPException(status_code=500, detail=f"Failed to upload photo: {str(e)}")
 
 
-@router.get("/{filename}", tags=["Photos"])
-async def get_photo(filename: str):
-    """
-    Serve a photo file.
-    """
-    file_path = UPLOAD_DIR / filename
-
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Photo not found")
-
-    # You might want to use FileResponse here for better performance
-    from fastapi.responses import FileResponse
-
-    return FileResponse(
-        path=file_path,
-        media_type="image/*",
-        headers={"Cache-Control": "max-age=3600"},  # Cache for 1 hour
-    )
-
-
 @router.delete("/{player_id}/photo", tags=["Photos"])
 async def delete_player_photo(player_id: str, db: Session = Depends(get_db)):
     """
@@ -247,3 +227,23 @@ async def generate_avatar_preview(style: str, seed: str = "preview", size: int =
     avatar_url = f"https://api.dicebear.com/7.x/{style}/svg?seed={seed}&size={size}"
 
     return {"style": style, "seed": seed, "size": size, "url": avatar_url}
+
+
+@router.get("/{filename}", tags=["Photos"])
+async def get_photo(filename: str):
+    """
+    Serve a photo file.
+    """
+    file_path = UPLOAD_DIR / filename
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Photo not found")
+
+    # You might want to use FileResponse here for better performance
+    from fastapi.responses import FileResponse
+
+    return FileResponse(
+        path=file_path,
+        media_type="image/*",
+        headers={"Cache-Control": "max-age=3600"},  # Cache for 1 hour
+    )
