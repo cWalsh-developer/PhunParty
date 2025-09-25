@@ -155,10 +155,6 @@ async def upload_player_photo(
 
         update_player_photo(db, player_id, photo_url)
 
-        # After successful database update, clean up any remaining old photos
-        # This catches any photos that might have been missed by the safe cleanup
-        cleanup_old_player_photos(player_id, UPLOAD_DIR)
-
         return {
             "message": "Photo uploaded successfully",
             "photo_url": photo_url,
