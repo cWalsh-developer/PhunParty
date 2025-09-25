@@ -8,6 +8,7 @@ class Player(BaseModel):
     player_email: str
     hashed_password: str
     player_mobile: Optional[str] = None
+    profile_photo_url: Optional[str] = None
 
 
 class PlayerUpdate(BaseModel):
@@ -16,3 +17,4 @@ class PlayerUpdate(BaseModel):
     player_email: Optional[str] = None
     hashed_password: Optional[str] = None  # Now optional
     player_mobile: Optional[str] = None
+    profile_photo_url: Optional[str] = None

@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from app.dependencies import get_db
 from app.config import Base, engine
@@ -18,6 +19,7 @@ from app.routes import scores
 from app.routes import game_logic
 from app.routes import authentication
 from app.routes import passwordReset
+from app.routes import photos
 
 app = FastAPI(title="PhunParty Backend API")
 
@@ -84,6 +86,20 @@ app.include_router(
 app.include_router(
     passwordReset.router, prefix="/password-reset", tags=["Password Reset"]
 )
+
+app.include_router(
+    photos.router,
+    prefix="/photos",
+    tags=[
+        {
+            "name": "Photos",
+            "description": "Endpoints for managing player profile photos",
+        }
+    ],
+)
+
+# Mount static files for serving photos
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # Initialize database tables
 try:

@@ -9,6 +9,7 @@ class Players(Base):
     player_email = Column(String, nullable=False, unique=True)
     player_mobile = Column(String, nullable=True)
     hashed_password = Column(String, nullable=False)
+    profile_photo_url = Column(String, nullable=True)
     active_game_code = Column(
         String, ForeignKey("game_sessions.session_code"), nullable=True
     )

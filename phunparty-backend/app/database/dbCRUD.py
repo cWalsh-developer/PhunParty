@@ -214,9 +214,26 @@ def update_player(db: Session, player_id: str, player: Player) -> Players:
         new_player.player_name = player.player_name
         new_player.player_email = player.player_email
         new_player.player_mobile = player.player_mobile
+        if (
+            hasattr(player, "profile_photo_url")
+            and player.profile_photo_url is not None
+        ):
+            new_player.profile_photo_url = player.profile_photo_url
         db.commit()
         db.refresh(new_player)
     return new_player
+
+
+def update_player_photo(db: Session, player_id: str, photo_url: str = None) -> Players:
+    """Update a player's profile photo URL."""
+    player = get_player_by_ID(db, player_id)
+    if not player:
+        raise ValueError("Player not found")
+
+    player.profile_photo_url = photo_url
+    db.commit()
+    db.refresh(player)
+    return player
 
 
 def get_number_of_players_in_session(db: Session, session_code: str) -> int:

@@ -14,6 +14,7 @@ class PlayerResponse(BaseModel):
     player_name: str
     player_email: str
     player_mobile: str = None
+    profile_photo_url: Optional[str] = None
     active_game_code: Optional[str] = None
 
 
