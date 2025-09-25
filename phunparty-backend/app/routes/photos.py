@@ -133,9 +133,7 @@ async def upload_player_photo(
     if len(file_content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="File too large. Max size: 5MB")
 
-    # Clean up old photos for this player BEFORE uploading new one
-    # Use safe cleanup to preserve current photo in case of upload failure
-    cleanup_old_player_photos_safe(player_id, player.profile_photo_url, UPLOAD_DIR)
+    cleanup_old_player_photos(player_id, UPLOAD_DIR)
 
     # Generate unique filename
     file_extension = Path(file.filename).suffix.lower()
