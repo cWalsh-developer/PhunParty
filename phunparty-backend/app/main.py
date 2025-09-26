@@ -23,6 +23,7 @@ from app.routes import (
     questions,
     scores,
 )
+from app.websockets import routes as websocket_routes
 
 app = FastAPI(title="PhunParty Backend API")
 
@@ -97,6 +98,16 @@ app.include_router(
         {
             "name": "Photos",
             "description": "Endpoints for managing player profile photos",
+        }
+    ],
+)
+
+app.include_router(
+    websocket_routes.router,
+    tags=[
+        {
+            "name": "WebSockets",
+            "description": "WebSocket endpoints for real-time game functionality",
         }
     ],
 )

@@ -1,0 +1,240 @@
+"""
+WebSocket Connection Manager for PhunParty Game Sessions
+Handles real-time communication between web UI and mobile app
+"""
+
+import json
+import logging
+from typing import Dict, List, Set, Optional, Any
+from fastapi import WebSocket, WebSocketDisconnect
+from datetime import datetime
+import asyncio
+
+
+logger = logging.getLogger(__name__)
+
+
+class ConnectionManager:
+    """Manages WebSocket connections for game sessions"""
+
+    def __init__(self):
+        # session_code -> {websocket_id: {websocket, client_type, player_info}}
+        self.active_connections: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # websocket_id -> {session_code, websocket}
+        self.websocket_registry: Dict[str, Dict[str, Any]] = {}
+
+    def generate_websocket_id(self, websocket: WebSocket) -> str:
+        """Generate unique ID for WebSocket connection"""
+        return f"ws_{id(websocket)}_{datetime.now().timestamp()}"
+
+    async def connect(
+        self,
+        websocket: WebSocket,
+        session_code: str,
+        client_type: str = "web",  # "web" or "mobile"
+        player_id: Optional[str] = None,
+        player_name: Optional[str] = None,
+        player_photo: Optional[str] = None,
+    ):
+        """Connect a client to a game session"""
+        await websocket.accept()
+
+        ws_id = self.generate_websocket_id(websocket)
+
+        # Initialize session if it doesn't exist
+        if session_code not in self.active_connections:
+            self.active_connections[session_code] = {}
+
+        # Store connection info
+        connection_info = {
+            "websocket": websocket,
+            "client_type": client_type,
+            "connected_at": datetime.now().isoformat(),
+            "player_id": player_id,
+            "player_name": player_name,
+            "player_photo": player_photo,
+        }
+
+        self.active_connections[session_code][ws_id] = connection_info
+        self.websocket_registry[ws_id] = {
+            "session_code": session_code,
+            "websocket": websocket,
+        }
+
+        logger.info(f"Client connected: {client_type} to session {session_code}")
+
+        # Notify other clients about new connection (if mobile player joining)
+        if client_type == "mobile" and player_name:
+            await self.broadcast_to_session(
+                session_code,
+                {
+                    "type": "player_joined",
+                    "data": {
+                        "player_id": player_id,
+                        "player_name": player_name,
+                        "player_photo": player_photo,
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                },
+                exclude_client_types=["mobile"],  # Only notify web clients
+            )
+
+    def disconnect(self, websocket: WebSocket):
+        """Disconnect a client"""
+        ws_id = None
+        session_code = None
+        client_info = None
+
+        # Find the websocket in registry
+        for ws_id, info in self.websocket_registry.items():
+            if info["websocket"] == websocket:
+                session_code = info["session_code"]
+                client_info = self.active_connections[session_code][ws_id]
+                break
+
+        if ws_id and session_code:
+            # Remove from connections
+            if session_code in self.active_connections:
+                if ws_id in self.active_connections[session_code]:
+                    del self.active_connections[session_code][ws_id]
+
+                # Clean up empty session
+                if not self.active_connections[session_code]:
+                    del self.active_connections[session_code]
+
+            # Remove from registry
+            if ws_id in self.websocket_registry:
+                del self.websocket_registry[ws_id]
+
+            logger.info(f"Client disconnected from session {session_code}")
+
+            # Notify other clients if a mobile player left
+            if (
+                client_info
+                and client_info.get("client_type") == "mobile"
+                and client_info.get("player_name")
+            ):
+                asyncio.create_task(
+                    self.broadcast_to_session(
+                        session_code,
+                        {
+                            "type": "player_left",
+                            "data": {
+                                "player_id": client_info.get("player_id"),
+                                "player_name": client_info.get("player_name"),
+                                "timestamp": datetime.now().isoformat(),
+                            },
+                        },
+                        exclude_client_types=["mobile"],
+                    )
+                )
+
+    async def send_personal_message(self, message: dict, websocket: WebSocket):
+        """Send message to specific WebSocket"""
+        try:
+            await websocket.send_text(
+                json.dumps({**message, "timestamp": datetime.now().timestamp()})
+            )
+        except Exception as e:
+            logger.error(f"Error sending personal message: {e}")
+
+    async def broadcast_to_session(
+        self,
+        session_code: str,
+        message: dict,
+        exclude_websockets: Optional[List[WebSocket]] = None,
+        only_client_types: Optional[List[str]] = None,
+        exclude_client_types: Optional[List[str]] = None,
+    ):
+        """Broadcast message to all clients in a session with filtering options"""
+        if session_code not in self.active_connections:
+            return
+
+        exclude_websockets = exclude_websockets or []
+        message_with_timestamp = {**message, "timestamp": datetime.now().timestamp()}
+
+        disconnected_websockets = []
+
+        for ws_id, connection_info in self.active_connections[session_code].items():
+            websocket = connection_info["websocket"]
+            client_type = connection_info["client_type"]
+
+            # Skip excluded websockets
+            if websocket in exclude_websockets:
+                continue
+
+            # Filter by client type if specified
+            if only_client_types and client_type not in only_client_types:
+                continue
+
+            if exclude_client_types and client_type in exclude_client_types:
+                continue
+
+            try:
+                await websocket.send_text(json.dumps(message_with_timestamp))
+            except WebSocketDisconnect:
+                disconnected_websockets.append(websocket)
+            except Exception as e:
+                logger.error(f"Error broadcasting to websocket: {e}")
+                disconnected_websockets.append(websocket)
+
+        # Clean up disconnected websockets
+        for ws in disconnected_websockets:
+            self.disconnect(ws)
+
+    async def broadcast_to_mobile_players(self, session_code: str, message: dict):
+        """Broadcast message only to mobile clients"""
+        await self.broadcast_to_session(
+            session_code, message, only_client_types=["mobile"]
+        )
+
+    async def broadcast_to_web_clients(self, session_code: str, message: dict):
+        """Broadcast message only to web clients"""
+        await self.broadcast_to_session(
+            session_code, message, only_client_types=["web"]
+        )
+
+    def get_session_connections(self, session_code: str) -> Dict[str, Dict[str, Any]]:
+        """Get all connections for a session"""
+        return self.active_connections.get(session_code, {})
+
+    def get_mobile_players(self, session_code: str) -> List[Dict[str, Any]]:
+        """Get list of mobile players in session"""
+        connections = self.get_session_connections(session_code)
+        mobile_players = []
+
+        for connection_info in connections.values():
+            if connection_info["client_type"] == "mobile" and connection_info.get(
+                "player_name"
+            ):
+                mobile_players.append(
+                    {
+                        "player_id": connection_info.get("player_id"),
+                        "player_name": connection_info.get("player_name"),
+                        "player_photo": connection_info.get("player_photo"),
+                        "connected_at": connection_info.get("connected_at"),
+                    }
+                )
+
+        return mobile_players
+
+    def get_session_stats(self, session_code: str) -> Dict[str, Any]:
+        """Get statistics for a session"""
+        connections = self.get_session_connections(session_code)
+        web_clients = sum(
+            1 for conn in connections.values() if conn["client_type"] == "web"
+        )
+        mobile_clients = sum(
+            1 for conn in connections.values() if conn["client_type"] == "mobile"
+        )
+
+        return {
+            "total_connections": len(connections),
+            "web_clients": web_clients,
+            "mobile_clients": mobile_clients,
+            "mobile_players": self.get_mobile_players(session_code),
+        }
+
+
+# Global connection manager instance
+manager = ConnectionManager()
