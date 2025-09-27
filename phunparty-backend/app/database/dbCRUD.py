@@ -613,19 +613,42 @@ def get_all_sessions_from_player(db: Session, player_id: str) -> list:
 
 def get_game_history_for_player(db: Session, player_id: str) -> list:
     """
-    Get the games played by a specific player using the session assignments table and joining scores table to display if they won, lost, or drew.
+    Get the games played by a specific player using the session assignments table and joining scores table to display if they won, lost, or drew along with their scores.
     """
     history = (
-        db.query(GameSession)
+        db.query(
+            GameSession.session_code,
+            Game.genre,
+            Scores.score,
+            Scores.result,
+            GameSessionState.ended_at,
+        )
         .join(
             SessionAssignment,
             GameSession.session_code == SessionAssignment.session_code,
         )
-        .join(PlayerScores, SessionAssignment.player_id == PlayerScores.player_id)
+        .join(
+            Scores,
+            (Scores.session_code == GameSession.session_code)
+            & (Scores.player_id == player_id),
+        )
+        .join(
+            GameSessionState, GameSession.session_code == GameSessionState.session_code
+        )
         .filter(SessionAssignment.player_id == player_id)
+        .filter(GameSessionState.is_active == False)  # Only completed games
         .all()
     )
-    return history
+    return [
+        {
+            "session_code": record.session_code,
+            "genre": record.genre,
+            "score": record.score,
+            "result": record.result,
+            "ended_at": record.ended_at,
+        }
+        for record in history
+    ]
 
 
 def get_session_difficulty(db: Session, session_code: str) -> str:
