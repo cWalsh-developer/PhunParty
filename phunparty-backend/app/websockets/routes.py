@@ -4,26 +4,27 @@ WebSocket routes for real-time game functionality
 
 import json
 import logging
+from typing import Optional
+
 from fastapi import (
     APIRouter,
-    WebSocket,
-    WebSocketDisconnect,
     Depends,
     HTTPException,
     Query,
+    WebSocket,
+    WebSocketDisconnect,
 )
 from sqlalchemy.orm import Session
-from typing import Optional
 
-from app.websockets.manager import manager
-from app.websockets.game_handlers import create_game_handler, GAME_HANDLERS
-from app.dependencies import get_db
 from app.database.dbCRUD import (
-    get_session_by_code,
-    get_player_by_ID,
-    get_game_session_state,
     get_current_question_details,
+    get_game_session_state,
+    get_player_by_ID,
+    get_session_by_code,
 )
+from app.dependencies import get_db
+from app.websockets.game_handlers import GAME_HANDLERS, create_game_handler
+from app.websockets.manager import manager
 
 
 logger = logging.getLogger(__name__)

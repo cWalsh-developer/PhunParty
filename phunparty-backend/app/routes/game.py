@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.database.dbCRUD import create_game as cg
 from app.database.dbCRUD import create_game_session
 from app.database.dbCRUD import get_all_games as gag
-from app.database.dbCRUD import get_game_by_code, join_game, get_session_by_code
+from app.database.dbCRUD import get_game_by_code, get_session_by_code, join_game
 from app.dependencies import get_api_key, get_db
 from app.models.game import GameCreation, GameJoinRequest, GameSessionCreation
 from app.models.game_model import Game
