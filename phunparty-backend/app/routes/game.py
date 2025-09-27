@@ -46,6 +46,7 @@ def create_game_session_route(
         request.number_of_questions,
         request.game_code,
         request.owner_player_id,
+        request.is_public,
     )
     return {
         "session_code": gameSession.session_code,

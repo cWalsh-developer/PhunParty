@@ -41,6 +41,7 @@ def create_game_session(
     number_of_questions: int,
     game_code: str,
     owner_player_id: str = None,
+    is_public: bool = True,
 ) -> GameSession:
     """Create a new game session with the specified parameters."""
     session_code = generate_session_code()
@@ -50,6 +51,7 @@ def create_game_session(
         number_of_questions=number_of_questions,
         game_code=game_code,
         owner_player_id=owner_player_id,
+        is_public=is_public,
     )
     db.add(gameSession)
     db.commit()
