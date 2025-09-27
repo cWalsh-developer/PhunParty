@@ -61,6 +61,18 @@ def submit_player_answer(
     }
 
 
+def updateGameStartStatus(db: Session, session_code: str, is_started: bool) -> None:
+    """
+    Update the game's started status
+    """
+    game_state = get_game_session_state(db, session_code)
+    if not game_state:
+        raise ValueError("Game session not found")
+
+    game_state.is_started = is_started
+    db.commit()
+
+
 def check_and_advance_game(
     db: Session, session_code: str, current_question_id: str
 ) -> dict:

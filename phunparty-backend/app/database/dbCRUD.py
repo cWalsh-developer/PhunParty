@@ -51,7 +51,6 @@ def create_game_session(
         number_of_questions=number_of_questions,
         game_code=game_code,
         owner_player_id=owner_player_id,
-        is_public=is_public,
     )
     db.add(gameSession)
     db.commit()
@@ -415,7 +414,9 @@ def calculate_game_results(db: Session, session_code: str):
 # Game State Management CRUD operations -----------------------------------------------------------------------------------------------------------------
 
 
-def create_game_session_state(db: Session, session_code: str) -> GameSessionState:
+def create_game_session_state(
+    db: Session, session_code: str, is_public: bool
+) -> GameSessionState:
     """Initialize the game state when a session is created"""
     session = get_session_by_code(db, session_code)
     if not session:
@@ -433,6 +434,8 @@ def create_game_session_state(db: Session, session_code: str) -> GameSessionStat
         current_question_index=0,
         current_question_id=first_question.question_id if first_question else None,
         is_active=True,
+        is_public=is_public,
+        is_started=False,
         is_waiting_for_players=True,
         total_questions=session.number_of_questions,
     )

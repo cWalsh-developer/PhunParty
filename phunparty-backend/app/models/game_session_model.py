@@ -12,4 +12,3 @@ class GameSession(Base):
     owner_player_id = Column(
         String, ForeignKey("players.player_id"), nullable=True
     )  # Added for session ownership
-    is_public = Column(Integer, default=1)  # Added to indicate if the session is public

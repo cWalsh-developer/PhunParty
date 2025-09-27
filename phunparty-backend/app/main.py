@@ -259,6 +259,12 @@ def read_root():
                         "description": "Get the current question for a session",
                         "example": "GET http://localhost:8000/game-logic/current-question/SESSION123",
                     },
+                    {
+                        "method": "PUT",
+                        "endpoint": "/game-logic/start-game/{session_code}",
+                        "description": "Update the game's started status",
+                        "example": "PUT http://localhost:8000/game-logic/start-game/{session_code",
+                    },
                 ],
             },
             {
