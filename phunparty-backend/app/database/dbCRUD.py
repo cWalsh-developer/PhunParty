@@ -41,7 +41,7 @@ def create_game_session(
     number_of_questions: int,
     game_code: str,
     owner_player_id: str = None,
-    is_public: bool = True,
+    ispublic: bool = True,
 ) -> GameSession:
     """Create a new game session with the specified parameters."""
     session_code = generate_session_code()
@@ -61,7 +61,7 @@ def create_game_session(
 
     # Initialize game state tracking
     try:
-        create_game_session_state(db, session_code)
+        create_game_session_state(db, session_code, ispublic)
     except Exception as e:
         print(f"Warning: Could not initialize game state: {e}")
 
@@ -415,7 +415,7 @@ def calculate_game_results(db: Session, session_code: str):
 
 
 def create_game_session_state(
-    db: Session, session_code: str, is_public: bool
+    db: Session, session_code: str, ispublic: bool
 ) -> GameSessionState:
     """Initialize the game state when a session is created"""
     session = get_session_by_code(db, session_code)
@@ -434,8 +434,8 @@ def create_game_session_state(
         current_question_index=0,
         current_question_id=first_question.question_id if first_question else None,
         is_active=True,
-        is_public=is_public,
-        is_started=False,
+        ispublic=ispublic,
+        isstarted=False,
         is_waiting_for_players=True,
         total_questions=session.number_of_questions,
     )
