@@ -4,11 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database.dbCRUD import create_game as cg
-from app.database.dbCRUD import create_game_session
+from app.database.dbCRUD import (
+    create_game_session,
+)
 from app.database.dbCRUD import get_all_games as gag
 from app.database.dbCRUD import (
-    get_game_by_code,
     get_all_public_sessions,
+    get_game_by_code,
     get_player_private_sessions,
     get_session_by_code,
     get_session_details,
