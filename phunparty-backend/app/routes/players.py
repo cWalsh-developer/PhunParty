@@ -8,6 +8,8 @@ from app.database.dbCRUD import (
     create_player,
     delete_player,
     get_all_players,
+    get_all_sessions_from_player,
+    get_game_history_for_player,
     get_player_by_email,
     get_player_by_ID,
     update_player,
@@ -93,3 +95,35 @@ def update_player_route(
     if not updated_player:
         raise HTTPException(status_code=400, detail="Failed to update player")
     return updated_player
+
+
+@router.get(
+    "/allOwnedSessions/{player_id}",
+    response_model=List[PlayerResponse],
+    tags=["Players"],
+)
+def get_all_sessions_route(player_id: str, db: Session = Depends(get_db)):
+    """
+    Get all active game sessions for a specific player.
+    """
+    sessions = get_all_sessions_from_player(db, player_id)
+    if not sessions:
+        raise HTTPException(
+            status_code=404, detail="No active sessions found for this player"
+        )
+    return sessions
+
+
+@router.get(
+    "/allSessions/{player_id}", response_model=List[PlayerResponse], tags=["Players"]
+)
+def get_player_gameplay_history(player_id: str, db: Session = Depends(get_db)):
+    """
+    Get the gameplay history for a specific player.
+    """
+    history = get_game_history_for_player(db, player_id)
+    if not history:
+        raise HTTPException(
+            status_code=404, detail="No gameplay history found for this player"
+        )
+    return history

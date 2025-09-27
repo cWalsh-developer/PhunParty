@@ -8,3 +8,12 @@ class Scores(BaseModel):
     result: Enum  # 'win', 'lose', or 'draw'
     player_id: str
     session_code: str
+
+
+class PlayerScores(BaseModel):
+    player_id: str
+    total_score: int
+    games_played: int
+    wins: int
+    losses: int
+    draws: int

@@ -23,6 +23,7 @@ from app.utils.id_generator import (
     generate_score_id,
     generate_session_code,
 )
+from app.models.scores import PlayerScores
 
 
 def create_game(db: Session, rules: str, genre: str) -> Game:
@@ -254,6 +255,16 @@ def get_number_of_players_in_session(db: Session, session_code: str) -> int:
         .filter(SessionAssignment.session_code == session_code)
         .count()
     )
+
+
+def get_game_history_for_player(db: Session, player_id: str) -> list:
+    """
+    Get the game history for a specific player.
+    """
+    history = (
+        db.query(GameSession).filter(GameSession.owner_player_id == player_id).all()
+    )
+    return history
 
     # Session Player Assignment CRUD operations -----------------------------------------------------------------------------------------------------
 
@@ -543,7 +554,7 @@ def get_player_private_sessions(db: Session, player_id: str) -> list:
             GameSessionState, GameSession.session_code == GameSessionState.session_code
         )
         .filter(GameSession.owner_player_id == player_id)
-        .filter(GameSessionState.is_public == False)
+        .filter(GameSessionState.ispublic == False)
         .filter(GameSessionState.is_active == True)
         .all()
     )
@@ -559,10 +570,62 @@ def get_player_private_sessions(db: Session, player_id: str) -> list:
                 "genre": game.genre,
                 "number_of_questions": session.number_of_questions,
                 "difficulty": difficulty,
+                "ispublic": state.ispublic,
             }
         )
 
     return result
+
+
+def get_all_sessions_from_player(db: Session, player_id: str) -> list:
+    """
+    Get all sessions owned by a specific player.
+    Returns basic session info: session_code, genre, number_of_questions, difficulty
+    """
+    sessions = (
+        db.query(GameSession, Game, GameSessionState)
+        .join(Game, GameSession.game_code == Game.game_code)
+        .join(
+            GameSessionState, GameSession.session_code == GameSessionState.session_code
+        )
+        .filter(GameSession.owner_player_id == player_id)
+        .filter(GameSessionState.is_active == True)
+        .all()
+    )
+
+    result = []
+    for session, game, state in sessions:
+        # Get difficulty from questions assigned to this session
+        difficulty = get_session_difficulty(db, session.session_code)
+
+        result.append(
+            {
+                "session_code": session.session_code,
+                "genre": game.genre,
+                "number_of_questions": session.number_of_questions,
+                "difficulty": difficulty,
+                "ispublic": state.ispublic,
+            }
+        )
+
+    return result
+
+
+def get_game_history_for_player(db: Session, player_id: str) -> list:
+    """
+    Get the games played by a specific player using the session assignments table and joining scores table to display if they won, lost, or drew.
+    """
+    history = (
+        db.query(GameSession)
+        .join(
+            SessionAssignment,
+            GameSession.session_code == SessionAssignment.session_code,
+        )
+        .join(PlayerScores, SessionAssignment.player_id == PlayerScores.player_id)
+        .filter(SessionAssignment.player_id == player_id)
+        .all()
+    )
+    return history
 
 
 def get_session_difficulty(db: Session, session_code: str) -> str:
