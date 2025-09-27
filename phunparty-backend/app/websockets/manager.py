@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Optional, Set
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-
 logger = logging.getLogger(__name__)
 
 

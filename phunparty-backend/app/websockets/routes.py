@@ -26,7 +26,6 @@ from app.dependencies import get_db
 from app.websockets.game_handlers import GAME_HANDLERS, create_game_handler
 from app.websockets.manager import manager
 
-
 logger = logging.getLogger(__name__)
 router = APIRouter()
 

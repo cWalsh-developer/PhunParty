@@ -18,7 +18,6 @@ from app.database.dbCRUD import (
 )
 from app.websockets.manager import manager
 
-
 logger = logging.getLogger(__name__)
 
 
