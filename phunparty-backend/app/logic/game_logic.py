@@ -69,7 +69,7 @@ def updateGameStartStatus(db: Session, session_code: str, is_started: bool) -> N
     if not game_state:
         raise ValueError("Game session not found")
 
-    game_state.is_started = is_started
+    game_state.isstarted = is_started
     db.commit()
 
 

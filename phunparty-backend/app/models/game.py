@@ -11,7 +11,7 @@ class GameSessionCreation(BaseModel):
     number_of_questions: int
     game_code: str
     owner_player_id: str  # Added to track session owner
-    is_public: bool = True  # New field to indicate if the session is public
+    ispublic: bool = True  # New field to indicate if the session is public
 
 
 class GameJoinRequest(BaseModel):
