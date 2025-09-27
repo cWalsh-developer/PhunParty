@@ -36,7 +36,11 @@ def create_game(db: Session, rules: str, genre: str) -> Game:
 
 
 def create_game_session(
-    db: Session, host_name: str, number_of_questions: int, game_code: str
+    db: Session,
+    host_name: str,
+    number_of_questions: int,
+    game_code: str,
+    owner_player_id: str = None,
 ) -> GameSession:
     """Create a new game session with the specified parameters."""
     session_code = generate_session_code()
@@ -45,6 +49,7 @@ def create_game_session(
         host_name=host_name,
         number_of_questions=number_of_questions,
         game_code=game_code,
+        owner_player_id=owner_player_id,
     )
     db.add(gameSession)
     db.commit()
@@ -443,6 +448,150 @@ def get_game_session_state(db: Session, session_code: str) -> GameSessionState:
         .filter(GameSessionState.session_code == session_code)
         .first()
     )
+
+
+def get_session_details(db: Session, session_code: str) -> dict:
+    """
+    Get comprehensive session information including session code, genre,
+    number of questions, active status, and privacy status.
+    """
+    # Get the session
+    session = get_session_by_code(db, session_code)
+    if not session:
+        return None
+
+    # Get the game to get the genre
+    game = get_game_by_code(db, session.game_code)
+    if not game:
+        return None
+
+    # Get the game state for active/inactive and public/private status
+    game_state = get_game_session_state(db, session_code)
+
+    # Default values if game state doesn't exist
+    is_active = True
+    is_public = True
+    started_at = None
+    ended_at = None
+
+    if game_state:
+        is_active = game_state.is_active
+        is_public = game_state.is_public
+        started_at = game_state.started_at
+        ended_at = game_state.ended_at
+
+    return {
+        "session_code": session.session_code,
+        "host_name": session.host_name,
+        "game_code": session.game_code,
+        "genre": game.genre,
+        "number_of_questions": session.number_of_questions,
+        "is_active": is_active,
+        "is_public": is_public,
+        "created_at": started_at,
+        "ended_at": ended_at,
+    }
+
+
+def get_all_public_sessions(db: Session) -> list:
+    """
+    Get all public active sessions (available to everyone).
+    Returns basic session info: session_code, genre, number_of_questions, difficulty
+    """
+    sessions = (
+        db.query(GameSession, Game, GameSessionState)
+        .join(Game, GameSession.game_code == Game.game_code)
+        .join(
+            GameSessionState, GameSession.session_code == GameSessionState.session_code
+        )
+        .filter(GameSessionState.is_public == True)
+        .filter(GameSessionState.is_active == True)
+        .all()
+    )
+
+    result = []
+    for session, game, state in sessions:
+        # Get difficulty from questions assigned to this session
+        difficulty = get_session_difficulty(db, session.session_code)
+
+        result.append(
+            {
+                "session_code": session.session_code,
+                "genre": game.genre,
+                "number_of_questions": session.number_of_questions,
+                "difficulty": difficulty,
+            }
+        )
+
+    return result
+
+
+def get_player_private_sessions(db: Session, player_id: str) -> list:
+    """
+    Get all private active sessions owned by a specific player.
+    Returns basic session info: session_code, genre, number_of_questions, difficulty
+    """
+    sessions = (
+        db.query(GameSession, Game, GameSessionState)
+        .join(Game, GameSession.game_code == Game.game_code)
+        .join(
+            GameSessionState, GameSession.session_code == GameSessionState.session_code
+        )
+        .filter(GameSession.owner_player_id == player_id)
+        .filter(GameSessionState.is_public == False)
+        .filter(GameSessionState.is_active == True)
+        .all()
+    )
+
+    result = []
+    for session, game, state in sessions:
+        # Get difficulty from questions assigned to this session
+        difficulty = get_session_difficulty(db, session.session_code)
+
+        result.append(
+            {
+                "session_code": session.session_code,
+                "genre": game.genre,
+                "number_of_questions": session.number_of_questions,
+                "difficulty": difficulty,
+            }
+        )
+
+    return result
+
+
+def get_session_difficulty(db: Session, session_code: str) -> str:
+    """Get the difficulty level from questions assigned to a session"""
+    try:
+        # Get the first question assigned to this session to determine difficulty
+        difficulty = (
+            db.query(Questions.difficulty)
+            .join(
+                SessionQuestionAssignment,
+                Questions.question_id == SessionQuestionAssignment.question_id,
+            )
+            .filter(SessionQuestionAssignment.session_code == session_code)
+            .first()
+        )
+
+        if difficulty:
+            return difficulty[0].value  # Extract the enum value
+        return "easy"  # Default fallback
+    except Exception:
+        return "easy"  # Default fallback
+
+
+def get_session_player_count(db: Session, session_code: str) -> int:
+    """Get the number of players currently in a session"""
+    try:
+        count = (
+            db.query(SessionAssignment)
+            .filter(SessionAssignment.session_code == session_code)
+            .count()
+        )
+        return count
+    except Exception:
+        return 0
 
 
 def create_player_response(

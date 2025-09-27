@@ -1,12 +1,19 @@
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database.dbCRUD import create_game as cg
 from app.database.dbCRUD import create_game_session
 from app.database.dbCRUD import get_all_games as gag
-from app.database.dbCRUD import get_game_by_code, get_session_by_code, join_game
+from app.database.dbCRUD import (
+    get_game_by_code,
+    get_all_public_sessions,
+    get_player_private_sessions,
+    get_session_by_code,
+    get_session_details,
+    join_game,
+)
 from app.dependencies import get_api_key, get_db
 from app.models.game import GameCreation, GameJoinRequest, GameSessionCreation
 from app.models.game_model import Game
@@ -34,13 +41,18 @@ def create_game_session_route(
     Create a new game session.
     """
     gameSession = create_game_session(
-        db, request.host_name, request.number_of_questions, request.game_code
+        db,
+        request.host_name,
+        request.number_of_questions,
+        request.game_code,
+        request.owner_player_id,
     )
     return {
         "session_code": gameSession.session_code,
         "host_name": gameSession.host_name,
         "number_of_questions": gameSession.number_of_questions,
         "game_code": gameSession.game_code,
+        "owner_player_id": gameSession.owner_player_id,
         "message": "Game session created successfully",
     }
 
@@ -108,3 +120,38 @@ def get_session_join_info(session_code: str, db: Session = Depends(get_db)):
         "websocket_url": f"{ws_url}/ws/session/{session_code}",
         "web_join_url": f"{web_url}/#/join/{session_code}",
     }
+
+
+@router.get("/session/{session_code}/details", tags=["Game"])
+def get_session_details_route(session_code: str, db: Session = Depends(get_db)):
+    """
+    Get comprehensive session information including session code, genre,
+    number of questions, active status, and privacy status.
+    """
+    session_details = get_session_details(db, session_code)
+    if not session_details:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return session_details
+
+
+@router.get("/sessions/public", tags=["Game"])
+def get_all_public_sessions_route(db: Session = Depends(get_db)):
+    """
+    Get all public active sessions (available to everyone).
+    Returns: session_code, genre, number_of_questions, difficulty
+    """
+    sessions = get_all_public_sessions(db)
+
+    return {"sessions": sessions, "count": len(sessions)}
+
+
+@router.get("/sessions/private/{player_id}", tags=["Game"])
+def get_player_private_sessions_route(player_id: str, db: Session = Depends(get_db)):
+    """
+    Get all private active sessions owned by a specific player.
+    Returns: session_code, genre, number_of_questions, difficulty
+    """
+    sessions = get_player_private_sessions(db, player_id)
+
+    return {"player_id": player_id, "sessions": sessions, "count": len(sessions)}

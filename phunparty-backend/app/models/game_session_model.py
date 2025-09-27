@@ -9,3 +9,6 @@ class GameSession(Base):
     host_name = Column(String, nullable=False)
     number_of_questions = Column(Integer, nullable=False)
     game_code = Column(String, ForeignKey("games.game_code"), nullable=False)
+    owner_player_id = Column(
+        String, ForeignKey("players.player_id"), nullable=True
+    )  # Added for session ownership
