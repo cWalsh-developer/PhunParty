@@ -812,6 +812,7 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
         "session_code": session_code,
         "is_active": game_state.is_active,
         "is_waiting_for_players": game_state.is_waiting_for_players,
+        "isstarted": game_state.isstarted,
         "current_question_index": game_state.current_question_index,
         "total_questions": game_state.total_questions,
         "current_question": {

@@ -73,13 +73,22 @@ class TriviaGameHandler(GameEventHandler):
         self, player_id: str, answer: str, question_id: str, db: Session
     ):
         """Handle trivia answer submission"""
-        # Store answer in database
+        # Use the same logic as the REST API to ensure game advancement
+        from app.logic.game_logic import submit_player_answer
+        
         try:
-            create_player_response(
+            # This includes all the logic for checking correctness, updating scores, 
+            # and automatically advancing the game when all players have answered
+            result = submit_player_answer(
                 db, self.session_code, player_id, question_id, answer
             )
-
-            # Get player info
+            
+            # Check if there was an error
+            if "error" in result:
+                logger.error(f"Error submitting answer: {result['error']}")
+                return
+            
+            # Get player info for broadcasting
             player = get_player_by_ID(db, player_id)
             player_name = player.player_name if player else "Unknown Player"
 
@@ -92,9 +101,30 @@ class TriviaGameHandler(GameEventHandler):
                         "player_id": player_id,
                         "player_name": player_name,
                         "answered_at": datetime.now().isoformat(),
+                        "is_correct": result.get("is_correct", False),
+                        "game_state": result.get("game_state", {}),
                     },
                 },
             )
+
+            # If game advanced to next question, broadcast it
+            if result.get("game_state", {}).get("action") == "next_question":
+                # Get the new question details
+                from app.database.dbCRUD import get_current_question_details
+                current_question = get_current_question_details(db, self.session_code)
+                
+                if current_question:
+                    await self.broadcast_question(current_question)
+            
+            # If game ended, broadcast game end
+            elif result.get("game_state", {}).get("action") == "game_ended":
+                await manager.broadcast_to_session(
+                    self.session_code,
+                    {
+                        "type": "game_ended",
+                        "data": result.get("game_state", {}),
+                    },
+                )
 
             # Send confirmation to the specific mobile player
             mobile_players = manager.get_mobile_players(self.session_code)

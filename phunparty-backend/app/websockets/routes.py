@@ -230,9 +230,9 @@ async def handle_websocket_message(
 async def handle_game_start(session_code: str, game_handler, db: Session):
     """Handle game start event"""
     try:
-        # Update game state in database
-        # You'll need to implement this in dbCRUD
-        # update_game_session_started(db, session_code)
+        # Update game state in database to mark as started
+        from app.logic.game_logic import updateGameStartStatus
+        updateGameStartStatus(db, session_code, True)
 
         # Get first question
         current_question = get_current_question_details(db, session_code)
@@ -244,6 +244,7 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
                 await game_handler.broadcast_question(current_question)
 
         # Broadcast game started to all clients
+        game_state = get_game_session_state(db, session_code)
         await manager.broadcast_to_session(
             session_code,
             {
@@ -251,6 +252,7 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
                 "data": {
                     "session_code": session_code,
                     "started_at": "now",  # You can use proper datetime
+                    "isstarted": game_state.isstarted if game_state else True,
                     "current_question": current_question,
                 },
             },
