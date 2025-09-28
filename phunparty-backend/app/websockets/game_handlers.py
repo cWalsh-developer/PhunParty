@@ -75,19 +75,19 @@ class TriviaGameHandler(GameEventHandler):
         """Handle trivia answer submission"""
         # Use the same logic as the REST API to ensure game advancement
         from app.logic.game_logic import submit_player_answer
-        
+
         try:
-            # This includes all the logic for checking correctness, updating scores, 
+            # This includes all the logic for checking correctness, updating scores,
             # and automatically advancing the game when all players have answered
             result = submit_player_answer(
                 db, self.session_code, player_id, question_id, answer
             )
-            
+
             # Check if there was an error
             if "error" in result:
                 logger.error(f"Error submitting answer: {result['error']}")
                 return
-            
+
             # Get player info for broadcasting
             player = get_player_by_ID(db, player_id)
             player_name = player.player_name if player else "Unknown Player"
@@ -111,11 +111,12 @@ class TriviaGameHandler(GameEventHandler):
             if result.get("game_state", {}).get("action") == "next_question":
                 # Get the new question details
                 from app.database.dbCRUD import get_current_question_details
+
                 current_question = get_current_question_details(db, self.session_code)
-                
+
                 if current_question:
                     await self.broadcast_question(current_question)
-            
+
             # If game ended, broadcast game end
             elif result.get("game_state", {}).get("action") == "game_ended":
                 await manager.broadcast_to_session(

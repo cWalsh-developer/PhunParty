@@ -232,6 +232,7 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
     try:
         # Update game state in database to mark as started
         from app.logic.game_logic import updateGameStartStatus
+
         updateGameStartStatus(db, session_code, True)
 
         # Get first question
