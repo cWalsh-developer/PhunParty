@@ -8,7 +8,6 @@ class DifficultyLevel(str, enum.Enum):
 
 
 class ResultType(str, enum.Enum):
-    default = None
     win = "win"
     lose = "lose"
     draw = "draw"

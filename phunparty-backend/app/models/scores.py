@@ -1,11 +1,11 @@
 from pydantic import BaseModel
-from sqlalchemy import Enum
+from app.models.enums import ResultType
 
 
 class Scores(BaseModel):
     score_id: str
     score: int
-    result: Enum  # 'win', 'lose', or 'draw'
+    result: ResultType | None = None
     player_id: str
     session_code: str
 
