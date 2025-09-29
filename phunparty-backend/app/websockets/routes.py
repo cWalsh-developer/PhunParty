@@ -154,8 +154,16 @@ async def send_initial_session_state(
                 "isstarted": game_state_obj.isstarted,
                 "total_questions": game_state_obj.total_questions,
                 "ispublic": game_state_obj.ispublic,
-                "started_at": game_state_obj.started_at.isoformat() if game_state_obj.started_at else None,
-                "ended_at": game_state_obj.ended_at.isoformat() if game_state_obj.ended_at else None,
+                "started_at": (
+                    game_state_obj.started_at.isoformat()
+                    if game_state_obj.started_at
+                    else None
+                ),
+                "ended_at": (
+                    game_state_obj.ended_at.isoformat()
+                    if game_state_obj.ended_at
+                    else None
+                ),
             }
 
         initial_state = {
