@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
-from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session, aliased
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.models.game_model import Game
@@ -23,7 +24,6 @@ from app.utils.id_generator import (
     generate_score_id,
     generate_session_code,
 )
-from app.models.scores import PlayerScores
 
 
 def create_game(db: Session, rules: str, genre: str) -> Game:
@@ -514,28 +514,37 @@ def get_all_public_sessions(db: Session) -> list:
     Get all public active sessions (available to everyone).
     Returns basic session info: session_code, genre, number_of_questions, difficulty
     """
+    # Subquery to get difficulty for each session (optimized)
+    difficulty_subquery = (
+        db.query(
+            SessionQuestionAssignment.session_code,
+            func.min(Questions.difficulty).label('difficulty')
+        )
+        .join(Questions, SessionQuestionAssignment.question_id == Questions.question_id)
+        .group_by(SessionQuestionAssignment.session_code)
+        .subquery()
+    )
+
     sessions = (
-        db.query(GameSession, Game, GameSessionState)
+        db.query(GameSession, Game, GameSessionState, difficulty_subquery.c.difficulty)
         .join(Game, GameSession.game_code == Game.game_code)
         .join(
             GameSessionState, GameSession.session_code == GameSessionState.session_code
         )
+        .outerjoin(difficulty_subquery, GameSession.session_code == difficulty_subquery.c.session_code)
         .filter(GameSessionState.is_public == True)
         .filter(GameSessionState.is_active == True)
         .all()
     )
 
     result = []
-    for session, game, state in sessions:
-        # Get difficulty from questions assigned to this session
-        difficulty = get_session_difficulty(db, session.session_code)
-
+    for session, game, state, difficulty in sessions:
         result.append(
             {
                 "session_code": session.session_code,
                 "genre": game.genre,
                 "number_of_questions": session.number_of_questions,
-                "difficulty": difficulty,
+                "difficulty": difficulty.value if difficulty else "Unknown",
             }
         )
 
@@ -547,12 +556,24 @@ def get_player_private_sessions(db: Session, player_id: str) -> list:
     Get all private active sessions owned by a specific player.
     Returns basic session info: session_code, genre, number_of_questions, difficulty
     """
+    # Subquery to get difficulty for each session (optimized)
+    difficulty_subquery = (
+        db.query(
+            SessionQuestionAssignment.session_code,
+            func.min(Questions.difficulty).label('difficulty')
+        )
+        .join(Questions, SessionQuestionAssignment.question_id == Questions.question_id)
+        .group_by(SessionQuestionAssignment.session_code)
+        .subquery()
+    )
+
     sessions = (
-        db.query(GameSession, Game, GameSessionState)
+        db.query(GameSession, Game, GameSessionState, difficulty_subquery.c.difficulty)
         .join(Game, GameSession.game_code == Game.game_code)
         .join(
             GameSessionState, GameSession.session_code == GameSessionState.session_code
         )
+        .outerjoin(difficulty_subquery, GameSession.session_code == difficulty_subquery.c.session_code)
         .filter(GameSession.owner_player_id == player_id)
         .filter(GameSessionState.ispublic == False)
         .filter(GameSessionState.is_active == True)
@@ -560,16 +581,13 @@ def get_player_private_sessions(db: Session, player_id: str) -> list:
     )
 
     result = []
-    for session, game, state in sessions:
-        # Get difficulty from questions assigned to this session
-        difficulty = get_session_difficulty(db, session.session_code)
-
+    for session, game, state, difficulty in sessions:
         result.append(
             {
                 "session_code": session.session_code,
                 "genre": game.genre,
                 "number_of_questions": session.number_of_questions,
-                "difficulty": difficulty,
+                "difficulty": difficulty.value if difficulty else "Unknown",
                 "ispublic": state.ispublic,
             }
         )
@@ -582,28 +600,37 @@ def get_all_sessions_from_player(db: Session, player_id: str) -> list:
     Get all sessions owned by a specific player.
     Returns basic session info: session_code, genre, number_of_questions, difficulty
     """
+    # Subquery to get difficulty for each session (optimized)
+    difficulty_subquery = (
+        db.query(
+            SessionQuestionAssignment.session_code,
+            func.min(Questions.difficulty).label('difficulty')
+        )
+        .join(Questions, SessionQuestionAssignment.question_id == Questions.question_id)
+        .group_by(SessionQuestionAssignment.session_code)
+        .subquery()
+    )
+
     sessions = (
-        db.query(GameSession, Game, GameSessionState)
+        db.query(GameSession, Game, GameSessionState, difficulty_subquery.c.difficulty)
         .join(Game, GameSession.game_code == Game.game_code)
         .join(
             GameSessionState, GameSession.session_code == GameSessionState.session_code
         )
+        .outerjoin(difficulty_subquery, GameSession.session_code == difficulty_subquery.c.session_code)
         .filter(GameSession.owner_player_id == player_id)
         .filter(GameSessionState.is_active == True)
         .all()
     )
 
     result = []
-    for session, game, state in sessions:
-        # Get difficulty from questions assigned to this session
-        difficulty = get_session_difficulty(db, session.session_code)
-
+    for session, game, state, difficulty in sessions:
         result.append(
             {
                 "session_code": session.session_code,
                 "genre": game.genre,
                 "number_of_questions": session.number_of_questions,
-                "difficulty": difficulty,
+                "difficulty": difficulty.value if difficulty else "Unknown",
                 "ispublic": state.ispublic,
             }
         )
