@@ -3,7 +3,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.database.dbCRUD import create_game as cg
+from app.database.dbCRUD import create_game as cg, end_game_session
 from app.database.dbCRUD import (
     create_game_session,
 )
@@ -158,3 +158,15 @@ def get_player_private_sessions_route(player_id: str, db: Session = Depends(get_
     sessions = get_player_private_sessions(db, player_id)
 
     return {"player_id": player_id, "sessions": sessions, "count": len(sessions)}
+
+
+@router.post("/end-game/{session_code}", tags=["Game"])
+def end_game_route(session_code: str, db: Session = Depends(get_db)):
+    """
+    End a game session.
+    """
+    try:
+        result = end_game_session(db, session_code)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
