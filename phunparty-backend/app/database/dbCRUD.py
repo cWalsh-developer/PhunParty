@@ -893,4 +893,3 @@ def update_password(db: Session, phone: str, new_password: str) -> bool:
     return False
 
 
-print(get_player_private_sessions())
