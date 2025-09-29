@@ -99,7 +99,6 @@ def update_player_route(
 
 @router.get(
     "/allOwnedSessions/{player_id}",
-    response_model=List[PlayerResponse],
     tags=["Players"],
 )
 def get_all_sessions_route(player_id: str, db: Session = Depends(get_db)):
