@@ -509,6 +509,9 @@ def get_session_details(db: Session, session_code: str) -> dict:
     }
 
 
+# TODO: Remove duplication with get_all_public_sessions
+
+
 def get_all_public_sessions(db: Session) -> list:
     """
     Get all public active sessions (available to everyone).
@@ -535,7 +538,7 @@ def get_all_public_sessions(db: Session) -> list:
             difficulty_subquery,
             GameSession.session_code == difficulty_subquery.c.session_code,
         )
-        .filter(GameSessionState.is_public == True)
+        .filter(GameSessionState.ispublic == True)
         .filter(GameSessionState.is_active == True)
         .all()
     )
