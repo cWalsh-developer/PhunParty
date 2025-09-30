@@ -13,6 +13,7 @@ from app.database.dbCRUD import (
     get_player_by_email,
     get_player_by_ID,
     update_player,
+    update_player_game_code,
 )
 from app.dependencies import get_api_key, get_db
 from app.models.loginRequest import LoginRequest
@@ -126,3 +127,15 @@ def get_player_gameplay_history(player_id: str, db: Session = Depends(get_db)):
             status_code=404, detail="No gameplay history found for this player"
         )
     return history
+
+
+@router.post("/leave-session", tags=["Players"])
+def leave_session_route(player_id: str, db: Session = Depends(get_db)):
+    """
+    Leave a game session.
+    """
+    try:
+        update_player_game_code(db, player_id, None)
+        return {"detail": "Player left the session successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to leave session")
