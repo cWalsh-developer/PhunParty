@@ -129,7 +129,7 @@ def get_player_gameplay_history(player_id: str, db: Session = Depends(get_db)):
     return history
 
 
-@router.post("/leave-session", tags=["Players"])
+@router.post("/leave-session/{player_id}", tags=["Players"])
 def leave_session_route(player_id: str, db: Session = Depends(get_db)):
     """
     Leave a game session.
