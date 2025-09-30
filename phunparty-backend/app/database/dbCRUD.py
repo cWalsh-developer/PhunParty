@@ -518,7 +518,7 @@ def get_all_public_sessions(db: Session) -> list:
     difficulty_subquery = (
         db.query(
             SessionQuestionAssignment.session_code,
-            func.min(Questions.difficulty).label('difficulty')
+            func.min(Questions.difficulty).label("difficulty"),
         )
         .join(Questions, SessionQuestionAssignment.question_id == Questions.question_id)
         .group_by(SessionQuestionAssignment.session_code)
@@ -531,7 +531,10 @@ def get_all_public_sessions(db: Session) -> list:
         .join(
             GameSessionState, GameSession.session_code == GameSessionState.session_code
         )
-        .outerjoin(difficulty_subquery, GameSession.session_code == difficulty_subquery.c.session_code)
+        .outerjoin(
+            difficulty_subquery,
+            GameSession.session_code == difficulty_subquery.c.session_code,
+        )
         .filter(GameSessionState.is_public == True)
         .filter(GameSessionState.is_active == True)
         .all()
@@ -560,7 +563,7 @@ def get_player_private_sessions(db: Session, player_id: str) -> list:
     difficulty_subquery = (
         db.query(
             SessionQuestionAssignment.session_code,
-            func.min(Questions.difficulty).label('difficulty')
+            func.min(Questions.difficulty).label("difficulty"),
         )
         .join(Questions, SessionQuestionAssignment.question_id == Questions.question_id)
         .group_by(SessionQuestionAssignment.session_code)
@@ -573,10 +576,12 @@ def get_player_private_sessions(db: Session, player_id: str) -> list:
         .join(
             GameSessionState, GameSession.session_code == GameSessionState.session_code
         )
-        .outerjoin(difficulty_subquery, GameSession.session_code == difficulty_subquery.c.session_code)
+        .outerjoin(
+            difficulty_subquery,
+            GameSession.session_code == difficulty_subquery.c.session_code,
+        )
         .filter(GameSession.owner_player_id == player_id)
         .filter(GameSessionState.ispublic == False)
-        .filter(GameSessionState.is_active == True)
         .all()
     )
 
@@ -604,7 +609,7 @@ def get_all_sessions_from_player(db: Session, player_id: str) -> list:
     difficulty_subquery = (
         db.query(
             SessionQuestionAssignment.session_code,
-            func.min(Questions.difficulty).label('difficulty')
+            func.min(Questions.difficulty).label("difficulty"),
         )
         .join(Questions, SessionQuestionAssignment.question_id == Questions.question_id)
         .group_by(SessionQuestionAssignment.session_code)
@@ -617,7 +622,10 @@ def get_all_sessions_from_player(db: Session, player_id: str) -> list:
         .join(
             GameSessionState, GameSession.session_code == GameSessionState.session_code
         )
-        .outerjoin(difficulty_subquery, GameSession.session_code == difficulty_subquery.c.session_code)
+        .outerjoin(
+            difficulty_subquery,
+            GameSession.session_code == difficulty_subquery.c.session_code,
+        )
         .filter(GameSession.owner_player_id == player_id)
         .filter(GameSessionState.is_active == True)
         .all()
@@ -918,5 +926,3 @@ def update_password(db: Session, phone: str, new_password: str) -> bool:
         db.commit()
         return True
     return False
-
-
