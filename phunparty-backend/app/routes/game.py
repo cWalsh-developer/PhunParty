@@ -20,6 +20,7 @@ from app.dependencies import get_api_key, get_db
 from app.models.game import GameCreation, GameJoinRequest, GameSessionCreation
 from app.models.game_model import Game
 from app.models.response_models import GameResponse
+from app.websockets.manager import manager
 
 router = APIRouter(dependencies=[Depends(get_api_key)])
 
@@ -206,12 +207,37 @@ def get_player_private_sessions_route(player_id: str, db: Session = Depends(get_
 
 
 @router.post("/end-game/{session_code}", tags=["Game"])
-def end_game_route(session_code: str, db: Session = Depends(get_db)):
+async def end_game_route(session_code: str, db: Session = Depends(get_db)):
     """
     End a game session.
     """
     try:
         result = end_game_session(db, session_code)
+        
+        # Broadcast game ended message to all connected WebSocket clients
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "game_ended",
+                "data": result,
+            },
+        )
+        
+        # Optional: Give clients time to process the message before cleaning up connections
+        # Uncomment the following lines if you want to close WebSocket connections after game ends
+        # import asyncio
+        # await asyncio.sleep(2)  # Wait 2 seconds for clients to process
+        # 
+        # # Get all connections for this session and disconnect them
+        # connections = manager.get_session_connections(session_code)
+        # for ws_id, connection_info in connections.items():
+        #     websocket = connection_info["websocket"]
+        #     try:
+        #         await websocket.close(code=1000, reason="Game ended")
+        #     except:
+        #         pass  # Connection might already be closed
+        #     manager.disconnect(websocket)
+        
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to end game session")
