@@ -113,7 +113,7 @@ def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
     if player.active_game_code is not None:
         # Check if the active game code points to an actual active session
         active_session = get_session_by_code(db, player.active_game_code)
-        
+
         if active_session:
             # Player is in a real active session
             if active_session.session_code == session_code:
