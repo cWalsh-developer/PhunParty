@@ -185,16 +185,16 @@ def leave_session_route(player_id: str, db: Session = Depends(get_db)):
             from app.models.session_player_assignment_model import SessionAssignment
             from datetime import datetime
 
-            # End any active session assignments
+            # End any active session assignments (those without session_end)
             active_assignments = (
                 db.query(SessionAssignment)
                 .filter(SessionAssignment.player_id == player_id)
-                .filter(SessionAssignment.left_at.is_(None))
+                .filter(SessionAssignment.session_end.is_(None))
                 .all()
             )
 
             for assignment in active_assignments:
-                assignment.left_at = datetime.utcnow()
+                assignment.session_end = datetime.utcnow()
 
             db.commit()
 
@@ -223,7 +223,7 @@ def get_player_status_route(player_id: str, db: Session = Depends(get_db)):
         active_assignments = (
             db.query(SessionAssignment)
             .filter(SessionAssignment.player_id == player_id)
-            .filter(SessionAssignment.left_at.is_(None))
+            .filter(SessionAssignment.session_end.is_(None))
             .all()
         )
 
@@ -234,7 +234,7 @@ def get_player_status_route(player_id: str, db: Session = Depends(get_db)):
             "active_assignments": [
                 {
                     "session_code": assignment.session_code,
-                    "joined_at": assignment.joined_at,
+                    "session_start": assignment.session_start,
                     "assignment_id": assignment.assignment_id,
                 }
                 for assignment in active_assignments
