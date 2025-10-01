@@ -79,44 +79,47 @@ def check_and_advance_game(
     """
     Check if all players have answered and advance the game if needed
     """
-    # Get counts from database
-    players_in_session = get_number_of_players_in_session(db, session_code)
-    responses_to_question = count_responses_for_question(
-        db, session_code, current_question_id
-    )
+    try:
+        # Get counts from database
+        players_in_session = get_number_of_players_in_session(db, session_code)
+        responses_to_question = count_responses_for_question(
+            db, session_code, current_question_id
+        )
 
-    # Get current game state
-    game_state = get_game_session_state(db, session_code)
-    if not game_state:
-        raise ValueError("Game state not found")
+        # Get current game state
+        game_state = get_game_session_state(db, session_code)
+        if not game_state:
+            raise ValueError("Game state not found")
 
-    result = {
-        "players_total": players_in_session,
-        "players_answered": responses_to_question,
-        "waiting_for_players": responses_to_question < players_in_session,
-        "current_question_index": game_state.current_question_index,
-        "total_questions": game_state.total_questions,
-        "game_status": "active",
-    }
+        result = {
+            "players_total": players_in_session,
+            "players_answered": responses_to_question,
+            "waiting_for_players": responses_to_question < players_in_session,
+            "current_question_index": game_state.current_question_index,
+            "total_questions": game_state.total_questions,
+            "game_status": "active",
+        }
 
-    # If all players have answered
-    if responses_to_question >= players_in_session:
-        # Update waiting status
-        update_game_state_waiting_status(db, session_code, False)
+        # If all players have answered
+        if responses_to_question >= players_in_session:
+            # Update waiting status
+            update_game_state_waiting_status(db, session_code, False)
 
-        # Check if there are more questions
-        if game_state.current_question_index + 1 < game_state.total_questions:
-            # Advance to next question
-            advancement_result = advance_to_next_question(db, session_code)
-            result.update(advancement_result)
-        else:
-            # No more questions, end the game
-            from app.database.dbCRUD import end_game_session
+            # Check if there are more questions
+            if game_state.current_question_index + 1 < game_state.total_questions:
+                # Advance to next question
+                advancement_result = advance_to_next_question(db, session_code)
+                result.update(advancement_result)
+            else:
+                # No more questions, end the game
+                from app.database.dbCRUD import end_game_session
 
-            advancement_result = end_game_session(db, session_code)
-            result.update(advancement_result)
+                advancement_result = end_game_session(db, session_code)
+                result.update(advancement_result)
 
-    return result
+        return result
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def get_current_question_for_session(db: Session, session_code: str) -> dict:
