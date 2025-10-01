@@ -59,6 +59,7 @@ class GameStatusResponse(BaseModel):
     session_code: str
     is_active: bool
     is_waiting_for_players: bool
+    isstarted: bool
     current_question_index: int
     total_questions: int
     current_question: dict
