@@ -832,32 +832,35 @@ def get_session_questions_ordered(
 
 def advance_to_next_question(db: Session, session_code: str) -> dict:
     """Advance game to next question or end if no more questions"""
-    game_state = get_game_session_state(db, session_code)
-    if not game_state:
-        raise ValueError("Game state not found")
+    try:
+        game_state = get_game_session_state(db, session_code)
+        if not game_state:
+            raise ValueError("Game state not found")
 
-    questions_in_session = get_session_questions_ordered(db, session_code)
-    next_question_index = game_state.current_question_index + 1
+        questions_in_session = get_session_questions_ordered(db, session_code)
+        next_question_index = game_state.current_question_index + 1
 
-    if next_question_index < len(questions_in_session):
-        # Move to next question
-        next_question = questions_in_session[next_question_index]
-        game_state.current_question_index = next_question_index
-        game_state.current_question_id = next_question.question_id
-        game_state.is_waiting_for_players = True
+        if next_question_index < len(questions_in_session):
+            # Move to next question
+            next_question = questions_in_session[next_question_index]
+            game_state.current_question_index = next_question_index
+            game_state.current_question_id = next_question.question_id
+            game_state.is_waiting_for_players = True
 
-        db.commit()
-        db.refresh(game_state)
+            db.commit()
+            db.refresh(game_state)
 
-        return {
-            "action": "next_question",
-            "next_question_id": next_question.question_id,
-            "current_question_index": next_question_index,
-            "waiting_for_players": True,
-        }
-    else:
-        # No more questions, end the game using the comprehensive end_game_session
-        return end_game_session(db, session_code)
+            return {
+                "action": "next_question",
+                "next_question_id": next_question.question_id,
+                "current_question_index": next_question_index,
+                "waiting_for_players": True,
+            }
+        else:
+            # No more questions, end the game using the comprehensive end_game_session
+            return end_game_session(db, session_code)
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def update_game_state_waiting_status(
