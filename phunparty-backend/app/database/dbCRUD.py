@@ -82,6 +82,13 @@ def get_session_by_code(db: Session, session_code: str) -> GameSession:
     )
 
 
+def _get_session_by_code_internal(db: Session, session_code: str) -> GameSession:
+    """Internal function to retrieve any game session by its session code (active or inactive)."""
+    return (
+        db.query(GameSession).filter(GameSession.session_code == session_code).first()
+    )
+
+
 def get_game_by_code(db: Session, game_code: str) -> Game:
     """Retrieve a game session by its game code."""
     return db.query(Game).filter(Game.game_code == game_code).first()
@@ -294,7 +301,7 @@ def assign_player_to_session(db: Session, player_id: str, session_code: str) -> 
 
 def add_question_to_session(db: Session, session_code: str) -> None:
     """Add a question to a game session."""
-    session = get_session_by_code(db, session_code)
+    session = _get_session_by_code_internal(db, session_code)
     if not session:
         raise ValueError("Session not found")
     game = get_game_by_code(db, session.game_code)
@@ -435,7 +442,7 @@ def create_game_session_state(
     db: Session, session_code: str, ispublic: bool
 ) -> GameSessionState:
     """Initialize the game state when a session is created"""
-    session = get_session_by_code(db, session_code)
+    session = _get_session_by_code_internal(db, session_code)
     if not session:
         raise ValueError("Session not found")
 
