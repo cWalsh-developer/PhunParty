@@ -176,15 +176,15 @@ def leave_session_route(player_id: str, db: Session = Depends(get_db)):
     try:
         # Check if player exists first
         player = get_player_by_ID(db, player_id)
-        
+
         if player:
             # Update player's active game code to None
             player.active_game_code = None
-            
+
             # Also clear any session assignments for this player
             from app.models.session_player_assignment_model import SessionAssignment
             from datetime import datetime
-            
+
             # End any active session assignments
             active_assignments = (
                 db.query(SessionAssignment)
@@ -192,17 +192,19 @@ def leave_session_route(player_id: str, db: Session = Depends(get_db)):
                 .filter(SessionAssignment.left_at.is_(None))
                 .all()
             )
-            
+
             for assignment in active_assignments:
                 assignment.left_at = datetime.utcnow()
-            
+
             db.commit()
-        
+
         # Always return success - if player doesn't exist, they're not in a session anyway
         return {"detail": "Player left the session successfully"}
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to leave session: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to leave session: {str(e)}"
+        )
 
 
 @router.get("/debug/player-status/{player_id}", tags=["Players"])
