@@ -70,9 +70,15 @@ def create_game_session(
 
 
 def get_session_by_code(db: Session, session_code: str) -> GameSession:
-    """Retrieve a game session by its session code."""
+    """Retrieve an active game session by its session code."""
     return (
-        db.query(GameSession).filter(GameSession.session_code == session_code).first()
+        db.query(GameSession)
+        .join(
+            GameSessionState, GameSession.session_code == GameSessionState.session_code
+        )
+        .filter(GameSession.session_code == session_code)
+        .filter(GameSessionState.is_active == True)
+        .first()
     )
 
 
@@ -458,10 +464,11 @@ def create_game_session_state(
 
 
 def get_game_session_state(db: Session, session_code: str) -> GameSessionState:
-    """Get current game state for a session"""
+    """Get current game state for an active session"""
     return (
         db.query(GameSessionState)
         .filter(GameSessionState.session_code == session_code)
+        .filter(GameSessionState.is_active == True)
         .first()
     )
 
