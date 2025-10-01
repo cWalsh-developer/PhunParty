@@ -115,7 +115,9 @@ def join_game_route(req: GameJoinRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         # Handle unexpected errors
-        raise HTTPException(status_code=500, detail="Unable to join game - internal error")
+        raise HTTPException(
+            status_code=500, detail="Unable to join game - internal error"
+        )
 
 
 @router.get("/session/{session_code}/join-info", tags=["Game"])
