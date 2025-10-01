@@ -213,7 +213,7 @@ async def end_game_route(session_code: str, db: Session = Depends(get_db)):
     """
     try:
         result = end_game_session(db, session_code)
-        
+
         # Broadcast game ended message to all connected WebSocket clients
         await manager.broadcast_to_session(
             session_code,
@@ -222,12 +222,12 @@ async def end_game_route(session_code: str, db: Session = Depends(get_db)):
                 "data": result,
             },
         )
-        
+
         # Optional: Give clients time to process the message before cleaning up connections
         # Uncomment the following lines if you want to close WebSocket connections after game ends
         # import asyncio
         # await asyncio.sleep(2)  # Wait 2 seconds for clients to process
-        # 
+        #
         # # Get all connections for this session and disconnect them
         # connections = manager.get_session_connections(session_code)
         # for ws_id, connection_info in connections.items():
@@ -237,7 +237,7 @@ async def end_game_route(session_code: str, db: Session = Depends(get_db)):
         #     except:
         #         pass  # Connection might already be closed
         #     manager.disconnect(websocket)
-        
+
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to end game session")
