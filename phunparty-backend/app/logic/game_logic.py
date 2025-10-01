@@ -97,7 +97,7 @@ def check_and_advance_game(
             "waiting_for_players": responses_to_question < players_in_session,
             "current_question_index": game_state.current_question_index,
             "total_questions": game_state.total_questions,
-            "game_status": "active",
+            "game_state": "active",
         }
 
         # If all players have answered

@@ -54,7 +54,7 @@ This demonstrates the automatic game progression workflow:
 #     "waiting_for_players": true,
 #     "current_question_index": 0,
 #     "total_questions": 3,
-#     "game_status": "active"
+#     "game_state": "active"
 #   }
 # }
 
@@ -69,7 +69,7 @@ This demonstrates the automatic game progression workflow:
 #     "waiting_for_players": true,  # Reset for next question
 #     "current_question_index": 1,  # Advanced to next question
 #     "total_questions": 3,
-#     "game_status": "active",
+#     "game_state": "active",
 #     "action": "next_question",
 #     "next_question_id": "Q002"
 #   }
@@ -102,7 +102,7 @@ This demonstrates the automatic game progression workflow:
 #   "is_correct": true,
 #   "game_state": {
 #     "action": "game_ended",
-#     "game_status": "completed",
+#     "game_state": "completed",
 #     "final_results": [
 #       {
 #         "player_id": "PLAYER001",

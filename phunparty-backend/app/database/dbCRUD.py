@@ -172,7 +172,7 @@ def end_game_session(db: Session, session_code: str) -> dict:
         final_results = calculate_game_results(db, session_code)
         return {
             "action": "game_ended",
-            "game_status": "completed",
+            "game_state": "completed",
             "final_results": [
                 {
                     "player_id": result.player_id,
@@ -185,7 +185,7 @@ def end_game_session(db: Session, session_code: str) -> dict:
     except Exception as e:
         return {
             "action": "game_ended",
-            "game_status": "completed",
+            "game_state": "completed",
             "error": f"Could not calculate final results: {str(e)}",
         }
 
