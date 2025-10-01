@@ -104,9 +104,14 @@ def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
     gameSession = get_session_by_code(db, session_code)
     if not gameSession:
         raise ValueError("Game session not found")
+    
     player = get_player_by_ID(db, player_id)
+    if not player:
+        raise ValueError("Player not found")
+    
     if player.active_game_code is not None:
-        raise ValueError("Player is already in a game session")
+        raise ValueError(f"Player is already in a game session: {player.active_game_code}")
+    
     update_player_game_code(db, player_id, gameSession.session_code)
     assign_player_to_session(db, player_id, session_code)
     create_score(db, session_code, player_id)
@@ -214,6 +219,8 @@ def create_player(
 def update_player_game_code(db: Session, player_id: str, game_code: str) -> Players:
     """Update the game code of a player."""
     player = get_player_by_ID(db, player_id)
+    if not player:
+        raise ValueError(f"Player {player_id} not found")
     player.active_game_code = game_code
     db.commit()
     db.refresh(player)

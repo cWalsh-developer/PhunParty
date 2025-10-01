@@ -174,7 +174,66 @@ def leave_session_route(player_id: str, db: Session = Depends(get_db)):
     Leave a game session.
     """
     try:
+        # Update player's active game code to None
         update_player_game_code(db, player_id, None)
+        
+        # Also clear any session assignments for this player
+        from app.models.session_player_assignment_model import SessionAssignment
+        from datetime import datetime
+        
+        # End any active session assignments
+        active_assignments = (
+            db.query(SessionAssignment)
+            .filter(SessionAssignment.player_id == player_id)
+            .filter(SessionAssignment.left_at.is_(None))
+            .all()
+        )
+        
+        for assignment in active_assignments:
+            assignment.left_at = datetime.utcnow()
+        
+        db.commit()
+        
         return {"detail": "Player left the session successfully"}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to leave session")
+
+
+@router.get("/debug/player-status/{player_id}", tags=["Players"])
+def get_player_status_route(player_id: str, db: Session = Depends(get_db)):
+    """
+    Debug endpoint: Get detailed player status.
+    """
+    try:
+        player = get_player_by_ID(db, player_id)
+        if not player:
+            raise HTTPException(status_code=404, detail="Player not found")
+        
+        # Get active assignments
+        from app.models.session_player_assignment_model import SessionAssignment
+        active_assignments = (
+            db.query(SessionAssignment)
+            .filter(SessionAssignment.player_id == player_id)
+            .filter(SessionAssignment.left_at.is_(None))
+            .all()
+        )
+        
+        return {
+            "player_id": player.player_id,
+            "player_name": player.player_name,
+            "active_game_code": player.active_game_code,
+            "active_assignments": [
+                {
+                    "session_code": assignment.session_code,
+                    "joined_at": assignment.joined_at,
+                    "assignment_id": assignment.assignment_id
+                }
+                for assignment in active_assignments
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get player status: {str(e)}")
