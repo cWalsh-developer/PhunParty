@@ -109,10 +109,25 @@ def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
     if not player:
         raise ValueError("Player not found")
 
+    # Check if player has an active game code
     if player.active_game_code is not None:
-        raise ValueError(
-            f"Player is already in a game session: {player.active_game_code}"
-        )
+        # Check if the active game code points to an actual active session
+        active_session = get_session_by_code(db, player.active_game_code)
+        
+        if active_session:
+            # Player is in a real active session
+            if active_session.session_code == session_code:
+                # Player is trying to join the same session they're already in
+                return gameSession
+            else:
+                # Player is in a different active session
+                raise ValueError(
+                    f"Player is already in a game session: {player.active_game_code}"
+                )
+        else:
+            # Player's active_game_code points to an inactive session, clear it
+            player.active_game_code = None
+            db.commit()
 
     update_player_game_code(db, player_id, gameSession.session_code)
     assign_player_to_session(db, player_id, session_code)
