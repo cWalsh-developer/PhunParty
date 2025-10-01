@@ -46,6 +46,10 @@ def get_session_status(session_code: str, db: Session = Depends(get_db)):
         status = get_current_question_details(db, session_code)
         if "error" in status:
             raise HTTPException(status_code=404, detail=status["error"])
+        else:
+            raise HTTPException(
+                status_code=500, detail=f"Unexpected error occurred {status}"
+            )
         return status
     except HTTPException:
         raise
