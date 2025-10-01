@@ -631,7 +631,7 @@ def get_all_sessions_from_player(db: Session, player_id: str) -> list:
             GameSession.session_code == difficulty_subquery.c.session_code,
         )
         .filter(GameSession.owner_player_id == player_id)
-        .filter(GameSessionState.is_active == False)
+        .filter(GameSessionState.is_active == True)
         .all()
     )
 
