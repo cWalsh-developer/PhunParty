@@ -44,38 +44,56 @@ def request_password_reset(phone: PasswordResetRequest, db: Session = Depends(ge
             raise HTTPException(status_code=500, detail="Failed to send SMS")
 
         return {"message": "OTP sent via SMS"}
-
+    except HTTPException:
+        raise
     except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Unhandled exception: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail="Password reset service temporarily unavailable"
+        )
 
 
 @router.post("/verify", tags=["Password Reset"])
 def verify_otp_route(phone: PasswordVerifyRequest, db: Session = Depends(get_db)):
-    is_valid = verify_otp(db, phone.phone_number, phone.otp)
-    if not is_valid:
-        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
-    return {"message": "OTP verified successfully"}
+    try:
+        is_valid = verify_otp(db, phone.phone_number, phone.otp)
+        if not is_valid:
+            raise HTTPException(
+                status_code=400, detail="Invalid or expired verification code"
+            )
+        return {"message": "Verification code confirmed"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail="Verification service temporarily unavailable"
+        )
 
 
 @router.put("/update", tags=["Password Reset"])
 def update_password(phone: PasswordUpdateRequest, db: Session = Depends(get_db)):
-    is_updated = updatePassword(db, phone.phone_number, phone.new_password)
-    if not is_updated:
-        raise HTTPException(
-            status_code=400,
-            detail="Failed to update password. Please try again.",
+    try:
+        is_updated = updatePassword(db, phone.phone_number, phone.new_password)
+        if not is_updated:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to update password",
+            )
+        player = get_player_by_phone(db, phone.phone_number)
+        if not player:
+            raise HTTPException(status_code=404, detail="Player not found")
+        access_token = create_access_token(
+            data={
+                "sub": player.player_id,
+            }
         )
-    player = get_player_by_phone(db, phone.phone_number)
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
-    access_token = create_access_token(
-        data={
-            "sub": player.player_id,
+        return {
+            "message": "Password updated successfully",
+            "access_token": access_token,
+            "token_type": "bearer",
         }
-    )
-    return {
-        "message": "Password updated successfully",
-        "access_token": access_token,
-        "token_type": "bearer",
-    }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail="Password update service temporarily unavailable"
+        )

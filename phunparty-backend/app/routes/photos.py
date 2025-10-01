@@ -113,34 +113,34 @@ async def upload_player_photo(
     """
     Upload a profile photo for a player.
     """
-    # Check if player exists
-    player = get_player_by_ID(db, player_id)
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
-
-    # Validate file
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-
-    if not is_valid_image(file.filename):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
-        )
-
-    # Check file size
-    file_content = await file.read()
-    if len(file_content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="File too large. Max size: 5MB")
-
-    cleanup_old_player_photos(player_id, UPLOAD_DIR)
-
-    # Generate unique filename
-    file_extension = Path(file.filename).suffix.lower()
-    unique_filename = f"{player_id}_{uuid.uuid4()}{file_extension}"
-    file_path = UPLOAD_DIR / unique_filename
-
     try:
+        # Check if player exists
+        player = get_player_by_ID(db, player_id)
+        if not player:
+            raise HTTPException(status_code=404, detail="Player not found")
+
+        # Validate file
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+
+        if not is_valid_image(file.filename):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
+            )
+
+        # Check file size
+        file_content = await file.read()
+        if len(file_content) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="File too large. Max size: 5MB")
+
+        cleanup_old_player_photos(player_id, UPLOAD_DIR)
+
+        # Generate unique filename
+        file_extension = Path(file.filename).suffix.lower()
+        unique_filename = f"{player_id}_{uuid.uuid4()}{file_extension}"
+        file_path = UPLOAD_DIR / unique_filename
+
         # Save file
         with open(file_path, "wb") as buffer:
             buffer.write(file_content)
@@ -158,12 +158,13 @@ async def upload_player_photo(
             "photo_url": photo_url,
             "filename": unique_filename,
         }
-
+    except HTTPException:
+        raise
     except Exception as e:
         # Clean up file if database update fails
-        if file_path.exists():
+        if "file_path" in locals() and file_path.exists():
             file_path.unlink()
-        raise HTTPException(status_code=500, detail=f"Failed to upload photo: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.delete("/{player_id}/photo", tags=["Photos"])
@@ -171,18 +172,18 @@ async def delete_player_photo(player_id: str, db: Session = Depends(get_db)):
     """
     Delete a player's profile photo.
     """
-    player = get_player_by_ID(db, player_id)
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
-
-    if not player.profile_photo_url:
-        raise HTTPException(status_code=404, detail="Player has no photo to delete")
-
-    # Extract filename from URL
-    filename = player.profile_photo_url.split("/")[-1]
-    file_path = UPLOAD_DIR / filename
-
     try:
+        player = get_player_by_ID(db, player_id)
+        if not player:
+            raise HTTPException(status_code=404, detail="Player not found")
+
+        if not player.profile_photo_url:
+            raise HTTPException(status_code=404, detail="Player has no photo to delete")
+
+        # Extract filename from URL
+        filename = player.profile_photo_url.split("/")[-1]
+        file_path = UPLOAD_DIR / filename
+
         # Delete file if it exists
         if file_path.exists():
             file_path.unlink()
@@ -193,9 +194,10 @@ async def delete_player_photo(player_id: str, db: Session = Depends(get_db)):
         update_player_photo(db, player_id, None)
 
         return {"message": "Photo deleted successfully"}
-
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete photo: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/avatar/{player_id}", tags=["Photos"])
@@ -208,19 +210,19 @@ async def set_player_avatar(
     """
     Set a DiceBear generated avatar for a player.
     """
-    # Check if player exists
-    player = get_player_by_ID(db, player_id)
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
-
-    # Validate avatar style
-    if avatar_style not in DICEBEAR_STYLES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid avatar style. Available: {', '.join(DICEBEAR_STYLES)}",
-        )
-
     try:
+        # Check if player exists
+        player = get_player_by_ID(db, player_id)
+        if not player:
+            raise HTTPException(status_code=404, detail="Player not found")
+
+        # Validate avatar style
+        if avatar_style not in DICEBEAR_STYLES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid avatar style. Available: {', '.join(DICEBEAR_STYLES)}",
+            )
+
         # Clean up old uploaded photos since we're switching to avatar
         # Avatars are external URLs, so we can safely delete all uploaded files
         cleanup_old_player_photos(player_id, UPLOAD_DIR)
@@ -241,9 +243,10 @@ async def set_player_avatar(
             "avatar_style": avatar_style,
             "avatar_seed": avatar_seed,
         }
-
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to set avatar: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/avatars", tags=["Photos"])
@@ -251,21 +254,28 @@ async def get_available_avatars():
     """
     Get list of available DiceBear generated avatars.
     """
-    avatars = []
-    for style in DICEBEAR_STYLES:
-        # Generate 20 different avatars per style using numeric seeds
-        for seed in range(1, 21):
-            avatars.append(
-                {
-                    "name": f"{style}-{seed}",
-                    "style": style,
-                    "seed": str(seed),
-                    "url": f"https://api.dicebear.com/7.x/{style}/png?seed={seed}",
-                    "preview_url": f"https://api.dicebear.com/7.x/{style}/png?seed={seed}&size=64",  # Small preview
-                }
-            )
+    try:
+        avatars = []
+        for style in DICEBEAR_STYLES:
+            # Generate 20 different avatars per style using numeric seeds
+            for seed in range(1, 21):
+                avatars.append(
+                    {
+                        "name": f"{style}-{seed}",
+                        "style": style,
+                        "seed": str(seed),
+                        "url": f"https://api.dicebear.com/7.x/{style}/png?seed={seed}",
+                        "preview_url": f"https://api.dicebear.com/7.x/{style}/png?seed={seed}&size=64",  # Small preview
+                    }
+                )
 
-    return {"avatars": avatars, "total_count": len(avatars), "styles": DICEBEAR_STYLES}
+        return {
+            "avatars": avatars,
+            "total_count": len(avatars),
+            "styles": DICEBEAR_STYLES,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/avatars/styles", tags=["Photos"])
@@ -273,16 +283,19 @@ async def get_avatar_styles():
     """
     Get available avatar styles only.
     """
-    return {
-        "styles": [
-            {
-                "name": style,
-                "example_url": f"https://api.dicebear.com/7.x/{style}/png?seed=example",
-                "description": f"DiceBear {style} style avatars",
-            }
-            for style in DICEBEAR_STYLES
-        ]
-    }
+    try:
+        return {
+            "styles": [
+                {
+                    "name": style,
+                    "example_url": f"https://api.dicebear.com/7.x/{style}/png?seed=example",
+                    "description": f"DiceBear {style} style avatars",
+                }
+                for style in DICEBEAR_STYLES
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/avatars/generate/{style}", tags=["Photos"])
@@ -290,19 +303,24 @@ async def generate_avatar_preview(style: str, seed: str = "preview", size: int =
     """
     Generate a preview of an avatar with specific style and seed.
     """
-    if style not in DICEBEAR_STYLES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid avatar style. Available: {', '.join(DICEBEAR_STYLES)}",
-        )
+    try:
+        if style not in DICEBEAR_STYLES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid avatar style. Available: {', '.join(DICEBEAR_STYLES)}",
+            )
 
-    # Validate size (DiceBear supports sizes up to 512)
-    if size < 16 or size > 512:
-        size = 128
+        # Validate size (DiceBear supports sizes up to 512)
+        if size < 16 or size > 512:
+            size = 128
 
-    avatar_url = f"https://api.dicebear.com/7.x/{style}/png?seed={seed}&size={size}"
+        avatar_url = f"https://api.dicebear.com/7.x/{style}/png?seed={seed}&size={size}"
 
-    return {"style": style, "seed": seed, "size": size, "url": avatar_url}
+        return {"style": style, "seed": seed, "size": size, "url": avatar_url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/{filename}", tags=["Photos"])
@@ -310,19 +328,24 @@ async def get_photo(filename: str):
     """
     Serve a photo file.
     """
-    file_path = UPLOAD_DIR / filename
+    try:
+        file_path = UPLOAD_DIR / filename
 
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Photo not found")
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="Photo not found")
 
-    # You might want to use FileResponse here for better performance
-    from fastapi.responses import FileResponse
+        # You might want to use FileResponse here for better performance
+        from fastapi.responses import FileResponse
 
-    return FileResponse(
-        path=file_path,
-        media_type="image/*",
-        headers={"Cache-Control": "max-age=3600"},  # Cache for 1 hour
-    )
+        return FileResponse(
+            path=file_path,
+            media_type="image/*",
+            headers={"Cache-Control": "max-age=3600"},  # Cache for 1 hour
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.delete("/maintenance/cleanup-orphaned", tags=["Photos"])
@@ -365,9 +388,8 @@ async def cleanup_orphaned_photos(db: Session = Depends(get_db)):
             "orphaned_files_deleted": deleted_count,
             "storage_saved": f"~{deleted_count * 0.5}MB (estimated)",
         }
-
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/maintenance/storage-info", tags=["Photos"])
@@ -388,6 +410,5 @@ async def get_storage_info():
                 round((total_size / len(all_files)) / 1024, 2) if all_files else 0
             ),
         }
-
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Storage info failed: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))

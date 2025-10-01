@@ -28,12 +28,8 @@ def submit_answer(request: SubmitAnswerRequest, db: Session = Depends(get_db)):
             player_answer=request.player_answer,
         )
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Error submitting answer: {str(e)}"
-        )
+        raise HTTPException(status_code=400, detail="Failed to submit answer")
 
 
 @router.get(
@@ -51,8 +47,10 @@ def get_session_status(session_code: str, db: Session = Depends(get_db)):
         if "error" in status:
             raise HTTPException(status_code=404, detail=status["error"])
         return status
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Unable to retrieve game status")
 
 
 @router.get("/current-question/{session_code}", tags=["Game Logic"])
@@ -63,11 +61,9 @@ def get_current_question(session_code: str, db: Session = Depends(get_db)):
     try:
         result = get_current_question_for_session(db, session_code)
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Error getting current question: {str(e)}"
+            status_code=500, detail="Unable to retrieve current question"
         )
 
 
@@ -79,9 +75,5 @@ def start_game(session_code: str, db: Session = Depends(get_db)):
     try:
         updateGameStartStatus(db, session_code, True)
         return {"message": "Game started successfully"}
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Error getting current question: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail="Failed to start game")

@@ -18,7 +18,21 @@ def get_scores_by_session_route(session_code: str, db: Session = Depends(get_db)
     """
     Retrieve scores for a specific game session.
     """
-    scores = get_scores_by_session(db, session_code)
-    if not scores:
-        raise HTTPException(status_code=404, detail="No scores found for this session")
-    return scores
+    try:
+        scores = get_scores_by_session(db, session_code)
+        if not scores:
+            raise HTTPException(
+                status_code=404, detail="No scores available for this game session yet."
+            )
+        return scores
+    except HTTPException:
+        raise
+    except ValueError as e:
+        # Handle specific database/validation errors
+        raise HTTPException(status_code=400, detail="Invalid session code provided.")
+    except Exception as e:
+        # Generic fallback with custom message
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to retrieve scores at this time. Please try again.",
+        )

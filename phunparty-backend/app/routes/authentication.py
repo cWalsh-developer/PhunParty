@@ -15,15 +15,24 @@ def login_route(login_request: LoginRequest, db: Session = Depends(get_db)):
     """
     Retrieve a player by their email.
     """
-    player = get_player_by_email(db, login_request.player_email)
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found")
-    if not verify_password(login_request.password, player.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid password")
-    else:
-        access_token = create_access_token(
-            data={
-                "sub": player.player_id,
-            }
+    try:
+        player = get_player_by_email(db, login_request.player_email)
+        if not player:
+            raise HTTPException(
+                status_code=404, detail="No account found with this email address"
+            )
+        if not verify_password(login_request.password, player.hashed_password):
+            raise HTTPException(status_code=401, detail="Incorrect password")
+        else:
+            access_token = create_access_token(
+                data={
+                    "sub": player.player_id,
+                }
+            )
+            return {"access_token": access_token, "token_type": "bearer"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail="Login service temporarily unavailable"
         )
-        return {"access_token": access_token, "token_type": "bearer"}
