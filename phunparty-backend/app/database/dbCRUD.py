@@ -178,6 +178,8 @@ def end_game_session(db: Session, session_code: str) -> dict:
                     "player_id": result.player_id,
                     "score": result.score,
                     "result": result.result,
+                    "player_name": get_player_by_ID(db, result.player_id).player_name,
+                    "session_code": session_code,
                 }
                 for result in final_results
             ],
