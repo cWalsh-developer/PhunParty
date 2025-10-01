@@ -110,8 +110,12 @@ def join_game_route(req: GameJoinRequest, db: Session = Depends(get_db)):
         return {
             "message": "Successfully joined the game!",
         }
+    except ValueError as e:
+        # Handle specific business logic errors
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=400, detail="Unable to join game")
+        # Handle unexpected errors
+        raise HTTPException(status_code=500, detail="Unable to join game - internal error")
 
 
 @router.get("/session/{session_code}/join-info", tags=["Game"])
