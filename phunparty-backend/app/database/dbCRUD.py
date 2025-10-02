@@ -325,6 +325,7 @@ def assign_player_to_session(db: Session, player_id: str, session_code: str) -> 
     # Session Questions Assignment CRUD operations --------------------------------------------------------------------------------------------------------------
 
 
+# Rebooting
 def add_question_to_session(db: Session, session_code: str) -> None:
     """Add a question to a game session."""
     session = _get_session_by_code_internal(db, session_code)
