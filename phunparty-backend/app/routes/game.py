@@ -21,6 +21,13 @@ from app.models.game import GameCreation, GameJoinRequest, GameSessionCreation
 from app.models.game_model import Game
 from app.models.response_models import GameResponse
 from app.websockets.manager import manager
+from app.queue.join_queue_manager import join_queue_manager
+from app.queue.queue_models import (
+    JoinQueueRequest,
+    JoinQueueResponse,
+    QueueStatusResponse,
+    QueueStatsResponse,
+)
 
 router = APIRouter(dependencies=[Depends(get_api_key)])
 
@@ -104,7 +111,8 @@ def get_all_games(db: Session = Depends(get_db)):
 @router.post("/join", tags=["Game"])
 def join_game_route(req: GameJoinRequest, db: Session = Depends(get_db)):
     """
-    Join an existing game session.
+    Join an existing game session (direct join - may fail under high concurrency).
+    For safer concurrent joins, use /join-queue endpoint instead.
     """
     try:
         game = join_game(db, req.session_code, req.player_id)
@@ -118,6 +126,90 @@ def join_game_route(req: GameJoinRequest, db: Session = Depends(get_db)):
         # Handle unexpected errors
         raise HTTPException(
             status_code=500, detail="Unable to join game - internal error"
+        )
+
+
+@router.post("/join-queue", response_model=JoinQueueResponse, tags=["Game"])
+async def join_game_queue(request: JoinQueueRequest, db: Session = Depends(get_db)):
+    """
+    Join a game session via queue system to prevent race conditions.
+    This is the recommended way to join sessions when multiple players might join simultaneously.
+    Returns a queue_id for tracking the join status.
+    """
+    try:
+        # Ensure queue manager is running (start if not already running)
+        if not join_queue_manager._running:
+            try:
+                await join_queue_manager.start()
+            except Exception as e:
+                return JoinQueueResponse(
+                    success=False, message=f"Failed to start queue system: {str(e)}"
+                )
+        if not join_queue_manager._running:
+            await join_queue_manager.start()
+
+        # Add to queue
+        queue_id = await join_queue_manager.add_to_queue(
+            player_id=request.player_id,
+            session_code=request.session_code,
+            websocket_id=request.websocket_id,
+        )
+
+        # Estimate wait time (rough calculation based on queue position)
+        queue_stats = join_queue_manager.get_queue_stats()
+        estimated_wait = min(queue_stats["pending"] * 2, 30)  # Max 30 seconds
+
+        return JoinQueueResponse(
+            success=True,
+            message="Added to join queue successfully",
+            queue_id=queue_id,
+            estimated_wait_time=estimated_wait,
+        )
+
+    except Exception as e:
+        return JoinQueueResponse(
+            success=False, message=f"Failed to add to join queue: {str(e)}"
+        )
+
+
+@router.get(
+    "/queue-status/{queue_id}", response_model=QueueStatusResponse, tags=["Game"]
+)
+async def get_queue_status(queue_id: str):
+    """
+    Get the current status of a queue entry.
+    """
+    try:
+        status = await join_queue_manager.get_queue_status(queue_id)
+
+        if not status:
+            return QueueStatusResponse(success=False, message="Queue entry not found")
+
+        return QueueStatusResponse(
+            success=True, message="Queue status retrieved successfully", **status
+        )
+
+    except Exception as e:
+        return QueueStatusResponse(
+            success=False, message=f"Failed to get queue status: {str(e)}"
+        )
+
+
+@router.get("/queue-stats", response_model=QueueStatsResponse, tags=["Game"])
+async def get_queue_stats():
+    """
+    Get current queue statistics (for debugging/monitoring).
+    """
+    try:
+        stats = join_queue_manager.get_queue_stats()
+
+        return QueueStatsResponse(
+            success=True, message="Queue statistics retrieved successfully", stats=stats
+        )
+
+    except Exception as e:
+        return QueueStatsResponse(
+            success=False, message=f"Failed to get queue statistics: {str(e)}"
         )
 
 

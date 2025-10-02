@@ -138,6 +138,17 @@ class ConnectionManager:
         except Exception as e:
             logger.error(f"Error sending personal message: {e}")
 
+    async def send_personal_message_by_id(self, message: dict, websocket_id: str):
+        """Send message to specific WebSocket by ID"""
+        try:
+            if websocket_id in self.websocket_registry:
+                websocket = self.websocket_registry[websocket_id]["websocket"]
+                await self.send_personal_message(message, websocket)
+            else:
+                logger.warning(f"WebSocket ID {websocket_id} not found in registry")
+        except Exception as e:
+            logger.error(f"Error sending personal message by ID: {e}")
+
     async def broadcast_to_session(
         self,
         session_code: str,
@@ -234,6 +245,26 @@ class ConnectionManager:
             "mobile_clients": mobile_clients,
             "mobile_players": self.get_mobile_players(session_code),
         }
+
+    async def send_personal_message_by_id(self, message: dict, websocket_id: str):
+        """Send message to specific WebSocket by websocket_id"""
+        try:
+            # Find the websocket object by ID
+            if websocket_id in self.websocket_registry:
+                websocket = self.websocket_registry[websocket_id]["websocket"]
+                await websocket.send_text(
+                    json.dumps({**message, "timestamp": datetime.now().timestamp()})
+                )
+            else:
+                logger.warning(f"WebSocket ID {websocket_id} not found in registry")
+        except Exception as e:
+            logger.error(f"Error sending personal message by ID: {e}")
+
+    def get_websocket_by_id(self, websocket_id: str) -> Optional[WebSocket]:
+        """Get WebSocket object by websocket_id"""
+        if websocket_id in self.websocket_registry:
+            return self.websocket_registry[websocket_id]["websocket"]
+        return None
 
 
 # Global connection manager instance
