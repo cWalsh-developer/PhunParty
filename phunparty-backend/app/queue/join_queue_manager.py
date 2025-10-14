@@ -105,7 +105,7 @@ class JoinQueueManager:
             session_code=session_code.upper(),
             websocket_id=websocket_id,
             status=QueueStatus.PENDING,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(),
         )
 
         self.queue[queue_id] = entry
