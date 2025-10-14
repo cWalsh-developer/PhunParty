@@ -270,8 +270,18 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
         return result
 
     except Exception as e:
-        logger.error(f"Error getting question with options: {e}")
-        raise
+        logger.error(f"Error getting question with options for {question_id}: {e}")
+        # Return a minimal fallback response instead of raising
+        return {
+            "question_id": question_id,
+            "question": "Question unavailable",
+            "answer": "Unknown",
+            "genre": "Trivia",
+            "difficulty": "easy",
+            "question_options": [],
+            "display_options": ["Unable to load question options"],
+            "correct_index": 0,
+        }
 
 
 async def broadcast_question_with_options(
@@ -323,8 +333,24 @@ async def broadcast_question_with_options(
 
     except Exception as e:
         logger.error(f"Failed to broadcast question with options: {e}")
-        # Send error message to all clients
-        await manager.broadcast_to_session(
-            session_code,
-            {"type": "error", "data": {"message": "Failed to load question"}},
-        )
+        # Try to send a fallback question instead of just an error
+        try:
+            fallback_message = {
+                "type": "new_question",
+                "data": {
+                    "question_id": question_id,
+                    "question": "Question temporarily unavailable",
+                    "genre": "Trivia",
+                    "difficulty": "easy",
+                    "display_options": ["Please wait for next question"],
+                    "question_index": None,
+                    "total_questions": None,
+                },
+            }
+            await manager.broadcast_to_session(session_code, fallback_message)
+        except:
+            # Last resort: send error message
+            await manager.broadcast_to_session(
+                session_code,
+                {"type": "error", "data": {"message": "Failed to load question"}},
+            )
