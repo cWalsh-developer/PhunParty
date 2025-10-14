@@ -7,6 +7,7 @@ class Question(BaseModel):
     answer: str
     genre: str
     difficulty: DifficultyLevel
+    question_options: list[str]
 
 
 class AnswerVerification(BaseModel):

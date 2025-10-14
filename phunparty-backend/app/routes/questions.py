@@ -1,4 +1,6 @@
 from typing import List
+import json
+import random
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -14,7 +16,9 @@ router = APIRouter(dependencies=[Depends(get_api_key)])
 
 
 @router.get("/{question_id}", tags=["Questions"])
-def get_question_by_id_route(question_id: str, db: Session = Depends(get_db)):
+def get_question_by_id_route(
+    question_id: str, randomise: bool = True, db: Session = Depends(get_db)
+):
     """
     Retrieve a question by its ID.
     """
@@ -22,7 +26,21 @@ def get_question_by_id_route(question_id: str, db: Session = Depends(get_db)):
         question = get_question_by_id(question_id, db)
         if not question:
             raise HTTPException(status_code=404, detail="Question not found")
-        return question
+        if randomise:
+            incorrect_options = json.loads(question.question_options)
+            all_options = incorrect_options + [question.answer]
+            random.shuffle(all_options)
+            correct_index = all_options.index(question.answer)
+        return {
+            "question_id": question.question_id,
+            "question": question.question,
+            "answer": question.answer,
+            "genre": question.genre,
+            "difficulty": question.difficulty,
+            "question_options": question.question_options,
+            "display options": all_options,
+            "correct_index": correct_index,
+        }
     except HTTPException:
         raise
     except Exception as e:
