@@ -348,7 +348,9 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
             try:
                 current_question = get_current_question_details(db, session_code)
             except Exception as e:
-                logger.warning(f"Could not get current question for game start broadcast: {e}")
+                logger.warning(
+                    f"Could not get current question for game start broadcast: {e}"
+                )
 
         # Broadcast game started to all clients - this is crucial for frontend to know game started
         await manager.broadcast_to_session(
@@ -363,9 +365,13 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
                     "game_state": {
                         "isstarted": True,
                         "is_active": game_state.is_active if game_state else True,
-                        "current_question_index": game_state.current_question_index if game_state else 0,
-                        "total_questions": game_state.total_questions if game_state else 1,
-                    }
+                        "current_question_index": (
+                            game_state.current_question_index if game_state else 0
+                        ),
+                        "total_questions": (
+                            game_state.total_questions if game_state else 1
+                        ),
+                    },
                 },
             },
         )
@@ -374,14 +380,18 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
         await manager.broadcast_to_session(
             session_code,
             {
-                "type": "game_status_update", 
+                "type": "game_status_update",
                 "data": {
                     "isstarted": True,
                     "is_active": game_state.is_active if game_state else True,
-                    "current_question_index": game_state.current_question_index if game_state else 0,
+                    "current_question_index": (
+                        game_state.current_question_index if game_state else 0
+                    ),
                     "total_questions": game_state.total_questions if game_state else 1,
-                    "is_waiting_for_players": game_state.is_waiting_for_players if game_state else True,
-                }
+                    "is_waiting_for_players": (
+                        game_state.is_waiting_for_players if game_state else True
+                    ),
+                },
             },
         )
 

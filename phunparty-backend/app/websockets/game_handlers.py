@@ -145,11 +145,16 @@ class TriviaGameHandler(GameEventHandler):
 
                 game_state = get_game_session_state(db, self.session_code)
                 if game_state and game_state.current_question_id:
-                    await self.broadcast_question_with_options(game_state.current_question_id, db)
+                    await self.broadcast_question_with_options(
+                        game_state.current_question_id, db
+                    )
                 else:
                     # Fallback to old method if no current question ID
                     from app.database.dbCRUD import get_current_question_details
-                    current_question = get_current_question_details(db, self.session_code)
+
+                    current_question = get_current_question_details(
+                        db, self.session_code
+                    )
                     if current_question:
                         await self.broadcast_question(current_question)
 
