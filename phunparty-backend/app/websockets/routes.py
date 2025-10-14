@@ -379,28 +379,40 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
 
         # Also broadcast a separate game status update for any clients that might be listening specifically for status
         logger.info(f"📊 Broadcasting game_status_update for session {session_code}")
-        
+
         # Get player counts for accurate status
-        from app.database.dbCRUD import get_number_of_players_in_session, count_responses_for_question
+        from app.database.dbCRUD import (
+            get_number_of_players_in_session,
+            count_responses_for_question,
+        )
+
         total_players = get_number_of_players_in_session(db, session_code)
         current_responses = 0
         if game_state and game_state.current_question_id:
-            current_responses = count_responses_for_question(db, session_code, game_state.current_question_id)
-        
+            current_responses = count_responses_for_question(
+                db, session_code, game_state.current_question_id
+            )
+
         status_data = {
             "isstarted": True,
             "is_active": game_state.is_active if game_state else True,
-            "current_question_index": game_state.current_question_index if game_state else 0,
+            "current_question_index": (
+                game_state.current_question_index if game_state else 0
+            ),
             "total_questions": game_state.total_questions if game_state else 1,
-            "is_waiting_for_players": game_state.is_waiting_for_players if game_state else True,
+            "is_waiting_for_players": (
+                game_state.is_waiting_for_players if game_state else True
+            ),
             # Frontend-compatible format
             "gameState": "active",
-            "currentQuestion": (game_state.current_question_index + 1) if game_state else 1,
+            "currentQuestion": (
+                (game_state.current_question_index + 1) if game_state else 1
+            ),
             "totalQuestions": game_state.total_questions if game_state else 1,
             "playersCount": total_players,
             "playersAnswered": current_responses,
         }
-        
+
         await manager.broadcast_to_session(
             session_code,
             {

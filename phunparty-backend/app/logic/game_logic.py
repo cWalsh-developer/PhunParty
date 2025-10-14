@@ -98,7 +98,7 @@ def check_and_advance_game(
 
         # Determine the appropriate game state for frontend
         frontend_game_state = "active" if game_state.isstarted else "waiting"
-        
+
         result = {
             "players_total": players_in_session,
             "players_answered": responses_to_question,
@@ -108,7 +108,8 @@ def check_and_advance_game(
             "game_state": frontend_game_state,
             # Add frontend-compatible format
             "gameState": frontend_game_state,
-            "currentQuestion": game_state.current_question_index + 1,  # Frontend expects 1-based indexing
+            "currentQuestion": game_state.current_question_index
+            + 1,  # Frontend expects 1-based indexing
             "totalQuestions": game_state.total_questions,
             "playersCount": players_in_session,
             "playersAnswered": responses_to_question,
@@ -134,13 +135,17 @@ def check_and_advance_game(
                 advancement_result = advance_to_next_question(db, session_code)
                 logger.info(f"Advancement result: {advancement_result}")
                 result.update(advancement_result)
-                
+
                 # Update frontend-compatible data after advancement
                 if "action" in advancement_result:
                     updated_game_state = get_game_session_state(db, session_code)
                     if updated_game_state:
-                        result["currentQuestion"] = updated_game_state.current_question_index + 1
-                        result["current_question_index"] = updated_game_state.current_question_index
+                        result["currentQuestion"] = (
+                            updated_game_state.current_question_index + 1
+                        )
+                        result["current_question_index"] = (
+                            updated_game_state.current_question_index
+                        )
                         result["playersAnswered"] = 0  # Reset for new question
             else:
                 logger.info(
@@ -151,7 +156,7 @@ def check_and_advance_game(
 
                 advancement_result = end_game_session(db, session_code)
                 result.update(advancement_result)
-                
+
                 # Update frontend-compatible data for game end
                 result["gameState"] = "ended"
                 result["game_state"] = "ended"

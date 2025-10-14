@@ -150,18 +150,24 @@ class TriviaGameHandler(GameEventHandler):
             logger.info(f"Full answer submission result: {result}")
 
             if action == "next_question":
-                logger.info(f"🚀 Advancing to next question for session {self.session_code}")
+                logger.info(
+                    f"🚀 Advancing to next question for session {self.session_code}"
+                )
                 # Get the new question details and broadcast with options
                 from app.logic.game_logic import get_game_session_state
 
                 game_state = get_game_session_state(db, self.session_code)
                 if game_state and game_state.current_question_id:
-                    logger.info(f"📝 Broadcasting new question {game_state.current_question_id} with options")
+                    logger.info(
+                        f"📝 Broadcasting new question {game_state.current_question_id} with options"
+                    )
                     await self.broadcast_question_with_options(
                         game_state.current_question_id, db
                     )
                 else:
-                    logger.warning("⚠️ No current question ID found, using fallback method")
+                    logger.warning(
+                        "⚠️ No current question ID found, using fallback method"
+                    )
                     # Fallback to old method if no current question ID
                     from app.database.dbCRUD import get_current_question_details
 
@@ -185,7 +191,9 @@ class TriviaGameHandler(GameEventHandler):
                     },
                 )
             elif action is None:
-                logger.info(f"⏳ No action needed - waiting for more players or other conditions")
+                logger.info(
+                    f"⏳ No action needed - waiting for more players or other conditions"
+                )
 
             # Send confirmation to the specific mobile player
             mobile_players = manager.get_mobile_players(self.session_code)
