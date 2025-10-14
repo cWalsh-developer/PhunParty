@@ -56,6 +56,28 @@ class GameEventHandler:
             self.session_code, {"type": "question_started", "data": mobile_data}
         )
 
+    async def broadcast_question_with_options(self, question_id: str, db):
+        """Broadcast question with randomized options using the new system"""
+        try:
+            from app.logic.game_logic import broadcast_question_with_options
+
+            await broadcast_question_with_options(self.session_code, question_id, db)
+        except Exception as e:
+            logger.error(f"Error broadcasting question with options: {e}")
+            # Fallback to old system if new one fails
+            from app.database.dbCRUD import get_question_by_id
+
+            question = get_question_by_id(question_id, db)
+            if question:
+                await self.broadcast_question(
+                    {
+                        "question_id": question.question_id,
+                        "question": question.question,
+                        "answer": question.answer,
+                        "genre": question.genre,
+                    }
+                )
+
     def format_question_for_mobile(
         self, question_data: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -158,7 +180,9 @@ class TriviaGameHandler(GameEventHandler):
         return {
             "game_type": "trivia",
             "question": question_data.get("question", ""),
-            "options": question_data.get("options", []),
+            "options": question_data.get(
+                "display_options", question_data.get("options", [])
+            ),
             "question_id": question_data.get("question_id"),
             "ui_mode": "multiple_choice",
         }

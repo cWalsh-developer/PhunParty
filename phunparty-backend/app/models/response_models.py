@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 
 from pydantic import BaseModel
 
@@ -35,6 +35,7 @@ class QuestionRequest(BaseModel):
     question: str
     answer: str
     genre: str
+    question_options: Optional[List[str]] = []
 
 
 class QuestionsAddedResponseModel(BaseModel):

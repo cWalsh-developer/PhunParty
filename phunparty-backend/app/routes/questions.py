@@ -61,6 +61,12 @@ def add_question_route(
             answer=question_request.answer,
             genre=question_request.genre,
             difficulty=question_request.difficulty,
+            question_options=(
+                json.dumps(question_request.question_options)
+                if hasattr(question_request, "question_options")
+                and question_request.question_options
+                else "[]"
+            ),
         )
 
         submitted_question = submit_questions(db, question)

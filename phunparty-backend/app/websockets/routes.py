@@ -245,26 +245,102 @@ async def handle_websocket_message(
             {"type": "session_stats", "data": stats}, websocket
         )
 
+    elif message_type == "get_question_with_options":
+        # Request for a specific question with randomized options
+        question_id = data.get("question_id")
+        if question_id:
+            await handle_get_question_with_options(websocket, question_id, db)
+        else:
+            await manager.send_personal_message(
+                {"type": "error", "data": {"message": "Question ID required"}},
+                websocket,
+            )
+
+    elif message_type == "broadcast_current_question" and client_type == "web":
+        # Host wants to broadcast current question to all players
+        await handle_broadcast_current_question(session_code, db)
+
     else:
         logger.warning(f"Unknown message type: {message_type} from {client_type}")
+
+
+async def handle_get_question_with_options(
+    websocket: WebSocket, question_id: str, db: Session
+):
+    """
+    Handle request for a question with randomized options
+    """
+    try:
+        from app.logic.game_logic import get_question_with_randomized_options
+
+        question_data = get_question_with_randomized_options(db, question_id)
+
+        await manager.send_personal_message(
+            {"type": "question_with_options", "data": question_data}, websocket
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting question with options: {e}")
+        await manager.send_personal_message(
+            {"type": "error", "data": {"message": f"Failed to get question: {str(e)}"}},
+            websocket,
+        )
+
+
+async def handle_broadcast_current_question(session_code: str, db: Session):
+    """
+    Handle request to broadcast the current question to all players
+    """
+    try:
+        from app.logic.game_logic import broadcast_question_with_options
+
+        # Get current game state
+        game_state = get_game_session_state(db, session_code)
+        if not game_state:
+            logger.error(f"Game session {session_code} not found")
+            return
+
+        if not game_state.current_question_id:
+            logger.error(f"No current question for session {session_code}")
+            return
+
+        # Broadcast the current question with options
+        await broadcast_question_with_options(
+            session_code, game_state.current_question_id, db
+        )
+
+    except Exception as e:
+        logger.error(f"Error broadcasting current question: {e}")
+        await manager.broadcast_to_session(
+            session_code,
+            {"type": "error", "data": {"message": "Failed to broadcast question"}},
+        )
 
 
 async def handle_game_start(session_code: str, game_handler, db: Session):
     """Handle game start event"""
     try:
         # Update game state in database to mark as started
-        from app.logic.game_logic import updateGameStartStatus
+        from app.logic.game_logic import updateGameStartStatus, get_game_session_state
 
         updateGameStartStatus(db, session_code, True)
 
-        # Get first question
-        current_question = get_current_question_details(db, session_code)
+        # Get current game state to get the current question ID
+        game_state = get_game_session_state(db, session_code)
 
-        if current_question:
-            if hasattr(game_handler, "start_question"):
-                await game_handler.start_question(current_question)
+        if game_state and game_state.current_question_id:
+            # Use the new broadcast system with randomized options
+            if hasattr(game_handler, "broadcast_question_with_options"):
+                await game_handler.broadcast_question_with_options(
+                    game_state.current_question_id, db
+                )
             else:
-                await game_handler.broadcast_question(current_question)
+                # Fallback to old system
+                current_question = get_current_question_details(db, session_code)
+                if current_question and hasattr(game_handler, "start_question"):
+                    await game_handler.start_question(current_question)
+                elif current_question:
+                    await game_handler.broadcast_question(current_question)
 
         # Broadcast game started to all clients
         game_state = get_game_session_state(db, session_code)
@@ -288,18 +364,36 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
 async def handle_next_question(session_code: str, game_handler, db: Session):
     """Handle moving to next question"""
     try:
-        # Advance to next question in database
-        # You'll need to implement this in dbCRUD
-        # advance_to_next_question(db, session_code)
+        # Use the game logic to advance to next question
+        from app.logic.game_logic import check_and_advance_game, get_game_session_state
 
-        # Get the new current question
-        current_question = get_current_question_details(db, session_code)
+        # Get current game state
+        game_state = get_game_session_state(db, session_code)
+        if not game_state or not game_state.current_question_id:
+            logger.error(f"No current question found for session {session_code}")
+            return
 
-        if current_question:
-            if hasattr(game_handler, "start_question"):
-                await game_handler.start_question(current_question)
+        # Force advance to next question
+        result = check_and_advance_game(
+            db, session_code, game_state.current_question_id
+        )
+
+        # Get the updated game state
+        updated_game_state = get_game_session_state(db, session_code)
+
+        if updated_game_state and updated_game_state.current_question_id:
+            # Broadcast the new question with randomized options
+            if hasattr(game_handler, "broadcast_question_with_options"):
+                await game_handler.broadcast_question_with_options(
+                    updated_game_state.current_question_id, db
+                )
             else:
-                await game_handler.broadcast_question(current_question)
+                # Fallback to regular broadcast
+                current_question = get_current_question_details(db, session_code)
+                if current_question and hasattr(game_handler, "start_question"):
+                    await game_handler.start_question(current_question)
+                elif current_question:
+                    await game_handler.broadcast_question(current_question)
         else:
             # No more questions - end game
             await handle_game_end(session_code, db)
