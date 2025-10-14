@@ -182,7 +182,7 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
 
         # Handle questions that might not have options yet
         if not question.question_options:
-            logger.warning(f"Question {question_id} has no question_options")
+            logger.warning(f"Question {question_id} has no question_options, returning answer only")
             return {
                 "question_id": question.question_id,
                 "question": question.question,
@@ -197,18 +197,31 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
             }
 
         # Parse and randomize the options
+        logger.info(f"Question {question_id} question_options raw value: {repr(question.question_options)}")
         try:
             incorrect_options = json.loads(question.question_options)
-        except (json.JSONDecodeError, TypeError):
-            logger.error(f"Invalid JSON in question_options for question {question_id}")
-            incorrect_options = []
+            logger.info(f"Question {question_id} parsed options: {incorrect_options}")
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.error(f"Invalid JSON in question_options for question {question_id}: {e}")
+            logger.error(f"Raw value was: {repr(question.question_options)}")
+            # Fallback to answer only
+            return {
+                "question_id": question.question_id,
+                "question": question.question,
+                "answer": question.answer,
+                "genre": question.genre,
+                "difficulty": question.difficulty.value if question.difficulty else "easy",
+                "question_options": [],
+                "display_options": [question.answer],
+                "correct_index": 0,
+            }
 
         # Combine incorrect options with correct answer
         all_options = incorrect_options + [question.answer]
         random.shuffle(all_options)
         correct_index = all_options.index(question.answer)
 
-        return {
+        result = {
             "question_id": question.question_id,
             "question": question.question,
             "answer": question.answer,
@@ -218,6 +231,9 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
             "display_options": all_options,
             "correct_index": correct_index,
         }
+        
+        logger.info(f"Question {question_id} final randomized result: display_options={result['display_options']}, correct_index={result['correct_index']}")
+        return result
 
     except Exception as e:
         logger.error(f"Error getting question with options: {e}")
