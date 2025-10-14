@@ -211,7 +211,9 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
             if isinstance(raw_options, list):
                 # Already parsed by SQLAlchemy
                 incorrect_options = raw_options
-                logger.info(f"Question {question_id} options already parsed as list: {incorrect_options}")
+                logger.info(
+                    f"Question {question_id} options already parsed as list: {incorrect_options}"
+                )
             elif isinstance(raw_options, str):
                 # String that needs JSON parsing - try multiple parsing approaches
                 for attempt, clean_func in enumerate(
@@ -232,7 +234,9 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
                         break
                     except (json.JSONDecodeError, TypeError) as e:
                         if attempt == 1:
-                            logger.error(f"Question {question_id} JSON parsing failed: {e}")
+                            logger.error(
+                                f"Question {question_id} JSON parsing failed: {e}"
+                            )
                             logger.error(f"Raw value: {repr(raw_options)}")
                         continue
                 else:
@@ -255,7 +259,9 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
                     }
             else:
                 # Unknown type
-                logger.error(f"Question {question_id} question_options is unexpected type: {type(raw_options)}")
+                logger.error(
+                    f"Question {question_id} question_options is unexpected type: {type(raw_options)}"
+                )
                 return {
                     "question_id": question.question_id,
                     "question": question.question,
