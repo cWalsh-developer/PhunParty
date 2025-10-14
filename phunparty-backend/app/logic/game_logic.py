@@ -207,34 +207,55 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
         raw_options = question.question_options
 
         if raw_options:
-            # Try multiple parsing approaches
-            for attempt, clean_func in enumerate(
-                [
-                    lambda x: x,  # Original
-                    lambda x: x.strip(),  # Remove whitespace
-                    lambda x: x.strip().lstrip("\ufeff"),  # Remove BOM
-                    lambda x: x.replace("\x00", ""),  # Remove null bytes
-                ],
-                1,
-            ):
-                try:
-                    cleaned_options = clean_func(raw_options)
-                    incorrect_options = json.loads(cleaned_options)
-                    logger.info(
-                        f"Question {question_id} parsed options (attempt {attempt}): {incorrect_options}"
+            # Check if it's already a list (PostgreSQL JSON field) or needs parsing
+            if isinstance(raw_options, list):
+                # Already parsed by SQLAlchemy
+                incorrect_options = raw_options
+                logger.info(f"Question {question_id} options already parsed as list: {incorrect_options}")
+            elif isinstance(raw_options, str):
+                # String that needs JSON parsing - try multiple parsing approaches
+                for attempt, clean_func in enumerate(
+                    [
+                        lambda x: x,  # Original
+                        lambda x: x.strip(),  # Remove whitespace
+                        lambda x: x.strip().lstrip("\ufeff"),  # Remove BOM
+                        lambda x: x.replace("\x00", ""),  # Remove null bytes
+                    ],
+                    1,
+                ):
+                    try:
+                        cleaned_options = clean_func(raw_options)
+                        incorrect_options = json.loads(cleaned_options)
+                        logger.info(
+                            f"Question {question_id} parsed options (attempt {attempt}): {incorrect_options}"
+                        )
+                        break
+                    except (json.JSONDecodeError, TypeError) as e:
+                        if attempt == 1:
+                            logger.error(f"Question {question_id} JSON parsing failed: {e}")
+                            logger.error(f"Raw value: {repr(raw_options)}")
+                        continue
+                else:
+                    # All parsing attempts failed
+                    logger.error(
+                        f"Question {question_id} - All JSON parsing attempts failed"
                     )
-                    break
-                except (json.JSONDecodeError, TypeError) as e:
-                    if attempt == 1:
-                        logger.error(f"Question {question_id} JSON parsing failed: {e}")
-                        logger.error(f"Raw value: {repr(raw_options)}")
-                    continue
+                    # Fallback to answer only
+                    return {
+                        "question_id": question.question_id,
+                        "question": question.question,
+                        "answer": question.answer,
+                        "genre": question.genre,
+                        "difficulty": (
+                            question.difficulty.value if question.difficulty else "easy"
+                        ),
+                        "question_options": [],
+                        "display_options": [question.answer],
+                        "correct_index": 0,
+                    }
             else:
-                # All parsing attempts failed
-                logger.error(
-                    f"Question {question_id} - All JSON parsing attempts failed"
-                )
-                # Fallback to answer only
+                # Unknown type
+                logger.error(f"Question {question_id} question_options is unexpected type: {type(raw_options)}")
                 return {
                     "question_id": question.question_id,
                     "question": question.question,
