@@ -107,21 +107,29 @@ def check_and_advance_game(
 
         # If all players have answered
         if responses_to_question >= players_in_session:
+            logger.info(f"All players ({responses_to_question}/{players_in_session}) have answered question {current_question_id}")
+            
             # Update waiting status
             update_game_state_waiting_status(db, session_code, False)
 
             # Check if there are more questions
             if game_state.current_question_index + 1 < game_state.total_questions:
+                logger.info(f"Advancing to next question. Current index: {game_state.current_question_index}, Total: {game_state.total_questions}")
                 # Advance to next question
                 advancement_result = advance_to_next_question(db, session_code)
+                logger.info(f"Advancement result: {advancement_result}")
                 result.update(advancement_result)
             else:
+                logger.info(f"Game ending. No more questions after index {game_state.current_question_index}")
                 # No more questions, end the game
                 from app.database.dbCRUD import end_game_session
 
                 advancement_result = end_game_session(db, session_code)
                 result.update(advancement_result)
+        else:
+            logger.info(f"Waiting for more players to answer. {responses_to_question}/{players_in_session} have answered")
 
+        logger.info(f"Final check_and_advance_game result: {result}")
         return result
     except Exception as e:
         return {"error": str(e)}

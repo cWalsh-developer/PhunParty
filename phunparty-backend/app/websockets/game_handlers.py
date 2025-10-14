@@ -110,6 +110,9 @@ class TriviaGameHandler(GameEventHandler):
                 logger.error(f"Error submitting answer: {result['error']}")
                 return
 
+            # Log the result for debugging
+            logger.info(f"Answer submission result for player {player_id}: {result}")
+
             # Get player info for broadcasting
             player = get_player_by_ID(db, player_id)
             player_name = player.player_name if player else "Unknown Player"
@@ -139,7 +142,11 @@ class TriviaGameHandler(GameEventHandler):
             )
 
             # If game advanced to next question, broadcast it
-            if result.get("game_state", {}).get("action") == "next_question":
+            # Check both possible locations for the action (top level or nested in game_state)
+            action = result.get("action") or result.get("game_state", {}).get("action")
+            logger.info(f"Detected action after answer submission: {action}")
+            
+            if action == "next_question":
                 # Get the new question details and broadcast with options
                 from app.logic.game_logic import get_game_session_state
 
@@ -159,7 +166,7 @@ class TriviaGameHandler(GameEventHandler):
                         await self.broadcast_question(current_question)
 
             # If game ended, broadcast game end
-            elif result.get("game_state", {}).get("action") == "game_ended":
+            elif action == "game_ended":
                 await manager.broadcast_to_session(
                     self.session_code,
                     {
