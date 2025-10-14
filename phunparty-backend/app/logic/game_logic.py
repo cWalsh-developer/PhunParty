@@ -202,22 +202,27 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
         logger.info(
             f"Question {question_id} question_options raw value: {repr(question.question_options)}"
         )
-        
+
         incorrect_options = []
         raw_options = question.question_options
-        
+
         if raw_options:
             # Try multiple parsing approaches
-            for attempt, clean_func in enumerate([
-                lambda x: x,  # Original
-                lambda x: x.strip(),  # Remove whitespace
-                lambda x: x.strip().lstrip('\ufeff'),  # Remove BOM
-                lambda x: x.replace('\x00', ''),  # Remove null bytes
-            ], 1):
+            for attempt, clean_func in enumerate(
+                [
+                    lambda x: x,  # Original
+                    lambda x: x.strip(),  # Remove whitespace
+                    lambda x: x.strip().lstrip("\ufeff"),  # Remove BOM
+                    lambda x: x.replace("\x00", ""),  # Remove null bytes
+                ],
+                1,
+            ):
                 try:
                     cleaned_options = clean_func(raw_options)
                     incorrect_options = json.loads(cleaned_options)
-                    logger.info(f"Question {question_id} parsed options (attempt {attempt}): {incorrect_options}")
+                    logger.info(
+                        f"Question {question_id} parsed options (attempt {attempt}): {incorrect_options}"
+                    )
                     break
                 except (json.JSONDecodeError, TypeError) as e:
                     if attempt == 1:
@@ -226,7 +231,9 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
                     continue
             else:
                 # All parsing attempts failed
-                logger.error(f"Question {question_id} - All JSON parsing attempts failed")
+                logger.error(
+                    f"Question {question_id} - All JSON parsing attempts failed"
+                )
                 # Fallback to answer only
                 return {
                     "question_id": question.question_id,
@@ -235,11 +242,11 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
                     "genre": question.genre,
                     "difficulty": (
                         question.difficulty.value if question.difficulty else "easy"
-                ),
-                "question_options": [],
-                "display_options": [question.answer],
-                "correct_index": 0,
-            }
+                    ),
+                    "question_options": [],
+                    "display_options": [question.answer],
+                    "correct_index": 0,
+                }
 
         # Combine incorrect options with correct answer
         all_options = incorrect_options + [question.answer]
