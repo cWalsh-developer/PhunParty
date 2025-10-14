@@ -38,7 +38,7 @@ def get_question_by_id_route(
             "genre": question.genre,
             "difficulty": question.difficulty,
             "question_options": question.question_options,
-            "display options": all_options,
+            "display_options": all_options,
             "correct_index": correct_index,
         }
     except HTTPException:
