@@ -145,7 +145,7 @@ class TriviaGameHandler(GameEventHandler):
             # Check both possible locations for the action (top level or nested in game_state)
             action = result.get("action") or result.get("game_state", {}).get("action")
             logger.info(f"Detected action after answer submission: {action}")
-            
+
             if action == "next_question":
                 # Get the new question details and broadcast with options
                 from app.logic.game_logic import get_game_session_state
