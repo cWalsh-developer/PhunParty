@@ -16,21 +16,21 @@ router = APIRouter(dependencies=[Depends(get_api_key)])
 
 
 @router.get("/{question_id}", tags=["Questions"])
-def get_question_by_id_route(
-    question_id: str, randomise: bool = True, db: Session = Depends(get_db)
-):
+def get_question_by_id_route(question_id: str, db: Session = Depends(get_db)):
     """
-    Retrieve a question by its ID.
+    Retrieve a question by its ID with randomized answer options.
     """
     try:
         question = get_question_by_id(question_id, db)
         if not question:
             raise HTTPException(status_code=404, detail="Question not found")
-        if randomise:
-            incorrect_options = json.loads(question.question_options)
-            all_options = incorrect_options + [question.answer]
-            random.shuffle(all_options)
-            correct_index = all_options.index(question.answer)
+
+        # Always randomize the options
+        incorrect_options = json.loads(question.question_options)
+        all_options = incorrect_options + [question.answer]
+        random.shuffle(all_options)
+        correct_index = all_options.index(question.answer)
+
         return {
             "question_id": question.question_id,
             "question": question.question,
