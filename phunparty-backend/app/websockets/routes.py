@@ -327,6 +327,7 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
 
         # Get current game state to get the current question ID
         game_state = get_game_session_state(db, session_code)
+        current_question = None
 
         if game_state and game_state.current_question_id:
             # Use the new broadcast system with randomized options
@@ -342,8 +343,14 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
                 elif current_question:
                     await game_handler.broadcast_question(current_question)
 
-        # Broadcast game started to all clients
-        game_state = get_game_session_state(db, session_code)
+        # Always get current question for the game_started message
+        if not current_question:
+            try:
+                current_question = get_current_question_details(db, session_code)
+            except Exception as e:
+                logger.warning(f"Could not get current question for game start broadcast: {e}")
+
+        # Broadcast game started to all clients - this is crucial for frontend to know game started
         await manager.broadcast_to_session(
             session_code,
             {
@@ -351,9 +358,30 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
                 "data": {
                     "session_code": session_code,
                     "started_at": "now",  # You can use proper datetime
-                    "isstarted": game_state.isstarted if game_state else True,
+                    "isstarted": True,  # Always True when game starts
                     "current_question": current_question,
+                    "game_state": {
+                        "isstarted": True,
+                        "is_active": game_state.is_active if game_state else True,
+                        "current_question_index": game_state.current_question_index if game_state else 0,
+                        "total_questions": game_state.total_questions if game_state else 1,
+                    }
                 },
+            },
+        )
+
+        # Also broadcast a separate game status update for any clients that might be listening specifically for status
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "game_status_update", 
+                "data": {
+                    "isstarted": True,
+                    "is_active": game_state.is_active if game_state else True,
+                    "current_question_index": game_state.current_question_index if game_state else 0,
+                    "total_questions": game_state.total_questions if game_state else 1,
+                    "is_waiting_for_players": game_state.is_waiting_for_players if game_state else True,
+                }
             },
         )
 

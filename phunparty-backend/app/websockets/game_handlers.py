@@ -114,8 +114,8 @@ class TriviaGameHandler(GameEventHandler):
             player = get_player_by_ID(db, player_id)
             player_name = player.player_name if player else "Unknown Player"
 
-            # Broadcast to web clients that player answered
-            await manager.broadcast_to_web_clients(
+            # Broadcast to all clients that player answered (with game state update)
+            await manager.broadcast_to_session(
                 self.session_code,
                 {
                     "type": "player_answered",
@@ -129,15 +129,29 @@ class TriviaGameHandler(GameEventHandler):
                 },
             )
 
+            # Also broadcast game status update to ensure frontend stays in sync
+            await manager.broadcast_to_session(
+                self.session_code,
+                {
+                    "type": "game_status_update",
+                    "data": result.get("game_state", {}),
+                },
+            )
+
             # If game advanced to next question, broadcast it
             if result.get("game_state", {}).get("action") == "next_question":
-                # Get the new question details
-                from app.database.dbCRUD import get_current_question_details
+                # Get the new question details and broadcast with options
+                from app.logic.game_logic import get_game_session_state
 
-                current_question = get_current_question_details(db, self.session_code)
-
-                if current_question:
-                    await self.broadcast_question(current_question)
+                game_state = get_game_session_state(db, self.session_code)
+                if game_state and game_state.current_question_id:
+                    await self.broadcast_question_with_options(game_state.current_question_id, db)
+                else:
+                    # Fallback to old method if no current question ID
+                    from app.database.dbCRUD import get_current_question_details
+                    current_question = get_current_question_details(db, self.session_code)
+                    if current_question:
+                        await self.broadcast_question(current_question)
 
             # If game ended, broadcast game end
             elif result.get("game_state", {}).get("action") == "game_ended":
