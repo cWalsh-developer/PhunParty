@@ -64,7 +64,7 @@ class ConnectionManager:
         logger.info(f"Client connected: {client_type} to session {session_code}")
 
         # Notify other clients about new connection (if mobile player joining)
-        if client_type == "mobile" and player_name:
+        if client_type and player_name:
             await self.broadcast_to_session(
                 session_code,
                 {
