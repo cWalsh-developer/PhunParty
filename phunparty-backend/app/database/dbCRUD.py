@@ -141,54 +141,66 @@ def end_game_session(db: Session, session_code: str) -> dict:
     if not gameSession:
         raise ValueError("Game session not found")
 
-    # Reset active game code for players
-    players = db.query(Players).filter(Players.active_game_code == session_code).all()
-    session_assignments = (
-        db.query(SessionAssignment)
-        .filter(SessionAssignment.session_code == session_code)
-        .all()
-    )
-
-    # Update session assignment end times
-    for assignment in session_assignments:
-        if not assignment.session_end:
-            assignment.session_end = datetime.now()
-
-    # Reset player game codes
-    for player in players:
-        player.active_game_code = None
-
-    # Update game state if it exists
-    game_state = get_game_session_state(db, session_code)
-    if game_state:
-        game_state.is_active = False
-        game_state.is_waiting_for_players = False
-        game_state.ended_at = datetime.utcnow()
-
-    db.commit()
-
-    # Calculate and return final results
     try:
-        final_results = calculate_game_results(db, session_code)
-        return {
-            "action": "game_ended",
-            "game_state": "completed",
-            "final_results": [
-                {
-                    "player_id": result.player_id,
-                    "score": result.score,
-                    "result": result.result,
-                    "player_name": get_player_by_ID(db, result.player_id).player_name,
-                    "session_code": session_code,
-                }
-                for result in final_results
-            ],
-        }
+        # Reset active game code for players
+        players = (
+            db.query(Players).filter(Players.active_game_code == session_code).all()
+        )
+        session_assignments = (
+            db.query(SessionAssignment)
+            .filter(SessionAssignment.session_code == session_code)
+            .all()
+        )
+
+        # Update session assignment end times
+        for assignment in session_assignments:
+            if not assignment.session_end:
+                assignment.session_end = datetime.now()
+
+        # Reset player game codes
+        for player in players:
+            player.active_game_code = None
+
+        # Update game state if it exists
+        game_state = get_game_session_state(db, session_code)
+        if game_state:
+            game_state.is_active = False
+            game_state.is_waiting_for_players = False
+            game_state.ended_at = datetime.utcnow()
+
+        # Calculate and return final results
+        try:
+            final_results = calculate_game_results(db, session_code)
+            return {
+                "action": "game_ended",
+                "game_state": "completed",
+                "final_results": [
+                    {
+                        "player_id": result.player_id,
+                        "score": result.score,
+                        "result": result.result,
+                        "player_name": get_player_by_ID(
+                            db, result.player_id
+                        ).player_name,
+                        "session_code": session_code,
+                    }
+                    for result in final_results
+                ],
+            }
+        except Exception as e:
+            return {
+                "action": "game_ended",
+                "game_state": "completed",
+                "error": f"Could not calculate final results: {str(e)}",
+            }
+
+        finally:
+            db.commit()
     except Exception as e:
+        db.rollback()
         return {
-            "action": "game_ended",
-            "game_state": "completed",
-            "error": f"Could not calculate final results: {str(e)}",
+            "action": "game_end_failed",
+            "error": f"Could not end game session: {str(e)}",
         }
 
 
