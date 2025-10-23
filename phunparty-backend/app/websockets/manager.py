@@ -53,6 +53,7 @@ class ConnectionManager:
             "player_id": player_id,
             "player_name": player_name,
             "player_photo": player_photo,
+            "player_answered": False,
         }
 
         self.active_connections[session_code][ws_id] = connection_info
@@ -224,6 +225,7 @@ class ConnectionManager:
                         "player_name": connection_info.get("player_name"),
                         "player_photo": connection_info.get("player_photo"),
                         "connected_at": connection_info.get("connected_at"),
+                        "player_answered": connection_info.get("player_answered", None),
                     }
                 )
 
@@ -265,6 +267,76 @@ class ConnectionManager:
         if websocket_id in self.websocket_registry:
             return self.websocket_registry[websocket_id]["websocket"]
         return None
+
+    def set_player_answered(
+        self, session_code: str, player_id: str, answered: bool = True
+    ):
+        """Set the answered status for a specific player in a session"""
+        if session_code not in self.active_connections:
+            logger.warning(
+                f"Session {session_code} not found when setting player_answered"
+            )
+            return False
+
+        for connection_info in self.active_connections[session_code].values():
+            if (
+                connection_info.get("player_id") == player_id
+                and connection_info.get("client_type") == "mobile"
+            ):
+                connection_info["player_answered"] = answered
+                logger.info(
+                    f"Set player_answered={answered} for player {player_id} in session {session_code}"
+                )
+                return True
+
+        logger.warning(
+            f"Player {player_id} not found in session {session_code} connections"
+        )
+        return False
+
+    def reset_all_players_answered(self, session_code: str):
+        """Reset the answered status for all players in a session (e.g., when new question starts)"""
+        if session_code not in self.active_connections:
+            logger.warning(
+                f"Session {session_code} not found when resetting player_answered"
+            )
+            return
+
+        count = 0
+        for connection_info in self.active_connections[session_code].values():
+            if connection_info.get("client_type") == "mobile":
+                connection_info["player_answered"] = False
+                count += 1
+
+        logger.info(
+            f"Reset player_answered for {count} players in session {session_code}"
+        )
+
+    def get_player_answered_status(self, session_code: str, player_id: str) -> bool:
+        """Get the answered status for a specific player"""
+        if session_code not in self.active_connections:
+            return False
+
+        for connection_info in self.active_connections[session_code].values():
+            if (
+                connection_info.get("player_id") == player_id
+                and connection_info.get("client_type") == "mobile"
+            ):
+                return connection_info.get("player_answered", False)
+
+        return False
+
+    def get_answered_count(self, session_code: str) -> int:
+        """Get the count of players who have answered in a session"""
+        if session_code not in self.active_connections:
+            return 0
+
+        return sum(
+            1
+            for connection_info in self.active_connections[session_code].values()
+            if connection_info.get("client_type") == "mobile"
+            and connection_info.get("player_answered", False)
+        )
 
 
 # Global connection manager instance

@@ -41,6 +41,9 @@ class GameEventHandler:
 
     async def broadcast_question(self, question_data: Dict[str, Any]):
         """Broadcast question to all clients with different formats"""
+        # Reset all players' answered status for the new question
+        manager.reset_all_players_answered(self.session_code)
+
         # Send full question to web clients
         await manager.broadcast_to_web_clients(
             self.session_code,
@@ -59,6 +62,9 @@ class GameEventHandler:
     async def broadcast_question_with_options(self, question_id: str, db):
         """Broadcast question with randomized options using the new system"""
         try:
+            # Reset all players' answered status for the new question
+            manager.reset_all_players_answered(self.session_code)
+
             from app.logic.game_logic import broadcast_question_with_options
 
             await broadcast_question_with_options(self.session_code, question_id, db)
@@ -113,6 +119,9 @@ class TriviaGameHandler(GameEventHandler):
             # Log the result for debugging
             logger.info(f"Answer submission result for player {player_id}: {result}")
 
+            # Mark player as having answered in WebSocket connection info
+            manager.set_player_answered(self.session_code, player_id, True)
+
             # Get player info for broadcasting
             player = get_player_by_ID(db, player_id)
             player_name = player.player_name if player else "Unknown Player"
@@ -134,6 +143,11 @@ class TriviaGameHandler(GameEventHandler):
 
             # Also broadcast game status update to ensure frontend stays in sync
             game_status_data = result.get("game_state", {})
+
+            # Add real-time WebSocket-based answered count
+            ws_answered_count = manager.get_answered_count(self.session_code)
+            game_status_data["playersAnswered"] = ws_answered_count
+
             logger.info(f"Broadcasting game_status_update: {game_status_data}")
             await manager.broadcast_to_session(
                 self.session_code,
