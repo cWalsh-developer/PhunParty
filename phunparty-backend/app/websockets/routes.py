@@ -404,7 +404,7 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
                 game_state.is_waiting_for_players if game_state else True
             ),
             # Frontend-compatible format
-            "gameState": "active",
+            "game_state": "active",
             "currentQuestion": (
                 (game_state.current_question_index + 1) if game_state else 1
             ),

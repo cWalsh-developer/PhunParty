@@ -107,7 +107,6 @@ def check_and_advance_game(
             "total_questions": game_state.total_questions,
             "game_state": frontend_game_state,
             # Add frontend-compatible format
-            "gameState": frontend_game_state,
             "currentQuestion": game_state.current_question_index
             + 1,  # Frontend expects 1-based indexing
             "totalQuestions": game_state.total_questions,
@@ -158,7 +157,6 @@ def check_and_advance_game(
                 result.update(advancement_result)
 
                 # Update frontend-compatible data for game end
-                result["gameState"] = "ended"
                 result["game_state"] = "ended"
         else:
             logger.info(
