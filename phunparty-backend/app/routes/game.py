@@ -346,6 +346,4 @@ def get_player_game_history(player_id: str = Query(...), db: Session = Depends(g
         history = get_game_history_for_player(db, player_id)
         return history
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail="Unable to retrieve game history"
-        )
+        raise HTTPException(status_code=500, detail="Unable to retrieve game history")
