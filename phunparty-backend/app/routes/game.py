@@ -11,6 +11,7 @@ from app.database.dbCRUD import get_all_games as gag
 from app.database.dbCRUD import (
     get_all_public_sessions,
     get_game_by_code,
+    get_game_history_for_player,
     get_player_private_sessions,
     get_session_by_code,
     get_session_details,
@@ -19,7 +20,7 @@ from app.database.dbCRUD import (
 from app.dependencies import get_api_key, get_db
 from app.models.game import GameCreation, GameJoinRequest, GameSessionCreation
 from app.models.game_model import Game
-from app.models.response_models import GameResponse
+from app.models.response_models import GameHistoryResponse, GameResponse
 from app.websockets.manager import manager
 from app.queue.join_queue_manager import join_queue_manager
 from app.queue.queue_models import (
@@ -333,3 +334,18 @@ async def end_game_route(session_code: str, db: Session = Depends(get_db)):
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to end game session")
+
+
+@router.get("/history", response_model=List[GameHistoryResponse], tags=["Game"])
+def get_player_game_history(player_id: str = Query(...), db: Session = Depends(get_db)):
+    """
+    Get the game history for a specific player.
+    Returns a list of completed games with session_code, game_type (genre), and did_win (boolean).
+    """
+    try:
+        history = get_game_history_for_player(db, player_id)
+        return history
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail="Unable to retrieve game history"
+        )
