@@ -75,6 +75,24 @@ def create_game_session_route(
         raise HTTPException(status_code=500, detail="Failed to create game session")
 
 
+@router.get("/history", response_model=List[GameHistoryResponse], tags=["Game"])
+def get_player_game_history(player_id: str = Query(...), db: Session = Depends(get_db)):
+    """
+    Get the game history for a specific player.
+    Returns a list of completed games with session_code, game_type (genre), and did_win (boolean).
+    """
+    try:
+        print(f"[DEBUG] Getting game history for player_id: {player_id}")
+        history = get_game_history_for_player(db, player_id)
+        print(f"[DEBUG] Found {len(history)} games in history")
+        return history
+    except Exception as e:
+        print(f"[ERROR] Failed to get game history: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Unable to retrieve game history: {str(e)}")
+
+
 @router.get("/{game_code}", tags=["Game"])
 def get_game(game_code: str, db: Session = Depends(get_db)):
     """
@@ -334,16 +352,3 @@ async def end_game_route(session_code: str, db: Session = Depends(get_db)):
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to end game session")
-
-
-@router.get("/history", response_model=List[GameHistoryResponse], tags=["Game"])
-def get_player_game_history(player_id: str = Query(...), db: Session = Depends(get_db)):
-    """
-    Get the game history for a specific player.
-    Returns a list of completed games with session_code, game_type (genre), and did_win (boolean).
-    """
-    try:
-        history = get_game_history_for_player(db, player_id)
-        return history
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Unable to retrieve game history")
