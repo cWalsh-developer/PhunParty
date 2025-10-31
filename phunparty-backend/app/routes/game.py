@@ -89,8 +89,11 @@ def get_player_game_history(player_id: str = Query(...), db: Session = Depends(g
     except Exception as e:
         print(f"[ERROR] Failed to get game history: {str(e)}")
         import traceback
+
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Unable to retrieve game history: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Unable to retrieve game history: {str(e)}"
+        )
 
 
 @router.get("/{game_code}", tags=["Game"])
