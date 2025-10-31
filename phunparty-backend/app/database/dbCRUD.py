@@ -714,23 +714,27 @@ def get_game_history_for_player(db: Session, player_id: str) -> list:
     """
     history = (
         db.query(
-            GameSession.session_code,
+            SessionAssignment.session_code,
             Game.genre,
             Scores.result,
         )
         .join(
-            SessionAssignment,
-            GameSession.session_code == SessionAssignment.session_code,
+            GameSession,
+            SessionAssignment.session_code == GameSession.session_code,
+        )
+        .join(
+            Game,
+            GameSession.game_code == Game.game_code,
         )
         .join(
             Scores,
-            (Scores.session_code == GameSession.session_code)
+            (Scores.session_code == SessionAssignment.session_code)
             & (Scores.player_id == player_id),
         )
         .join(
-            GameSessionState, GameSession.session_code == GameSessionState.session_code
+            GameSessionState,
+            SessionAssignment.session_code == GameSessionState.session_code,
         )
-        .join(Game, GameSession.game_code == Game.game_code)
         .filter(SessionAssignment.player_id == player_id)
         .filter(GameSessionState.is_active == False)  # Only completed games
         .all()
