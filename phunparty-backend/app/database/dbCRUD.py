@@ -719,6 +719,7 @@ def get_game_history_for_player(db: Session, player_id: str) -> list:
             Game.genre,
             Scores.result,
         )
+        .distinct()
         .join(
             GameSession,
             SessionAssignment.session_code == GameSession.session_code,
