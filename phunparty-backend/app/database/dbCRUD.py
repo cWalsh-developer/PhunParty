@@ -709,15 +709,19 @@ def get_all_sessions_from_player(db: Session, player_id: str) -> list:
 
 def get_game_history_for_player(db: Session, player_id: str) -> list:
     """
-    Get the games played by a specific player using the owner_player_id from game_sessions
+    Get the games played by a specific player by checking SessionAssignment table
     and joining scores table to display if they won, lost, or drew.
     Returns a list of dictionaries with session_code, game_type (genre), and did_win (boolean).
     """
     history = (
         db.query(
-            GameSession.session_code,
+            SessionAssignment.session_code,
             Game.genre,
             Scores.result,
+        )
+        .join(
+            GameSession,
+            SessionAssignment.session_code == GameSession.session_code,
         )
         .join(
             Game,
@@ -725,15 +729,18 @@ def get_game_history_for_player(db: Session, player_id: str) -> list:
         )
         .join(
             Scores,
-            (Scores.session_code == GameSession.session_code)
+            (Scores.session_code == SessionAssignment.session_code)
             & (Scores.player_id == player_id),
         )
-        .join(
+        .outerjoin(
             GameSessionState,
-            GameSession.session_code == GameSessionState.session_code,
+            SessionAssignment.session_code == GameSessionState.session_code,
         )
-        .filter(GameSession.owner_player_id == player_id)
-        .filter(GameSessionState.is_active == False)  # Only completed games
+        .filter(SessionAssignment.player_id == player_id)
+        .filter(
+            (GameSessionState.is_active == False)
+            | (GameSessionState.session_code == None)
+        )  # Only completed games or games without state tracking
         .all()
     )
     return [
