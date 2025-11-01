@@ -44,19 +44,26 @@ class GameEventHandler:
         # Reset all players' answered status for the new question
         manager.reset_all_players_answered(self.session_code)
 
-        # Send full question to web clients
-        await manager.broadcast_to_web_clients(
+        logger.info(f"Broadcasting question to session {self.session_code}")
+
+        # Send full question to web clients with critical flag
+        await manager.broadcast_to_session(
             self.session_code,
             {
                 "type": "question_started",
                 "data": {"question": question_data, "game_type": self.game_type},
             },
+            only_client_types=["web"],
+            critical=True,
         )
 
-        # Send appropriate mobile UI data to mobile clients
+        # Send appropriate mobile UI data to mobile clients with critical flag
         mobile_data = self.format_question_for_mobile(question_data)
-        await manager.broadcast_to_mobile_players(
-            self.session_code, {"type": "question_started", "data": mobile_data}
+        await manager.broadcast_to_session(
+            self.session_code,
+            {"type": "question_started", "data": mobile_data},
+            only_client_types=["mobile"],
+            critical=True,
         )
 
     async def broadcast_question_with_options(self, question_id: str, db):
@@ -139,6 +146,7 @@ class TriviaGameHandler(GameEventHandler):
                         "game_state": result.get("game_state", {}),
                     },
                 },
+                critical=True,
             )
 
             # Also broadcast game status update to ensure frontend stays in sync
@@ -155,6 +163,7 @@ class TriviaGameHandler(GameEventHandler):
                     "type": "game_status_update",
                     "data": game_status_data,
                 },
+                critical=True,
             )
 
             # If game advanced to next question, broadcast it
@@ -165,7 +174,7 @@ class TriviaGameHandler(GameEventHandler):
 
             if action == "next_question":
                 logger.info(
-                    f"🚀 Advancing to next question for session {self.session_code}"
+                    f"Advancing to next question for session {self.session_code}"
                 )
                 # Get the new question details and broadcast with options
                 from app.logic.game_logic import get_game_session_state
@@ -173,14 +182,14 @@ class TriviaGameHandler(GameEventHandler):
                 game_state = get_game_session_state(db, self.session_code)
                 if game_state and game_state.current_question_id:
                     logger.info(
-                        f"📝 Broadcasting new question {game_state.current_question_id} with options"
+                        f"Broadcasting new question {game_state.current_question_id} with options"
                     )
                     await self.broadcast_question_with_options(
                         game_state.current_question_id, db
                     )
                 else:
                     logger.warning(
-                        "⚠️ No current question ID found, using fallback method"
+                        "No current question ID found, using fallback method"
                     )
                     # Fallback to old method if no current question ID
                     from app.database.dbCRUD import get_current_question_details
@@ -192,7 +201,7 @@ class TriviaGameHandler(GameEventHandler):
                         logger.info(f"📝 Broadcasting question via fallback method")
                         await self.broadcast_question(current_question)
                     else:
-                        logger.error("❌ No current question found via fallback method")
+                        logger.error("No current question found via fallback method")
 
             # If game ended, broadcast game end
             elif action == "game_ended":
@@ -206,7 +215,7 @@ class TriviaGameHandler(GameEventHandler):
                 )
             elif action is None:
                 logger.info(
-                    f"⏳ No action needed - waiting for more players or other conditions"
+                    f" No action needed - waiting for more players or other conditions"
                 )
 
             # Send confirmation to the specific mobile player

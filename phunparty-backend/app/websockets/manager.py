@@ -22,6 +22,9 @@ class ConnectionManager:
         self.active_connections: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # websocket_id -> {session_code, websocket}
         self.websocket_registry: Dict[str, Dict[str, Any]] = {}
+        # Start heartbeat checker
+        self._heartbeat_task = None
+        self._start_heartbeat_checker()
 
     def generate_websocket_id(self, websocket: WebSocket) -> str:
         """Generate unique ID for WebSocket connection"""
@@ -54,6 +57,8 @@ class ConnectionManager:
             "player_name": player_name,
             "player_photo": player_photo,
             "player_answered": False,
+            "last_heartbeat": datetime.now(),
+            "ws_id": ws_id,
         }
 
         self.active_connections[session_code][ws_id] = connection_info
@@ -62,10 +67,38 @@ class ConnectionManager:
             "websocket": websocket,
         }
 
-        logger.info(f"Client connected: {client_type} to session {session_code}")
+        logger.info(
+            f"✅ Client connected: {client_type} to session {session_code} (ws_id: {ws_id})"
+        )
+
+        # Send connection confirmation to the connecting client
+        try:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "connection_established",
+                        "data": {
+                            "ws_id": ws_id,
+                            "session_code": session_code,
+                            "client_type": client_type,
+                            "player_id": player_id,
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                        "timestamp": datetime.now().timestamp(),
+                    }
+                )
+            )
+        except Exception as e:
+            logger.error(f"Failed to send connection confirmation: {e}")
+
+        # Small delay to ensure web client is ready before sending player_joined notifications
+        await asyncio.sleep(0.1)
 
         # Notify other clients about new connection (if mobile player joining)
-        if client_type and player_name:
+        if client_type == "mobile" and player_name:
+            logger.info(
+                f"📢 Broadcasting player_joined for {player_name} to session {session_code}"
+            )
             await self.broadcast_to_session(
                 session_code,
                 {
@@ -75,9 +108,17 @@ class ConnectionManager:
                         "player_name": player_name,
                         "player_photo": player_photo,
                         "timestamp": datetime.now().isoformat(),
+                        "total_players": len(
+                            [
+                                c
+                                for c in self.active_connections[session_code].values()
+                                if c.get("client_type") == "mobile"
+                            ]
+                        ),
                     },
                 },
                 exclude_client_types=["mobile"],  # Only notify web clients
+                critical=True,  # Mark as critical for retry logic
             )
 
     def disconnect(self, websocket: WebSocket):
@@ -130,14 +171,30 @@ class ConnectionManager:
                     )
                 )
 
-    async def send_personal_message(self, message: dict, websocket: WebSocket):
-        """Send message to specific WebSocket"""
-        try:
-            await websocket.send_text(
-                json.dumps({**message, "timestamp": datetime.now().timestamp()})
-            )
-        except Exception as e:
-            logger.error(f"Error sending personal message: {e}")
+    async def send_personal_message(
+        self, message: dict, websocket: WebSocket, retries: int = 2
+    ):
+        """Send message to specific WebSocket with retry logic"""
+        for attempt in range(retries + 1):
+            try:
+                await websocket.send_text(
+                    json.dumps({**message, "timestamp": datetime.now().timestamp()})
+                )
+                return True
+            except WebSocketDisconnect:
+                logger.warning(
+                    f"WebSocket disconnected during send (attempt {attempt + 1}/{retries + 1})"
+                )
+                if attempt == retries:
+                    return False
+            except Exception as e:
+                logger.error(
+                    f"Error sending personal message (attempt {attempt + 1}/{retries + 1}): {e}"
+                )
+                if attempt == retries:
+                    return False
+                await asyncio.sleep(0.1 * (attempt + 1))  # Exponential backoff
+        return False
 
     async def send_personal_message_by_id(self, message: dict, websocket_id: str):
         """Send message to specific WebSocket by ID"""
@@ -157,15 +214,29 @@ class ConnectionManager:
         exclude_websockets: Optional[List[WebSocket]] = None,
         only_client_types: Optional[List[str]] = None,
         exclude_client_types: Optional[List[str]] = None,
+        critical: bool = False,
     ):
-        """Broadcast message to all clients in a session with filtering options"""
+        """Broadcast message to all clients in a session with filtering options and reliability"""
         if session_code not in self.active_connections:
+            logger.warning(
+                f"Cannot broadcast to session {session_code} - no active connections"
+            )
             return
 
         exclude_websockets = exclude_websockets or []
         message_with_timestamp = {**message, "timestamp": datetime.now().timestamp()}
 
+        # Add message ID for tracking
+        message_id = f"{message.get('type')}_{datetime.now().timestamp()}"
+        message_with_timestamp["message_id"] = message_id
+
         disconnected_websockets = []
+        success_count = 0
+        total_targets = 0
+
+        logger.info(
+            f"📡 Broadcasting '{message.get('type')}' to session {session_code}"
+        )
 
         for ws_id, connection_info in self.active_connections[session_code].items():
             websocket = connection_info["websocket"]
@@ -182,13 +253,39 @@ class ConnectionManager:
             if exclude_client_types and client_type in exclude_client_types:
                 continue
 
-            try:
-                await websocket.send_text(json.dumps(message_with_timestamp))
-            except WebSocketDisconnect:
-                disconnected_websockets.append(websocket)
-            except Exception as e:
-                logger.error(f"Error broadcasting to websocket: {e}")
-                disconnected_websockets.append(websocket)
+            total_targets += 1
+
+            # Retry logic for critical messages
+            max_attempts = 3 if critical else 1
+            sent = False
+
+            for attempt in range(max_attempts):
+                try:
+                    await websocket.send_text(json.dumps(message_with_timestamp))
+                    success_count += 1
+                    sent = True
+                    break
+                except WebSocketDisconnect:
+                    logger.warning(
+                        f"WebSocket {ws_id} ({client_type}) disconnected during broadcast"
+                    )
+                    disconnected_websockets.append(websocket)
+                    break
+                except Exception as e:
+                    if attempt < max_attempts - 1:
+                        logger.warning(
+                            f"Retry {attempt + 1}/{max_attempts} for {ws_id}: {e}"
+                        )
+                        await asyncio.sleep(0.05)
+                    else:
+                        logger.error(
+                            f"Failed to send to {ws_id} after {max_attempts} attempts: {e}"
+                        )
+                        disconnected_websockets.append(websocket)
+
+        logger.info(
+            f"Broadcast complete: {success_count}/{total_targets} clients received message"
+        )
 
         # Clean up disconnected websockets
         for ws in disconnected_websockets:
@@ -337,6 +434,64 @@ class ConnectionManager:
             if connection_info.get("client_type") == "mobile"
             and connection_info.get("player_answered", False)
         )
+
+    def update_heartbeat(self, websocket: WebSocket):
+        """Update the last heartbeat time for a websocket"""
+        for ws_id, info in self.websocket_registry.items():
+            if info["websocket"] == websocket:
+                session_code = info["session_code"]
+                if (
+                    session_code in self.active_connections
+                    and ws_id in self.active_connections[session_code]
+                ):
+                    self.active_connections[session_code][ws_id][
+                        "last_heartbeat"
+                    ] = datetime.now()
+                break
+
+    def _start_heartbeat_checker(self):
+        """Start the background task to check for stale connections"""
+
+        async def check_stale_connections():
+            while True:
+                try:
+                    await asyncio.sleep(30)  # Check every 30 seconds
+                    stale_threshold = (
+                        60  # Consider stale after 60 seconds of no heartbeat
+                    )
+
+                    stale_websockets = []
+                    now = datetime.now()
+
+                    for session_code, connections in list(
+                        self.active_connections.items()
+                    ):
+                        for ws_id, conn_info in list(connections.items()):
+                            last_heartbeat = conn_info.get("last_heartbeat")
+                            if (
+                                last_heartbeat
+                                and (now - last_heartbeat).total_seconds()
+                                > stale_threshold
+                            ):
+                                logger.warning(
+                                    f"Stale connection detected: {ws_id} in session {session_code}"
+                                )
+                                stale_websockets.append(conn_info["websocket"])
+
+                    # Clean up stale connections
+                    for ws in stale_websockets:
+                        self.disconnect(ws)
+
+                except Exception as e:
+                    logger.error(f"Error in heartbeat checker: {e}")
+
+        # Schedule the task
+        try:
+            loop = asyncio.get_event_loop()
+            self._heartbeat_task = loop.create_task(check_stale_connections())
+        except RuntimeError:
+            # No event loop running yet - this is fine, will start when app starts
+            pass
 
 
 # Global connection manager instance

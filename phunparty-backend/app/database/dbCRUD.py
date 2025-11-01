@@ -741,7 +741,7 @@ def get_game_history_for_player(db: Session, player_id: str) -> list:
         .filter(
             (GameSessionState.is_active == False)
             | (GameSessionState.session_code == None)
-        )  # Only completed games or games without state tracking
+        )
         .all()
     )
     return [

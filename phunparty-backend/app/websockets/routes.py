@@ -211,6 +211,7 @@ async def handle_websocket_message(
 
     if message_type == "ping":
         # Heartbeat/keepalive
+        manager.update_heartbeat(websocket)
         await manager.send_personal_message({"type": "pong"}, websocket)
 
     elif message_type == "submit_answer" and client_type == "mobile":
@@ -378,7 +379,7 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
         )
 
         # Also broadcast a separate game status update for any clients that might be listening specifically for status
-        logger.info(f"📊 Broadcasting game_status_update for session {session_code}")
+        logger.info(f"Broadcasting game_status_update for session {session_code}")
 
         # Get player counts for accurate status
         from app.database.dbCRUD import (
