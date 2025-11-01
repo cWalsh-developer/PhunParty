@@ -43,8 +43,19 @@ def create_game_session(
     game_code: str,
     owner_player_id: str = None,
     ispublic: bool = True,
+    difficulty: str = None,
 ) -> GameSession:
-    """Create a new game session with the specified parameters."""
+    """Create a new game session with the specified parameters.
+    
+    Args:
+        db: Database session
+        host_name: Name of the host
+        number_of_questions: Number of questions in the session
+        game_code: The game code to link to
+        owner_player_id: Optional player ID of the session owner
+        ispublic: Whether the session is public or private
+        difficulty: Optional difficulty level ('easy', 'medium', 'hard')
+    """
     session_code = generate_session_code()
     gameSession = GameSession(
         session_code=session_code,
@@ -58,7 +69,7 @@ def create_game_session(
     db.refresh(gameSession)
     if not gameSession:
         raise ValueError("Failed to create game session")
-    add_question_to_session(db, session_code)
+    add_question_to_session(db, session_code, difficulty)
 
     # Initialize game state tracking
     try:
@@ -338,22 +349,47 @@ def assign_player_to_session(db: Session, player_id: str, session_code: str) -> 
 
 
 # Rebooting
-def add_question_to_session(db: Session, session_code: str) -> None:
-    """Add a question to a game session."""
+def add_question_to_session(db: Session, session_code: str, difficulty: str = None) -> None:
+    """Add randomly selected questions to a game session.
+    
+    Args:
+        db: Database session
+        session_code: The session code to add questions to
+        difficulty: Optional difficulty level ('easy', 'medium', 'hard'). If None, questions of any difficulty will be selected.
+    """
     session = _get_session_by_code_internal(db, session_code)
     if not session:
         raise ValueError("Session not found")
     game = get_game_by_code(db, session.game_code)
     if not game:
         raise ValueError("Game not found")
-    questions = (
-        db.query(Questions)
-        .filter(Questions.genre == game.genre)
-        .limit(session.number_of_questions)
-        .all()
-    )
+    
+    # Build query with genre filter
+    query = db.query(Questions).filter(Questions.genre == game.genre)
+    
+    # Add difficulty filter if specified
+    if difficulty:
+        from app.models.enums import DifficultyLevel
+        try:
+            difficulty_enum = DifficultyLevel(difficulty.lower())
+            query = query.filter(Questions.difficulty == difficulty_enum)
+        except ValueError:
+            raise ValueError(f"Invalid difficulty level: {difficulty}. Must be 'easy', 'medium', or 'hard'")
+    
+    # Get randomly selected questions
+    questions = query.order_by(func.random()).limit(session.number_of_questions).all()
+    
     if not questions:
-        raise ValueError("No questions available for this game genre")
+        difficulty_msg = f" with difficulty '{difficulty}'" if difficulty else ""
+        raise ValueError(f"No questions available for genre '{game.genre}'{difficulty_msg}")
+    
+    if len(questions) < session.number_of_questions:
+        difficulty_msg = f" with difficulty '{difficulty}'" if difficulty else ""
+        raise ValueError(
+            f"Not enough questions available. Found {len(questions)} but need {session.number_of_questions} "
+            f"for genre '{game.genre}'{difficulty_msg}"
+        )
+    
     for question in questions:
         assignment = SessionQuestionAssignment(
             assignment_id=generate_question_id(),

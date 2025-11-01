@@ -12,6 +12,7 @@ class GameSessionCreation(BaseModel):
     game_code: str
     owner_player_id: str  # Added to track session owner
     ispublic: bool = True  # New field to indicate if the session is public
+    difficulty: str = None  # Optional difficulty level: 'easy', 'medium', or 'hard'
 
 
 class GameJoinRequest(BaseModel):
