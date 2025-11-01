@@ -46,7 +46,7 @@ def create_game_session(
     difficulty: str = None,
 ) -> GameSession:
     """Create a new game session with the specified parameters.
-    
+
     Args:
         db: Database session
         host_name: Name of the host
@@ -349,9 +349,11 @@ def assign_player_to_session(db: Session, player_id: str, session_code: str) -> 
 
 
 # Rebooting
-def add_question_to_session(db: Session, session_code: str, difficulty: str = None) -> None:
+def add_question_to_session(
+    db: Session, session_code: str, difficulty: str = None
+) -> None:
     """Add randomly selected questions to a game session.
-    
+
     Args:
         db: Database session
         session_code: The session code to add questions to
@@ -363,33 +365,38 @@ def add_question_to_session(db: Session, session_code: str, difficulty: str = No
     game = get_game_by_code(db, session.game_code)
     if not game:
         raise ValueError("Game not found")
-    
+
     # Build query with genre filter
     query = db.query(Questions).filter(Questions.genre == game.genre)
-    
+
     # Add difficulty filter if specified
     if difficulty:
         from app.models.enums import DifficultyLevel
+
         try:
             difficulty_enum = DifficultyLevel(difficulty.lower())
             query = query.filter(Questions.difficulty == difficulty_enum)
         except ValueError:
-            raise ValueError(f"Invalid difficulty level: {difficulty}. Must be 'easy', 'medium', or 'hard'")
-    
+            raise ValueError(
+                f"Invalid difficulty level: {difficulty}. Must be 'easy', 'medium', or 'hard'"
+            )
+
     # Get randomly selected questions
     questions = query.order_by(func.random()).limit(session.number_of_questions).all()
-    
+
     if not questions:
         difficulty_msg = f" with difficulty '{difficulty}'" if difficulty else ""
-        raise ValueError(f"No questions available for genre '{game.genre}'{difficulty_msg}")
-    
+        raise ValueError(
+            f"No questions available for genre '{game.genre}'{difficulty_msg}"
+        )
+
     if len(questions) < session.number_of_questions:
         difficulty_msg = f" with difficulty '{difficulty}'" if difficulty else ""
         raise ValueError(
             f"Not enough questions available. Found {len(questions)} but need {session.number_of_questions} "
             f"for genre '{game.genre}'{difficulty_msg}"
         )
-    
+
     for question in questions:
         assignment = SessionQuestionAssignment(
             assignment_id=generate_question_id(),

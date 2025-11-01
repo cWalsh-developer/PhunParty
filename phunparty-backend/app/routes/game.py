@@ -53,7 +53,7 @@ def create_game_session_route(
 ):
     """
     Create a new game session with randomly selected questions.
-    
+
     The difficulty parameter is optional:
     - If provided ('easy', 'medium', 'hard'), only questions of that difficulty will be selected
     - If not provided, questions of any difficulty will be randomly selected
@@ -81,7 +81,9 @@ def create_game_session_route(
         # Handle specific validation errors (like invalid difficulty or not enough questions)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create game session: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to create game session: {str(e)}"
+        )
 
 
 @router.get("/history", response_model=List[GameHistoryResponse], tags=["Game"])
