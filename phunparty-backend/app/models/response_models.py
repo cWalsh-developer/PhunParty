@@ -2,7 +2,7 @@ from typing import Optional, List
 
 from pydantic import BaseModel
 
-from app.models.enums import DifficultyLevel, ResultType
+from app.models.enums import DifficultyLevel, ResultType, HistoryResultType
 
 
 class GameResponse(BaseModel):
@@ -74,7 +74,7 @@ class GameStatusResponse(BaseModel):
 class GameHistoryResponse(BaseModel):
     session_code: str
     game_type: str
-    did_win: ResultType
+    did_win: HistoryResultType
 
     class Config:
         from_attributes = True
