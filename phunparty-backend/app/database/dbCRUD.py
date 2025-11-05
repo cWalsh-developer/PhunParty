@@ -791,7 +791,7 @@ def get_game_history_for_player(db: Session, player_id: str) -> list:
         {
             "session_code": record.session_code,
             "game_type": record.genre,
-            "did_win": record.result == "win" if record.result else False,
+            "did_win": record.result,
         }
         for record in history
     ]
