@@ -26,8 +26,10 @@ class AnswerVerificationResponseModel(BaseModel):
 
 
 class ScoresResponseModel(BaseModel):
+    player_id: str
     score: int
     result: Optional[ResultType] = None
+    session_code: str
 
 
 class QuestionRequest(BaseModel):
