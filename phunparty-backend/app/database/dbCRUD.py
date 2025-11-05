@@ -14,7 +14,6 @@ from app.models.questions_model import Questions
 from app.models.scores_model import Scores
 from app.models.session_player_assignment_model import SessionAssignment
 from app.models.session_question_assignment import SessionQuestionAssignment
-from app.models.enums import ResultType
 from app.utils.hash_password import hash_password
 from app.utils.id_generator import (
     generate_assignment_id,
@@ -509,11 +508,10 @@ def calculate_game_results(db: Session, session_code: str):
     top_scorers = [s for s in session_scores if s.score == max_score]
 
     for s in session_scores:
-        # Store the enum members so the DB enum mapping matches our current ResultType values
         if s.score == max_score:
-            s.result = ResultType.draw if len(top_scorers) > 1 else ResultType.win
+            s.result = "draw" if len(top_scorers) > 1 else "win"
         else:
-            s.result = ResultType.lose
+            s.result = "lose"
     db.commit()
 
     # Refresh each score object individually
@@ -789,59 +787,14 @@ def get_game_history_for_player(db: Session, player_id: str) -> list:
         )
         .all()
     )
-    from app.models.enums import HistoryResultType
-
-    mapped = []
-    for record in history:
-        raw_result = record.result
-
-        # Normalize to enum member name if possible
-        member_name = None
-        try:
-            if hasattr(raw_result, "name"):
-                member_name = raw_result.name
-            elif isinstance(raw_result, str):
-                # Could be stored as lowercase ('win') or capitalized ('Won') depending on DB
-                # If it's the member name ('win'/'lose'/'draw'), use that; otherwise try to map by value
-                if raw_result in ("win", "lose", "draw"):
-                    member_name = raw_result
-                else:
-                    # Try to match a HistoryResultType by value (e.g. 'Won')
-                    try:
-                        hr = HistoryResultType(raw_result)
-                        mapped_result = hr
-                        mapped.append(
-                            {
-                                "session_code": record.session_code,
-                                "game_type": record.genre,
-                                "did_win": mapped_result,
-                            }
-                        )
-                        continue
-                    except Exception:
-                        member_name = None
-
-        except Exception:
-            member_name = None
-
-        if member_name:
-            try:
-                mapped_result = HistoryResultType[member_name]
-            except Exception:
-                # fallback: set as None or string
-                mapped_result = None
-        else:
-            mapped_result = None
-
-        mapped.append(
-            {
-                "session_code": record.session_code,
-                "game_type": record.genre,
-                "did_win": mapped_result,
-            }
-        )
-
-    return mapped
+    return [
+        {
+            "session_code": record.session_code,
+            "game_type": record.genre,
+            "did_win": record.result == "win" if record.result else False,
+        }
+        for record in history
+    ]
 
 
 def get_session_difficulty(db: Session, session_code: str) -> str:
