@@ -74,7 +74,7 @@ class GameStatusResponse(BaseModel):
 class GameHistoryResponse(BaseModel):
     session_code: str
     game_type: str
-    did_win: HistoryResultType
+    did_win: bool
 
     class Config:
         from_attributes = True
