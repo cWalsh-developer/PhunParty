@@ -14,6 +14,7 @@ from app.models.questions_model import Questions
 from app.models.scores_model import Scores
 from app.models.session_player_assignment_model import SessionAssignment
 from app.models.session_question_assignment import SessionQuestionAssignment
+from app.models.enums import ResultType
 from app.utils.hash_password import hash_password
 from app.utils.id_generator import (
     generate_assignment_id,
@@ -508,10 +509,11 @@ def calculate_game_results(db: Session, session_code: str):
     top_scorers = [s for s in session_scores if s.score == max_score]
 
     for s in session_scores:
+        # Store the enum members so the DB enum mapping matches our current ResultType values
         if s.score == max_score:
-            s.result = "draw" if len(top_scorers) > 1 else "win"
+            s.result = ResultType.draw if len(top_scorers) > 1 else ResultType.win
         else:
-            s.result = "lose"
+            s.result = ResultType.lose
     db.commit()
 
     # Refresh each score object individually
