@@ -86,19 +86,18 @@ def create_game_session_route(
         )
 
 
-@router.get("/history", response_model=List[GameHistoryResponse], tags=["Game"])
-def get_player_game_history(player_id: str = Query(...), db: Session = Depends(get_db)):
+@router.get(
+    "/history/{player_id}", response_model=List[GameHistoryResponse], tags=["Game"]
+)
+def get_player_game_history(player_id: str, db: Session = Depends(get_db)):
     """
     Get the game history for a specific player.
     Returns a list of completed games with session_code, game_type (genre), and did_win (boolean).
     """
     try:
-        print(f"[DEBUG] Getting game history for player_id: {player_id}")
         history = get_game_history_for_player(db, player_id)
-        print(f"[DEBUG] Found {len(history)} games in history")
         return history
     except Exception as e:
-        print(f"[ERROR] Failed to get game history: {str(e)}")
         import traceback
 
         traceback.print_exc()
