@@ -789,14 +789,59 @@ def get_game_history_for_player(db: Session, player_id: str) -> list:
         )
         .all()
     )
-    return [
-        {
-            "session_code": record.session_code,
-            "game_type": record.genre,
-            "did_win": record.result,
-        }
-        for record in history
-    ]
+    from app.models.enums import HistoryResultType
+
+    mapped = []
+    for record in history:
+        raw_result = record.result
+
+        # Normalize to enum member name if possible
+        member_name = None
+        try:
+            if hasattr(raw_result, "name"):
+                member_name = raw_result.name
+            elif isinstance(raw_result, str):
+                # Could be stored as lowercase ('win') or capitalized ('Won') depending on DB
+                # If it's the member name ('win'/'lose'/'draw'), use that; otherwise try to map by value
+                if raw_result in ("win", "lose", "draw"):
+                    member_name = raw_result
+                else:
+                    # Try to match a HistoryResultType by value (e.g. 'Won')
+                    try:
+                        hr = HistoryResultType(raw_result)
+                        mapped_result = hr
+                        mapped.append(
+                            {
+                                "session_code": record.session_code,
+                                "game_type": record.genre,
+                                "did_win": mapped_result,
+                            }
+                        )
+                        continue
+                    except Exception:
+                        member_name = None
+
+        except Exception:
+            member_name = None
+
+        if member_name:
+            try:
+                mapped_result = HistoryResultType[member_name]
+            except Exception:
+                # fallback: set as None or string
+                mapped_result = None
+        else:
+            mapped_result = None
+
+        mapped.append(
+            {
+                "session_code": record.session_code,
+                "game_type": record.genre,
+                "did_win": mapped_result,
+            }
+        )
+
+    return mapped
 
 
 def get_session_difficulty(db: Session, session_code: str) -> str:
