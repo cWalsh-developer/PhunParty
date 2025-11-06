@@ -787,47 +787,18 @@ def get_game_history_for_player(db: Session, player_id: str) -> list:
         )
         .all()
     )
-    from app.models.enums import HistoryResultType
-
-    def map_result(raw_result):
-        if raw_result is None:
-            return None
-
-        # If it's an enum (ResultType), use its name
-        try:
-            if hasattr(raw_result, "name"):
-                key = raw_result.name.lower()
-            elif isinstance(raw_result, str):
-                key = raw_result.lower()
-            else:
-                key = str(raw_result).lower()
-        except Exception:
-            key = str(raw_result).lower()
-
-        if key == "win":
-            return HistoryResultType.win
-        if key == "lose" or key == "lost":
-            return HistoryResultType.lose
-        if key == "draw":
-            return HistoryResultType.draw
-
-        # Fallback: try to map by value
-        try:
-            return HistoryResultType(raw_result)
-        except Exception:
-            return None
-
-    mapped = []
-    for record in history:
-        mapped.append(
-            {
-                "session_code": record.session_code,
-                "game_type": record.genre,
-                "did_win": map_result(record.result),
-            }
-        )
-
-    return mapped
+    return [
+        {
+            "session_code": record.session_code,
+            "game_type": record.genre,
+            "did_win": (
+                "Won"
+                if record.result == "win"
+                else ("Lost" if record.result == "lose" else "Draw")
+            ),
+        }
+        for record in history
+    ]
 
 
 def get_session_difficulty(db: Session, session_code: str) -> str:
