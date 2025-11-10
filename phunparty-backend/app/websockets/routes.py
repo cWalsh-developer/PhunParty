@@ -2,6 +2,7 @@
 WebSocket routes for real-time game functionality
 """
 
+from datetime import datetime
 import json
 import logging
 from typing import Optional
@@ -221,6 +222,27 @@ async def handle_websocket_message(
 
         if answer and question_id and player_id:
             await game_handler.handle_player_answer(player_id, answer, question_id, db)
+    elif message_type == "player_announce" and client_type == "mobile":
+        # Mobile client announcing presence after connection (backup mechanism)
+        player_data = data or {}
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "player_joined",
+                "data": {
+                    "player_id": player_data.get("player_id") or player_id,
+                    "player_name": player_data.get("player_name"),
+                    "player_photo": player_data.get("player_photo"),
+                    "timestamp": player_data.get("timestamp")
+                    or datetime.now().isoformat(),
+                },
+            },
+            exclude_client_types=["mobile"],
+            critical=True,
+        )
+        logger.info(
+            f"📢 Processed player_announce for {player_data.get('player_name')}"
+        )
 
     elif message_type == "buzzer_press" and client_type == "mobile":
         # Player pressing buzzer (for buzzer games)
