@@ -943,14 +943,35 @@ def update_game_state_waiting_status(
 
 
 def get_current_question_details(db: Session, session_code: str) -> dict:
-    """Get current question details for a session"""
+    """Get current question details for a session with full question data including options and ui_mode"""
     game_state = get_game_session_state(db, session_code)
     if not game_state:
         return {"error": "Game session not found"}
 
     current_question = None
+    question_details = None
+    
     if game_state.current_question_id:
         current_question = get_question_by_id(game_state.current_question_id, db)
+        
+        # Get full question details with randomized options using the same logic as broadcast_question_with_options
+        if current_question:
+            from app.logic.game_logic import get_question_with_randomized_options
+            try:
+                question_details = get_question_with_randomized_options(
+                    db, game_state.current_question_id
+                )
+            except Exception as e:
+                logger.warning(f"Could not get randomized options for question {game_state.current_question_id}: {e}")
+                # Fallback to basic question info
+                question_details = {
+                    "question_id": current_question.question_id,
+                    "question": current_question.question,
+                    "genre": current_question.genre,
+                    "difficulty": current_question.difficulty.value if current_question.difficulty else "easy",
+                    "display_options": [],
+                    "answer": current_question.answer,
+                }
 
     # Get player counts
     total_players = get_number_of_players_in_session(db, session_code)
@@ -961,6 +982,38 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
             db, session_code, game_state.current_question_id
         )
 
+    # Determine ui_mode based on difficulty and available options
+    ui_mode = "text_input"  # Default fallback
+    if question_details and question_details.get("display_options"):
+        difficulty = question_details.get("difficulty", "").lower()
+        if difficulty in ["easy", "medium"]:
+            ui_mode = "multiple_choice"
+        elif difficulty == "hard":
+            ui_mode = "text_input"
+    
+    # Build the current_question response with all necessary fields
+    current_question_data = None
+    if question_details:
+        current_question_data = {
+            "question_id": question_details.get("question_id"),
+            "question": question_details.get("question"),
+            "genre": question_details.get("genre"),
+            "difficulty": question_details.get("difficulty"),
+            "display_options": question_details.get("display_options", []),
+            "options": question_details.get("display_options", []),  # Alias for compatibility
+            "answer": question_details.get("answer"),
+            "correct_index": question_details.get("correct_index"),
+            "ui_mode": ui_mode,
+        }
+    elif current_question:
+        # Minimal fallback if question_details failed
+        current_question_data = {
+            "question_id": current_question.question_id,
+            "question": current_question.question,
+            "genre": current_question.genre,
+            "ui_mode": "text_input",
+        }
+
     return {
         "session_code": session_code,
         "is_active": game_state.is_active,
@@ -968,16 +1021,18 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
         "isstarted": game_state.isstarted,
         "current_question_index": game_state.current_question_index,
         "total_questions": game_state.total_questions,
-        "current_question": {
-            "question_id": current_question.question_id if current_question else None,
-            "question": current_question.question if current_question else None,
-            "genre": current_question.genre if current_question else None,
-        },
+        "current_question": current_question_data,
         "players": {
             "total": total_players,
             "answered": players_answered,
             "waiting_for": total_players - players_answered,
         },
+        "player_response_counts": {
+            "total": total_players,
+            "answered": players_answered,
+            "waiting": total_players - players_answered,
+        },
+        "game_state": "active" if game_state.isstarted else "waiting",
         "started_at": (
             game_state.started_at.isoformat() if game_state.started_at else None
         ),
