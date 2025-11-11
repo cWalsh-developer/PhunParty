@@ -349,9 +349,18 @@ async def broadcast_question_with_options(
         # Get question with randomized options
         question_data = get_question_with_randomized_options(db, question_id)
 
+        # Determine ui_mode based on difficulty
+        difficulty = question_data.get("difficulty", "").lower()
+        ui_mode = "text_input"  # Default
+        if question_data.get("display_options") and len(question_data["display_options"]) > 0:
+            if difficulty in ["easy", "medium"]:
+                ui_mode = "multiple_choice"
+            elif difficulty == "hard":
+                ui_mode = "text_input"
+
         # Create message for mobile players (without correct answer info)
         player_message = {
-            "type": "new_question",
+            "type": "question_started",  # Changed from "new_question" to match frontend expectations
             "data": {
                 "question_id": question_data["question_id"],
                 "question": question_data["question"],
@@ -359,6 +368,7 @@ async def broadcast_question_with_options(
                 "difficulty": question_data["difficulty"],
                 "display_options": question_data["display_options"],
                 "options": question_data["display_options"],  # Alias for compatibility
+                "ui_mode": ui_mode,  # Include ui_mode for mobile
                 "question_index": None,  # Will be added by caller if needed
                 "total_questions": None,  # Will be added by caller if needed
             },
@@ -366,7 +376,7 @@ async def broadcast_question_with_options(
 
         # Create message for web host (with correct answer info AND display_options)
         host_message = {
-            "type": "new_question",
+            "type": "question_started",  # Changed from "new_question" to match frontend expectations
             "data": {
                 "question_id": question_data["question_id"],
                 "question": question_data["question"],
@@ -381,6 +391,7 @@ async def broadcast_question_with_options(
                 "question_options": question_data[
                     "question_options"
                 ],  # All original options
+                "ui_mode": ui_mode,  # Include ui_mode for web
                 "question_index": None,
                 "total_questions": None,
             },
@@ -405,7 +416,7 @@ async def broadcast_question_with_options(
         # Try to send a fallback question instead of just an error
         try:
             fallback_message = {
-                "type": "new_question",
+                "type": "question_started",  # Changed from "new_question" to match frontend
                 "data": {
                     "question_id": question_id,
                     "question": "Question temporarily unavailable",
@@ -413,6 +424,7 @@ async def broadcast_question_with_options(
                     "difficulty": "easy",
                     "display_options": ["Please wait for next question"],
                     "options": ["Please wait for next question"],
+                    "ui_mode": "text_input",
                     "question_index": None,
                     "total_questions": None,
                 },
