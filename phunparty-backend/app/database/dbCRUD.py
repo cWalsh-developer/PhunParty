@@ -1,8 +1,11 @@
 from datetime import datetime, timezone
+import logging
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.orm.attributes import flag_modified
+
+logger = logging.getLogger(__name__)
 
 from app.models.game_model import Game
 from app.models.game_session_model import GameSession
@@ -950,25 +953,32 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
 
     current_question = None
     question_details = None
-    
+
     if game_state.current_question_id:
         current_question = get_question_by_id(game_state.current_question_id, db)
-        
+
         # Get full question details with randomized options using the same logic as broadcast_question_with_options
         if current_question:
             from app.logic.game_logic import get_question_with_randomized_options
+
             try:
                 question_details = get_question_with_randomized_options(
                     db, game_state.current_question_id
                 )
             except Exception as e:
-                logger.warning(f"Could not get randomized options for question {game_state.current_question_id}: {e}")
+                logger.warning(
+                    f"Could not get randomized options for question {game_state.current_question_id}: {e}"
+                )
                 # Fallback to basic question info
                 question_details = {
                     "question_id": current_question.question_id,
                     "question": current_question.question,
                     "genre": current_question.genre,
-                    "difficulty": current_question.difficulty.value if current_question.difficulty else "easy",
+                    "difficulty": (
+                        current_question.difficulty.value
+                        if current_question.difficulty
+                        else "easy"
+                    ),
                     "display_options": [],
                     "answer": current_question.answer,
                 }
@@ -990,7 +1000,7 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
             ui_mode = "multiple_choice"
         elif difficulty == "hard":
             ui_mode = "text_input"
-    
+
     # Build the current_question response with all necessary fields
     current_question_data = None
     if question_details:
@@ -1000,7 +1010,9 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
             "genre": question_details.get("genre"),
             "difficulty": question_details.get("difficulty"),
             "display_options": question_details.get("display_options", []),
-            "options": question_details.get("display_options", []),  # Alias for compatibility
+            "options": question_details.get(
+                "display_options", []
+            ),  # Alias for compatibility
             "answer": question_details.get("answer"),
             "correct_index": question_details.get("correct_index"),
             "ui_mode": ui_mode,
