@@ -255,14 +255,23 @@ class ConnectionManager:
         disconnected_websockets = []
         success_count = 0
         total_targets = 0
+        mobile_sent = 0
+        web_sent = 0
+
+        filter_info = ""
+        if only_client_types:
+            filter_info = f" (only: {', '.join(only_client_types)})"
+        elif exclude_client_types:
+            filter_info = f" (exclude: {', '.join(exclude_client_types)})"
 
         logger.info(
-            f"📡 Broadcasting '{message.get('type')}' to session {session_code}"
+            f"📡 Broadcasting '{message.get('type')}' to session {session_code}{filter_info}"
         )
 
         for ws_id, connection_info in self.active_connections[session_code].items():
             websocket = connection_info["websocket"]
             client_type = connection_info["client_type"]
+            player_name = connection_info.get("player_name", "N/A")
 
             # Skip excluded websockets
             if websocket in exclude_websockets:
@@ -270,12 +279,19 @@ class ConnectionManager:
 
             # Filter by client type if specified
             if only_client_types and client_type not in only_client_types:
+                logger.debug(
+                    f"  ⊘ Skipping {client_type} client {ws_id} (filtered out)"
+                )
                 continue
 
             if exclude_client_types and client_type in exclude_client_types:
+                logger.debug(f"  ⊘ Skipping {client_type} client {ws_id} (excluded)")
                 continue
 
             total_targets += 1
+            logger.debug(
+                f"  → Sending to {client_type} client {ws_id} (player: {player_name})"
+            )
 
             # Retry logic for critical messages
             max_attempts = 3 if critical else 1
@@ -285,7 +301,12 @@ class ConnectionManager:
                 try:
                     await websocket.send_text(json.dumps(message_with_timestamp))
                     success_count += 1
+                    if client_type == "mobile":
+                        mobile_sent += 1
+                    elif client_type == "web":
+                        web_sent += 1
                     sent = True
+                    logger.debug(f"  ✓ Sent successfully to {client_type} {ws_id}")
                     break
                 except WebSocketDisconnect:
                     logger.warning(
@@ -306,7 +327,7 @@ class ConnectionManager:
                         disconnected_websockets.append(websocket)
 
         logger.info(
-            f"Broadcast complete: {success_count}/{total_targets} clients received message"
+            f"✅ Broadcast complete: {success_count}/{total_targets} clients received '{message.get('type')}' (📱mobile: {mobile_sent}, 💻web: {web_sent})"
         )
 
         # Clean up disconnected websockets
@@ -315,14 +336,30 @@ class ConnectionManager:
 
     async def broadcast_to_mobile_players(self, session_code: str, message: dict):
         """Broadcast message only to mobile clients"""
+        mobile_count = sum(
+            1
+            for conn in self.active_connections.get(session_code, {}).values()
+            if conn["client_type"] == "mobile"
+        )
+        logger.info(
+            f"📱 Broadcasting to {mobile_count} mobile client(s) in session {session_code}: type={message.get('type')}"
+        )
         await self.broadcast_to_session(
-            session_code, message, only_client_types=["mobile"]
+            session_code, message, only_client_types=["mobile"], critical=True
         )
 
     async def broadcast_to_web_clients(self, session_code: str, message: dict):
         """Broadcast message only to web clients"""
+        web_count = sum(
+            1
+            for conn in self.active_connections.get(session_code, {}).values()
+            if conn["client_type"] == "web"
+        )
+        logger.info(
+            f"💻 Broadcasting to {web_count} web client(s) in session {session_code}: type={message.get('type')}"
+        )
         await self.broadcast_to_session(
-            session_code, message, only_client_types=["web"]
+            session_code, message, only_client_types=["web"], critical=True
         )
 
     def get_session_connections(self, session_code: str) -> Dict[str, Dict[str, Any]]:

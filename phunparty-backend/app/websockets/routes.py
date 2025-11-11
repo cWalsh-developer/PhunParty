@@ -378,38 +378,82 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
         game_state = get_game_session_state(db, session_code)
         current_question = None
 
-        # Step 1: Broadcast game_started event first (so UI transitions from lobby)
+        # Get first question data to include in game_started event
+        first_question_data = None
+        if game_state and game_state.current_question_id:
+            try:
+                from app.logic.game_logic import get_question_with_randomized_options
+
+                question_full = get_question_with_randomized_options(
+                    db, game_state.current_question_id
+                )
+
+                # Determine ui_mode
+                difficulty = question_full.get("difficulty", "").lower()
+                ui_mode = "text_input"
+                if (
+                    question_full.get("display_options")
+                    and len(question_full["display_options"]) > 0
+                ):
+                    if difficulty in ["easy", "medium"]:
+                        ui_mode = "multiple_choice"
+                    elif difficulty == "hard":
+                        ui_mode = "text_input"
+
+                first_question_data = {
+                    "question_id": question_full["question_id"],
+                    "question": question_full["question"],
+                    "genre": question_full["genre"],
+                    "difficulty": question_full["difficulty"],
+                    "display_options": question_full["display_options"],
+                    "options": question_full["display_options"],
+                    "ui_mode": ui_mode,
+                }
+                logger.info(
+                    f"📝 Including first question in game_started: {question_full['question_id']}, ui_mode={ui_mode}"
+                )
+            except Exception as e:
+                logger.error(f"Error getting first question for game_started: {e}")
+
+        # Step 1: Broadcast game_started event WITH first question included
         logger.info(f"📡 Broadcasting game_started message for session {session_code}")
+
+        game_started_data = {
+            "session_code": session_code,
+            "started_at": datetime.now().isoformat(),
+            "isstarted": True,
+            "game_state": {
+                "isstarted": True,
+                "is_active": game_state.is_active if game_state else True,
+                "current_question_index": (
+                    game_state.current_question_index if game_state else 0
+                ),
+                "total_questions": (game_state.total_questions if game_state else 1),
+            },
+        }
+
+        # Include first question in game_started for immediate display
+        if first_question_data:
+            game_started_data["currentQuestion"] = first_question_data
+            game_started_data["current_question"] = (
+                first_question_data  # Alias for compatibility
+            )
+
         await manager.broadcast_to_session(
             session_code,
             {
                 "type": "game_started",
-                "data": {
-                    "session_code": session_code,
-                    "started_at": datetime.now().isoformat(),
-                    "isstarted": True,
-                    "game_state": {
-                        "isstarted": True,
-                        "is_active": game_state.is_active if game_state else True,
-                        "current_question_index": (
-                            game_state.current_question_index if game_state else 0
-                        ),
-                        "total_questions": (
-                            game_state.total_questions if game_state else 1
-                        ),
-                    },
-                },
+                "data": game_started_data,
             },
             critical=True,  # This is critical - retry if needed
         )
 
-        # Step 2: Small delay to ensure game_started is processed before question
-        await asyncio.sleep(0.5)
+        # Step 2: Also send as separate question_started for backward compatibility
+        # This ensures both old and new clients work
+        await asyncio.sleep(0.3)
 
-        # Step 3: Now broadcast the first question
         if game_state and game_state.current_question_id:
-            logger.info(f"Broadcasting first question {game_state.current_question_id}")
-            # Use the new broadcast system with randomized options
+            logger.info(f"📤 Also broadcasting as question_started for compatibility")
             if hasattr(game_handler, "broadcast_question_with_options"):
                 await game_handler.broadcast_question_with_options(
                     game_state.current_question_id, db

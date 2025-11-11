@@ -401,17 +401,23 @@ async def broadcast_question_with_options(
         }
 
         logger.info(
-            f"📝 Broadcasting question {question_id} - display_options: {question_data['display_options']}, correct_index: {question_data.get('correct_index')}"
+            f"📝 Broadcasting question {question_id} - display_options: {question_data['display_options']}, correct_index: {question_data.get('correct_index')}, ui_mode: {ui_mode}"
         )
 
         # Send to mobile players (without answer)
+        logger.info(
+            f"📱 Sending question_started to MOBILE clients - question_id: {question_data['question_id']}, ui_mode: {ui_mode}, options: {len(question_data['display_options'])} items"
+        )
         await manager.broadcast_to_mobile_players(session_code, player_message)
 
         # Send to web host (with answer info and display_options)
+        logger.info(
+            f"💻 Sending question_started to WEB clients - question_id: {question_data['question_id']}, ui_mode: {ui_mode}, options: {len(question_data['display_options'])} items"
+        )
         await manager.broadcast_to_web_clients(session_code, host_message)
 
         logger.info(
-            f"✅ Broadcasted question {question_id} with display_options to session {session_code}"
+            f"✅ Broadcasted question {question_id} with display_options and ui_mode={ui_mode} to session {session_code}"
         )
 
     except Exception as e:
