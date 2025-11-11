@@ -433,11 +433,21 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
         }
 
         # Include first question in game_started for immediate display
+        # Send in MULTIPLE formats to ensure frontend compatibility
         if first_question_data:
             game_started_data["currentQuestion"] = first_question_data
-            game_started_data["current_question"] = (
-                first_question_data  # Alias for compatibility
+            game_started_data["current_question"] = first_question_data  # Alias
+            game_started_data["question"] = first_question_data  # Another alias
+
+            # ALSO include it in game_state for nested access
+            game_started_data["game_state"]["currentQuestion"] = first_question_data
+            game_started_data["game_state"]["current_question"] = first_question_data
+
+            logger.info(
+                f"✅ Question included in game_started with ui_mode={first_question_data.get('ui_mode')}, options={len(first_question_data.get('display_options', []))}"
             )
+        else:
+            logger.warning("⚠️ No question data available for game_started event!")
 
         await manager.broadcast_to_session(
             session_code,
@@ -448,25 +458,24 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
             critical=True,  # This is critical - retry if needed
         )
 
-        # Step 2: Also send as separate question_started for backward compatibility
-        # This ensures both old and new clients work
-        await asyncio.sleep(0.3)
+        # Step 2: IMMEDIATELY send as separate question_started as well
+        # Don't wait - send right away so ALL clients get the question
+        if game_state and game_state.current_question_id and first_question_data:
+            logger.info(
+                f"📤 Also broadcasting as question_started message to ALL clients"
+            )
 
-        if game_state and game_state.current_question_id:
-            logger.info(f"📤 Also broadcasting as question_started for compatibility")
-            if hasattr(game_handler, "broadcast_question_with_options"):
-                await game_handler.broadcast_question_with_options(
-                    game_state.current_question_id, db
-                )
-            else:
-                # Fallback to old system
-                current_question = get_current_question_details(db, session_code)
-                if current_question and hasattr(game_handler, "start_question"):
-                    await game_handler.start_question(current_question)
-                elif current_question:
-                    await game_handler.broadcast_question(current_question)
+            # Send to ALL clients (both mobile and web) with question data
+            await manager.broadcast_to_session(
+                session_code,
+                {
+                    "type": "question_started",
+                    "data": first_question_data,
+                },
+                critical=True,
+            )
 
-        # Step 4: Send a status update after question broadcast
+        # Step 3: Send a status update after question broadcast
         await asyncio.sleep(0.2)
 
         # Get player counts for accurate status
