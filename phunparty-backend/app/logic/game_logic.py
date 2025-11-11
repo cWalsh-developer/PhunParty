@@ -358,30 +358,46 @@ async def broadcast_question_with_options(
                 "genre": question_data["genre"],
                 "difficulty": question_data["difficulty"],
                 "display_options": question_data["display_options"],
+                "options": question_data["display_options"],  # Alias for compatibility
                 "question_index": None,  # Will be added by caller if needed
                 "total_questions": None,  # Will be added by caller if needed
             },
         }
 
-        # Create message for web host (with correct answer info)
+        # Create message for web host (with correct answer info AND display_options)
         host_message = {
             "type": "new_question",
             "data": {
-                **player_message["data"],
+                "question_id": question_data["question_id"],
+                "question": question_data["question"],
+                "genre": question_data["genre"],
+                "difficulty": question_data["difficulty"],
                 "answer": question_data["answer"],
                 "correct_index": question_data["correct_index"],
-                "question_options": question_data["question_options"],
+                "display_options": question_data[
+                    "display_options"
+                ],  # Randomized options for display
+                "options": question_data["display_options"],  # Alias for compatibility
+                "question_options": question_data[
+                    "question_options"
+                ],  # All original options
+                "question_index": None,
+                "total_questions": None,
             },
         }
+
+        logger.info(
+            f"📝 Broadcasting question {question_id} - display_options: {question_data['display_options']}, correct_index: {question_data.get('correct_index')}"
+        )
 
         # Send to mobile players (without answer)
         await manager.broadcast_to_mobile_players(session_code, player_message)
 
-        # Send to web host (with answer info)
+        # Send to web host (with answer info and display_options)
         await manager.broadcast_to_web_clients(session_code, host_message)
 
         logger.info(
-            f"Broadcasted question {question_id} with options to session {session_code}"
+            f"✅ Broadcasted question {question_id} with display_options to session {session_code}"
         )
 
     except Exception as e:
@@ -396,6 +412,7 @@ async def broadcast_question_with_options(
                     "genre": "Trivia",
                     "difficulty": "easy",
                     "display_options": ["Please wait for next question"],
+                    "options": ["Please wait for next question"],
                     "question_index": None,
                     "total_questions": None,
                 },

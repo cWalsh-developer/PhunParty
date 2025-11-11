@@ -179,14 +179,28 @@ async def send_initial_session_state(
             },
         }
 
-        # Add current question if game is active
-        if game_state and game_state.get("is_active"):
+        # Add current question ONLY for web clients AND only if game has started
+        # Mobile clients should NOT receive question in initial state - they get it via game_started flow
+        if (
+            client_type == "web"
+            and game_state
+            and game_state.get("is_active")
+            and game_state.get("isstarted")
+        ):
             try:
                 current_question = get_current_question_details(db, session_code)
                 if current_question:
                     initial_state["data"]["current_question"] = current_question
+                    logger.info(
+                        f"Included current question in initial state for web client"
+                    )
             except Exception as e:
                 logger.warning(f"Could not get current question: {e}")
+        elif client_type == "mobile":
+            # For mobile, explicitly indicate they should wait for game_started
+            logger.info(
+                f"Mobile client connecting - will receive question after game_started event"
+            )
 
         await manager.send_personal_message(initial_state, websocket)
 
