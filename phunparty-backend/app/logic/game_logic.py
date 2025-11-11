@@ -352,7 +352,10 @@ async def broadcast_question_with_options(
         # Determine ui_mode based on difficulty
         difficulty = question_data.get("difficulty", "").lower()
         ui_mode = "text_input"  # Default
-        if question_data.get("display_options") and len(question_data["display_options"]) > 0:
+        if (
+            question_data.get("display_options")
+            and len(question_data["display_options"]) > 0
+        ):
             if difficulty in ["easy", "medium"]:
                 ui_mode = "multiple_choice"
             elif difficulty == "hard":
