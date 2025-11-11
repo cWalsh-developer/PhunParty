@@ -48,7 +48,7 @@ class ConnectionManager:
         if session_code not in self.active_connections:
             self.active_connections[session_code] = {}
 
-        # Store connection info
+        # Store connection info with ready flag
         connection_info = {
             "websocket": websocket,
             "client_type": client_type,
@@ -59,6 +59,8 @@ class ConnectionManager:
             "player_answered": False,
             "last_heartbeat": datetime.now(),
             "ws_id": ws_id,
+            "is_ready": False,  # Track if client acknowledged connection
+            "connection_confirmed": False,
         }
 
         self.active_connections[session_code][ws_id] = connection_info
@@ -68,10 +70,10 @@ class ConnectionManager:
         }
 
         logger.info(
-            f"✅ Client connected: {client_type} to session {session_code} (ws_id: {ws_id})"
+            f"Client connected: {client_type} to session {session_code} (ws_id: {ws_id}, player: {player_name or 'N/A'})"
         )
 
-        # Send connection confirmation to the connecting client
+        # Send connection confirmation to the connecting client and wait for ack
         try:
             await websocket.send_text(
                 json.dumps(
@@ -82,23 +84,46 @@ class ConnectionManager:
                             "session_code": session_code,
                             "client_type": client_type,
                             "player_id": player_id,
+                            "player_name": player_name,
                             "timestamp": datetime.now().isoformat(),
+                            "requires_ack": True,
                         },
                         "timestamp": datetime.now().timestamp(),
                     }
                 )
             )
+
+            # Mark connection as confirmed after successful send
+            connection_info["connection_confirmed"] = True
+            logger.info(
+                f"Connection confirmation sent to {client_type} client (ws_id: {ws_id})"
+            )
+
         except Exception as e:
             logger.error(f"Failed to send connection confirmation: {e}")
+            # Don't continue if we can't confirm connection
+            return
 
-        # Small delay to ensure web client is ready before sending player_joined notifications
-        await asyncio.sleep(0.1)
+        # Wait for client to be ready before broadcasting join events
+        # This prevents race conditions where broadcasts happen before client is listening
+        await asyncio.sleep(0.3)  # Increased delay for more reliable connection
 
         # Notify other clients about new connection (if mobile player joining)
         if client_type == "mobile" and player_name:
             logger.info(
-                f"📢 Broadcasting player_joined for {player_name} to session {session_code}"
+                f"Broadcasting player_joined for {player_name} to session {session_code}"
             )
+
+            # Get current player count
+            mobile_count = len(
+                [
+                    c
+                    for c in self.active_connections[session_code].values()
+                    if c.get("client_type") == "mobile"
+                    and c.get("connection_confirmed")
+                ]
+            )
+
             await self.broadcast_to_session(
                 session_code,
                 {
@@ -108,18 +133,15 @@ class ConnectionManager:
                         "player_name": player_name,
                         "player_photo": player_photo,
                         "timestamp": datetime.now().isoformat(),
-                        "total_players": len(
-                            [
-                                c
-                                for c in self.active_connections[session_code].values()
-                                if c.get("client_type") == "mobile"
-                            ]
-                        ),
+                        "total_players": mobile_count,
                     },
                 },
                 exclude_client_types=["mobile"],  # Only notify web clients
                 critical=True,  # Mark as critical for retry logic
             )
+
+            # Also send a roster update to all clients with full player list
+            await self.broadcast_player_roster_update(session_code)
 
     def disconnect(self, websocket: WebSocket):
         """Disconnect a client"""
@@ -448,6 +470,64 @@ class ConnectionManager:
                         "last_heartbeat"
                     ] = datetime.now()
                 break
+
+    def mark_client_ready(self, websocket: WebSocket):
+        """Mark a client as ready after they acknowledge connection"""
+        for ws_id, info in self.websocket_registry.items():
+            if info["websocket"] == websocket:
+                session_code = info["session_code"]
+                if (
+                    session_code in self.active_connections
+                    and ws_id in self.active_connections[session_code]
+                ):
+                    self.active_connections[session_code][ws_id]["is_ready"] = True
+                    logger.info(f"Client {ws_id} marked as ready")
+                break
+
+    async def broadcast_player_roster_update(self, session_code: str):
+        """Broadcast current player roster to all clients"""
+        mobile_players = self.get_mobile_players(session_code)
+
+        await self.broadcast_to_session(
+            session_code,
+            {
+                "type": "roster_update",
+                "data": {
+                    "players": mobile_players,
+                    "total_players": len(mobile_players),
+                    "timestamp": datetime.now().isoformat(),
+                },
+            },
+            critical=True,
+        )
+
+        logger.info(
+            f"Broadcasted roster update to session {session_code}: {len(mobile_players)} players"
+        )
+
+    async def wait_for_ready_connections(self, session_code: str, timeout: float = 2.0):
+        """Wait for all connections to be ready before proceeding with critical broadcasts"""
+        start_time = datetime.now()
+
+        while (datetime.now() - start_time).total_seconds() < timeout:
+            connections = self.get_session_connections(session_code)
+
+            # Check if all connections are ready
+            all_ready = all(
+                conn.get("is_ready", False) or conn.get("client_type") == "web"
+                for conn in connections.values()
+            )
+
+            if all_ready:
+                logger.info(f"All connections ready for session {session_code}")
+                return True
+
+            await asyncio.sleep(0.1)
+
+        logger.warning(
+            f"Timeout waiting for all connections to be ready in session {session_code}"
+        )
+        return False
 
     def _start_heartbeat_checker(self):
         """Start the background task to check for stale connections"""

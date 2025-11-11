@@ -2,6 +2,7 @@
 WebSocket routes for real-time game functionality
 """
 
+import asyncio
 from datetime import datetime
 import json
 import logging
@@ -215,6 +216,12 @@ async def handle_websocket_message(
         manager.update_heartbeat(websocket)
         await manager.send_personal_message({"type": "pong"}, websocket)
 
+    elif message_type == "connection_ack":
+        # Client acknowledging successful connection - mark as ready
+        manager.mark_client_ready(websocket)
+        manager.update_heartbeat(websocket)
+        logger.info(f"Client acknowledged connection for session {session_code}")
+
     elif message_type == "submit_answer" and client_type == "mobile":
         # Player submitting an answer
         answer = data.get("answer")
@@ -343,6 +350,11 @@ async def handle_broadcast_current_question(session_code: str, db: Session):
 async def handle_game_start(session_code: str, game_handler, db: Session):
     """Handle game start event"""
     try:
+        logger.info(f"🎮 Starting game for session {session_code}")
+
+        # Wait for all connections to be ready before proceeding
+        await manager.wait_for_ready_connections(session_code, timeout=2.0)
+
         # Update game state in database to mark as started
         from app.logic.game_logic import updateGameStartStatus, get_game_session_state
 
@@ -352,7 +364,37 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
         game_state = get_game_session_state(db, session_code)
         current_question = None
 
+        # Step 1: Broadcast game_started event first (so UI transitions from lobby)
+        logger.info(f"📡 Broadcasting game_started message for session {session_code}")
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "game_started",
+                "data": {
+                    "session_code": session_code,
+                    "started_at": datetime.now().isoformat(),
+                    "isstarted": True,
+                    "game_state": {
+                        "isstarted": True,
+                        "is_active": game_state.is_active if game_state else True,
+                        "current_question_index": (
+                            game_state.current_question_index if game_state else 0
+                        ),
+                        "total_questions": (
+                            game_state.total_questions if game_state else 1
+                        ),
+                    },
+                },
+            },
+            critical=True,  # This is critical - retry if needed
+        )
+
+        # Step 2: Small delay to ensure game_started is processed before question
+        await asyncio.sleep(0.5)
+
+        # Step 3: Now broadcast the first question
         if game_state and game_state.current_question_id:
+            logger.info(f"Broadcasting first question {game_state.current_question_id}")
             # Use the new broadcast system with randomized options
             if hasattr(game_handler, "broadcast_question_with_options"):
                 await game_handler.broadcast_question_with_options(
@@ -366,42 +408,8 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
                 elif current_question:
                     await game_handler.broadcast_question(current_question)
 
-        # Always get current question for the game_started message
-        if not current_question:
-            try:
-                current_question = get_current_question_details(db, session_code)
-            except Exception as e:
-                logger.warning(
-                    f"Could not get current question for game start broadcast: {e}"
-                )
-
-        # Broadcast game started to all clients - this is crucial for frontend to know game started
-        logger.info(f"🎮 Broadcasting game_started message for session {session_code}")
-        await manager.broadcast_to_session(
-            session_code,
-            {
-                "type": "game_started",
-                "data": {
-                    "session_code": session_code,
-                    "started_at": "now",  # You can use proper datetime
-                    "isstarted": True,  # Always True when game starts
-                    "current_question": current_question,
-                    "game_state": {
-                        "isstarted": True,
-                        "is_active": game_state.is_active if game_state else True,
-                        "current_question_index": (
-                            game_state.current_question_index if game_state else 0
-                        ),
-                        "total_questions": (
-                            game_state.total_questions if game_state else 1
-                        ),
-                    },
-                },
-            },
-        )
-
-        # Also broadcast a separate game status update for any clients that might be listening specifically for status
-        logger.info(f"Broadcasting game_status_update for session {session_code}")
+        # Step 4: Send a status update after question broadcast
+        await asyncio.sleep(0.2)
 
         # Get player counts for accurate status
         from app.database.dbCRUD import (
@@ -436,16 +444,20 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
             "playersAnswered": current_responses,
         }
 
+        logger.info(f"Broadcasting game_status_update for session {session_code}")
         await manager.broadcast_to_session(
             session_code,
             {
                 "type": "game_status_update",
                 "data": status_data,
             },
+            critical=True,
         )
 
+        logger.info(f"Game start sequence complete for session {session_code}")
+
     except Exception as e:
-        logger.error(f"Error starting game: {e}")
+        logger.error(f"Error starting game: {e}", exc_info=True)
 
 
 async def handle_next_question(session_code: str, game_handler, db: Session):
