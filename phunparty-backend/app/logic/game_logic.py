@@ -362,25 +362,29 @@ async def broadcast_question_with_options(
                 ui_mode = "text_input"
 
         # Create message for mobile players (without correct answer info)
+        # MUST match the format from TriviaGameHandler.format_question_for_mobile()
         player_message = {
-            "type": "question_started",  # Changed from "new_question" to match frontend expectations
+            "type": "question_started",
             "data": {
+                "game_type": "trivia",  # CRITICAL: Mobile needs this to identify game mode
                 "question_id": question_data["question_id"],
                 "question": question_data["question"],
                 "genre": question_data["genre"],
                 "difficulty": question_data["difficulty"],
                 "display_options": question_data["display_options"],
-                "options": question_data["display_options"],  # Alias for compatibility
-                "ui_mode": ui_mode,  # Include ui_mode for mobile
+                "options": question_data["display_options"],  # Primary field for mobile
+                "ui_mode": ui_mode,  # Mobile uses this to determine input type
                 "question_index": None,  # Will be added by caller if needed
                 "total_questions": None,  # Will be added by caller if needed
             },
         }
 
         # Create message for web host (with correct answer info AND display_options)
+        # Web gets extra fields for answer tracking
         host_message = {
-            "type": "question_started",  # Changed from "new_question" to match frontend expectations
+            "type": "question_started",
             "data": {
+                "game_type": "trivia",  # Include for consistency
                 "question_id": question_data["question_id"],
                 "question": question_data["question"],
                 "genre": question_data["genre"],
@@ -425,8 +429,9 @@ async def broadcast_question_with_options(
         # Try to send a fallback question instead of just an error
         try:
             fallback_message = {
-                "type": "question_started",  # Changed from "new_question" to match frontend
+                "type": "question_started",
                 "data": {
+                    "game_type": "trivia",  # Include game_type for mobile compatibility
                     "question_id": question_id,
                     "question": "Question temporarily unavailable",
                     "genre": "Trivia",

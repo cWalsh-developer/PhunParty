@@ -401,6 +401,7 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
                         ui_mode = "text_input"
 
                 first_question_data = {
+                    "game_type": "trivia",  # CRITICAL: Mobile needs this field!
                     "question_id": question_full["question_id"],
                     "question": question_full["question"],
                     "genre": question_full["genre"],
@@ -410,7 +411,7 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
                     "ui_mode": ui_mode,
                 }
                 logger.info(
-                    f"📝 Including first question in game_started: {question_full['question_id']}, ui_mode={ui_mode}"
+                    f"📝 Including first question in game_started: {question_full['question_id']}, ui_mode={ui_mode}, game_type=trivia"
                 )
             except Exception as e:
                 logger.error(f"Error getting first question for game_started: {e}")
