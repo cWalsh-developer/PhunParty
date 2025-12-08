@@ -499,14 +499,24 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
             critical=True,  # This is critical - retry if needed
         )
 
-        # Step 2: IMMEDIATELY send as separate question_started as well
-        # Don't wait - send right away so ALL clients get the question
-        if game_state and game_state.current_question_id and first_question_data:
+        # Step 2: IMMEDIATELY broadcast the question using the proper broadcast function
+        # This sends different data to mobile (without answers) vs web (with answers)
+        if game_state and game_state.current_question_id:
             logger.info(
-                f"📤 Also broadcasting as question_started message to ALL clients"
+                f"📤 Broadcasting question_started using broadcast_question_with_options"
             )
 
-            # Send to ALL clients (both mobile and web) with question data
+            # Use the dedicated broadcast function that handles mobile vs web differently
+            from app.logic.game_logic import broadcast_question_with_options
+
+            await broadcast_question_with_options(
+                session_code, game_state.current_question_id, db
+            )
+        elif first_question_data:
+            # Fallback: if we don't have question ID but have data, broadcast directly
+            logger.warning(
+                "⚠️ No current_question_id, sending first_question_data to all clients"
+            )
             await manager.broadcast_to_session(
                 session_code,
                 {
