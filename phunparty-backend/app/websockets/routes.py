@@ -298,19 +298,23 @@ async def handle_websocket_message(
         from app.database.dbCRUD import get_current_question_details
 
         try:
-            current_question = get_current_question_details(db, session_code)
-            if current_question:
+            game_status = get_current_question_details(db, session_code)
+            # Extract just the question object - don't send the entire game status!
+            if game_status and game_status.get("current_question"):
+                question_data = game_status["current_question"]
                 logger.info(
-                    f"📤 Broadcasting current question after countdown_complete"
+                    f"📤 Broadcasting current question after countdown_complete: {question_data.get('question_id')}"
                 )
                 await manager.broadcast_to_session(
                     session_code,
                     {
                         "type": "question_started",
-                        "data": current_question,
+                        "data": question_data,  # Send ONLY the question object, not the full game status
                     },
                     critical=True,
                 )
+            else:
+                logger.warning(f"No current question found after countdown_complete")
         except Exception as e:
             logger.warning(f"Could not broadcast question after countdown: {e}")
 
