@@ -274,6 +274,46 @@ async def handle_websocket_message(
         # Web client starting the game
         await handle_game_start(session_code, game_handler, db)
 
+    elif message_type == "countdown_complete" and client_type == "web":
+        # Web client signaling countdown has completed
+        # Broadcast sync pulse to all clients (especially mobile) to prepare for questions
+        logger.info(
+            f"⏱️ Countdown complete for session {session_code} - Broadcasting sync pulse"
+        )
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "countdown_complete",
+                "data": {
+                    "ready_for_question": True,
+                    "session_code": session_code,
+                    "timestamp": datetime.now().isoformat(),
+                    **data,  # Include any additional data from the client
+                },
+            },
+            critical=True,
+        )
+
+        # Also broadcast the current question state to ensure mobile is in sync
+        from app.database.dbCRUD import get_current_question_details
+
+        try:
+            current_question = get_current_question_details(db, session_code)
+            if current_question:
+                logger.info(
+                    f"📤 Broadcasting current question after countdown_complete"
+                )
+                await manager.broadcast_to_session(
+                    session_code,
+                    {
+                        "type": "question_started",
+                        "data": current_question,
+                    },
+                    critical=True,
+                )
+        except Exception as e:
+            logger.warning(f"Could not broadcast question after countdown: {e}")
+
     elif message_type == "next_question" and client_type == "web":
         # Web client moving to next question
         await handle_next_question(session_code, game_handler, db)

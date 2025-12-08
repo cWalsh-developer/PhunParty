@@ -25,6 +25,18 @@ from app.routes import (
 )
 from app.websockets import routes as websocket_routes
 
+
+"""PhunParty Backend API main application module.
+
+Author: Connor Walsh
+
+This module creates and configures the FastAPI application instance, includes routers for game
+management, players, scores, questions, authentication, password reset, photos, and WebSockets.
+It also mounts static files for uploads, initializes database tables, and defines root and
+health check endpoints.
+"""
+
+
 app = FastAPI(title="PhunParty Backend API")
 
 app.include_router(
@@ -124,6 +136,12 @@ except Exception as e:
 
 @app.get("/")
 def read_root():
+    """Root endpoint providing an overview of the PhunParty Backend API.
+
+    Returns:
+        dict: API information including message, version, description, documentation link,
+        and a detailed list of available endpoints grouped by entity.
+    """
     return {
         "message": "PhunParty Backend API - Welcome!",
         "version": "1.0.0",
@@ -369,4 +387,9 @@ def read_root():
 
 @app.get("/health")
 def health_check():
+    """Health check endpoint to verify API status.
+
+    Returns:
+        dict: Status indicating the API is healthy.
+    """
     return {"status": "healthy"}
