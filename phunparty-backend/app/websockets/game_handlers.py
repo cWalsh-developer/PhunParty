@@ -245,15 +245,40 @@ class TriviaGameHandler(GameEventHandler):
     def format_question_for_mobile(
         self, question_data: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Format trivia question for mobile - show question and options"""
+        """Format trivia question for mobile - send FULL question data with all fields"""
+        # Determine ui_mode from difficulty if not already set
+        difficulty = str(question_data.get("difficulty", "easy")).lower()
+        ui_mode = question_data.get("ui_mode")
+
+        if not ui_mode:
+            # Calculate ui_mode based on difficulty and options
+            has_options = bool(
+                question_data.get("display_options") or question_data.get("options")
+            )
+            if has_options:
+                ui_mode = (
+                    "multiple_choice"
+                    if difficulty in ["easy", "medium"]
+                    else "text_input"
+                )
+            else:
+                ui_mode = "text_input"
+
         return {
             "game_type": "trivia",
+            "question_id": question_data.get("question_id"),
             "question": question_data.get("question", ""),
-            "options": question_data.get(
+            "genre": question_data.get("genre"),
+            "difficulty": question_data.get("difficulty"),
+            "display_options": question_data.get(
                 "display_options", question_data.get("options", [])
             ),
-            "question_id": question_data.get("question_id"),
-            "ui_mode": "multiple_choice",
+            "options": question_data.get(
+                "display_options", question_data.get("options", [])
+            ),  # Alias for compatibility
+            "ui_mode": ui_mode,
+            "correct_index": question_data.get("correct_index"),
+            "answer": question_data.get("answer"),
         }
 
 
