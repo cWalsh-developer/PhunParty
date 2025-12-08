@@ -336,14 +336,27 @@ class ConnectionManager:
 
     async def broadcast_to_mobile_players(self, session_code: str, message: dict):
         """Broadcast message only to mobile clients"""
-        mobile_count = sum(
-            1
-            for conn in self.active_connections.get(session_code, {}).values()
+        session_connections = self.active_connections.get(session_code, {})
+        mobile_connections = [
+            conn
+            for conn in session_connections.values()
             if conn["client_type"] == "mobile"
-        )
+        ]
+        mobile_count = len(mobile_connections)
+
         logger.info(
             f"📱 Broadcasting to {mobile_count} mobile client(s) in session {session_code}: type={message.get('type')}"
         )
+
+        if mobile_count == 0:
+            logger.warning(f"⚠️ NO MOBILE CLIENTS connected to session {session_code}!")
+        else:
+            # Log details about connected mobile clients
+            for conn in mobile_connections:
+                logger.info(
+                    f"📱 Mobile client: player_id={conn.get('player_id')}, ws_id={conn.get('ws_id')}"
+                )
+
         await self.broadcast_to_session(
             session_code, message, only_client_types=["mobile"], critical=True
         )

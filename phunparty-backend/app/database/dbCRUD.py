@@ -1005,6 +1005,7 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
     current_question_data = None
     if question_details:
         current_question_data = {
+            "game_type": "trivia",  # CRITICAL: Mobile needs this field to recognize questions!
             "question_id": question_details.get("question_id"),
             "question": question_details.get("question"),
             "genre": question_details.get("genre"),
@@ -1020,6 +1021,7 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
     elif current_question:
         # Minimal fallback if question_details failed
         current_question_data = {
+            "game_type": "trivia",  # CRITICAL: Mobile needs this field!
             "question_id": current_question.question_id,
             "question": current_question.question,
             "genre": current_question.genre,

@@ -412,6 +412,7 @@ async def broadcast_question_with_options(
         logger.info(
             f"📱 Sending question_started to MOBILE clients - question_id: {question_data['question_id']}, ui_mode: {ui_mode}, options: {len(question_data['display_options'])} items"
         )
+        logger.info(f"📱 MOBILE MESSAGE PAYLOAD: {player_message}")
         await manager.broadcast_to_mobile_players(session_code, player_message)
 
         # Send to web host (with answer info and display_options)
