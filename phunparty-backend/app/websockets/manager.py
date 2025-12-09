@@ -22,6 +22,9 @@ class ConnectionManager:
         self.active_connections: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # websocket_id -> {session_code, websocket}
         self.websocket_registry: Dict[str, Dict[str, Any]] = {}
+        # Question queue: session_code -> {question_id: question_data}
+        # Stores questions that have been broadcast so mobile clients can retrieve them
+        self.question_queue: Dict[str, Dict[str, Any]] = {}
         # Start heartbeat checker
         self._heartbeat_task = None
         self._start_heartbeat_checker()
@@ -622,6 +625,47 @@ class ConnectionManager:
         except RuntimeError:
             # No event loop running yet - this is fine, will start when app starts
             pass
+
+    def queue_question(self, session_code: str, question_data: Dict[str, Any]) -> None:
+        """
+        Store a question in the session queue for later retrieval.
+        This ensures mobile clients can get questions even if they miss the broadcast.
+        """
+        if session_code not in self.question_queue:
+            self.question_queue[session_code] = {}
+
+        question_id = question_data.get("question_id")
+        if question_id:
+            self.question_queue[session_code][question_id] = {
+                "question_data": question_data,
+                "queued_at": datetime.now().isoformat(),
+            }
+            logger.info(f"📥 Queued question {question_id} for session {session_code}")
+
+    def get_current_question(self, session_code: str) -> Optional[Dict[str, Any]]:
+        """
+        Get the most recently queued question for a session.
+        Returns None if no questions are queued.
+        """
+        if session_code not in self.question_queue:
+            return None
+
+        questions = self.question_queue[session_code]
+        if not questions:
+            return None
+
+        # Return the most recently added question
+        latest_question = max(questions.items(), key=lambda x: x[1]["queued_at"])
+        logger.info(
+            f"📤 Retrieving queued question {latest_question[0]} for session {session_code}"
+        )
+        return latest_question[1]["question_data"]
+
+    def clear_question_queue(self, session_code: str) -> None:
+        """Clear all queued questions for a session (e.g., when game ends)"""
+        if session_code in self.question_queue:
+            del self.question_queue[session_code]
+            logger.info(f"🗑️ Cleared question queue for session {session_code}")
 
 
 # Global connection manager instance

@@ -236,6 +236,46 @@ async def handle_websocket_message(
         manager.update_heartbeat(websocket)
         logger.info(f"Client acknowledged connection for session {session_code}")
 
+    elif message_type == "request_current_question" and client_type == "mobile":
+        # Mobile client requesting current question from queue
+        logger.info(
+            f"📲 Mobile client requesting current question for session {session_code}"
+        )
+        current_question = manager.get_current_question(session_code)
+
+        if current_question:
+            logger.info(
+                f"📤 Sending queued question {current_question.get('question_id')} to mobile client"
+            )
+            await manager.send_personal_message(
+                {
+                    "type": "question_started",
+                    "data": current_question,
+                },
+                websocket,
+            )
+        else:
+            logger.warning(f"⚠️ No queued question available for session {session_code}")
+            # Fallback: try to get from database
+            try:
+                from app.database.dbCRUD import get_current_question_details
+
+                game_status = get_current_question_details(db, session_code)
+                if game_status and game_status.get("current_question"):
+                    question_data = game_status["current_question"]
+                    logger.info(
+                        f"📤 Sending DB question {question_data.get('question_id')} to mobile client"
+                    )
+                    await manager.send_personal_message(
+                        {
+                            "type": "question_started",
+                            "data": question_data,
+                        },
+                        websocket,
+                    )
+            except Exception as e:
+                logger.error(f"Failed to get question from DB: {e}")
+
     elif message_type == "submit_answer" and client_type == "mobile":
         # Player submitting an answer
         answer = data.get("answer")

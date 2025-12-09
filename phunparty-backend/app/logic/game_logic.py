@@ -408,6 +408,12 @@ async def broadcast_question_with_options(
             f"📝 Broadcasting question {question_id} - display_options: {question_data['display_options']}, correct_index: {question_data.get('correct_index')}, ui_mode: {ui_mode}"
         )
 
+        # CRITICAL: Queue the question data so mobile clients can retrieve it
+        # This ensures questions are never lost even if WebSocket messages are missed
+        mobile_question_data = player_message["data"]
+        manager.queue_question(session_code, mobile_question_data)
+        logger.info(f"📥 Question {question_id} queued for session {session_code}")
+
         # Send to mobile players (without answer)
         logger.info(
             f"📱 Sending question_started to MOBILE clients - question_id: {question_data['question_id']}, ui_mode: {ui_mode}, options: {len(question_data['display_options'])} items"
