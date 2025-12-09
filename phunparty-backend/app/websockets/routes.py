@@ -226,9 +226,23 @@ async def handle_websocket_message(
     )
 
     if message_type == "ping":
-        # Heartbeat/keepalive
+        # Heartbeat/keepalive with clock synchronization
         manager.update_heartbeat(websocket)
-        await manager.send_personal_message({"type": "pong"}, websocket)
+
+        # Include server time for client clock offset calculation
+        server_time_ms = int(datetime.utcnow().timestamp() * 1000)
+        client_sent_at = data.get("clientSentAt") if data else None
+
+        pong_data = {
+            "type": "pong",
+            "serverTime": server_time_ms,  # Server UTC time in milliseconds
+        }
+
+        # Echo back client timestamp if provided for RTT calculation
+        if client_sent_at:
+            pong_data["clientSentAt"] = client_sent_at
+
+        await manager.send_personal_message(pong_data, websocket)
 
     elif message_type == "connection_ack":
         # Client acknowledging successful connection - mark as ready
@@ -316,10 +330,22 @@ async def handle_websocket_message(
 
     elif message_type == "countdown_complete" and client_type == "web":
         # Web client signaling countdown has completed
-        # Broadcast sync pulse to all clients (especially mobile) to prepare for questions
+        # THIS is the synchronized trigger for question reveal on all devices
         logger.info(
-            f"⏱️ Countdown complete for session {session_code} - Broadcasting sync pulse"
+            f"⏱️ Countdown complete for session {session_code} - Synchronized question reveal"
         )
+
+        from datetime import timedelta
+
+        # Calculate synchronized start time - 500ms in the future
+        # This gives all clients time to receive and schedule the display
+        now = datetime.utcnow()
+        start_at = now + timedelta(milliseconds=500)
+        start_at_iso = start_at.isoformat() + "Z"
+
+        logger.info(f"🕐 Question will display at: {start_at_iso} (500ms from now)")
+
+        # First, broadcast sync pulse to prepare clients
         await manager.broadcast_to_session(
             session_code,
             {
@@ -328,13 +354,14 @@ async def handle_websocket_message(
                     "ready_for_question": True,
                     "session_code": session_code,
                     "timestamp": datetime.now().isoformat(),
+                    "start_at": start_at_iso,  # When to actually display
                     **data,  # Include any additional data from the client
                 },
             },
             critical=True,
         )
 
-        # Also broadcast the current question state to ensure mobile is in sync
+        # Get the current question with synchronized start time
         from app.database.dbCRUD import get_current_question_details
 
         try:
@@ -342,16 +369,29 @@ async def handle_websocket_message(
             # Extract just the question object - don't send the entire game status!
             if game_status and game_status.get("current_question"):
                 question_data = game_status["current_question"]
+
+                # Add synchronized start_at timestamp to question data
+                question_data["start_at"] = start_at_iso
+
                 logger.info(
-                    f"📤 Broadcasting current question after countdown_complete: {question_data.get('question_id')}"
+                    f"📤 Broadcasting synchronized question {question_data.get('question_id')} with start_at={start_at_iso}"
                 )
+
+                # Queue the question for late joiners and reconnections
+                manager.queue_question(session_code, question_data)
+
+                # Broadcast to ALL clients with synchronized timing
                 await manager.broadcast_to_session(
                     session_code,
                     {
                         "type": "question_started",
-                        "data": question_data,  # Send ONLY the question object, not the full game status
+                        "data": question_data,
                     },
                     critical=True,
+                )
+
+                logger.info(
+                    f"✅ Question queued and broadcast - all clients will reveal at {start_at_iso}"
                 )
             else:
                 logger.warning(f"No current question found after countdown_complete")
@@ -531,7 +571,8 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
             except Exception as e:
                 logger.error(f"Error getting first question for game_started: {e}")
 
-        # Step 1: Broadcast game_started event WITH first question included
+        # Step 1: Broadcast game_started event WITHOUT question data
+        # This prevents mobiles from rendering early before intro completes
         logger.info(f"📡 Broadcasting game_started message for session {session_code}")
 
         game_started_data = {
@@ -548,22 +589,8 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
             },
         }
 
-        # Include first question in game_started for immediate display
-        # Send in MULTIPLE formats to ensure frontend compatibility
-        if first_question_data:
-            game_started_data["currentQuestion"] = first_question_data
-            game_started_data["current_question"] = first_question_data  # Alias
-            game_started_data["question"] = first_question_data  # Another alias
-
-            # ALSO include it in game_state for nested access
-            game_started_data["game_state"]["currentQuestion"] = first_question_data
-            game_started_data["game_state"]["current_question"] = first_question_data
-
-            logger.info(
-                f"✅ Question included in game_started with ui_mode={first_question_data.get('ui_mode')}, options={len(first_question_data.get('display_options', []))}"
-            )
-        else:
-            logger.warning("⚠️ No question data available for game_started event!")
+        # DO NOT include question in game_started - prevents early mobile rendering
+        # The question will be sent after countdown_complete for synchronized display
 
         await manager.broadcast_to_session(
             session_code,
@@ -571,37 +598,36 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
                 "type": "game_started",
                 "data": game_started_data,
             },
-            critical=True,  # This is critical - retry if needed
+            critical=True,
         )
 
-        # Step 2: IMMEDIATELY broadcast the question using the proper broadcast function
-        # This sends different data to mobile (without answers) vs web (with answers)
-        if game_state and game_state.current_question_id:
+        # Step 2: Send web-only preload so host can prepare UI during intro
+        # This is NOT visible to mobiles - prevents the race condition
+        if first_question_data:
             logger.info(
-                f"📤 Broadcasting question_started using broadcast_question_with_options"
-            )
-
-            # Use the dedicated broadcast function that handles mobile vs web differently
-            from app.logic.game_logic import broadcast_question_with_options
-
-            await broadcast_question_with_options(
-                session_code, game_state.current_question_id, db
-            )
-        elif first_question_data:
-            # Fallback: if we don't have question ID but have data, broadcast directly
-            logger.warning(
-                "⚠️ No current_question_id, sending first_question_data to all clients"
+                f"📺 Sending preload_question to WEB only (not visible to mobile yet)"
             )
             await manager.broadcast_to_session(
                 session_code,
                 {
-                    "type": "question_started",
+                    "type": "preload_question",
                     "data": first_question_data,
                 },
+                only_client_types=["web"],
                 critical=True,
             )
+            logger.info(f"✅ Web host can now prepare question UI during intro")
+        else:
+            logger.warning("⚠️ No question data available for preload!")
 
-        # Step 3: Send a status update after question broadcast
+        # Step 3: DO NOT broadcast question_started here!
+        # The synchronized question reveal happens ONLY after countdown_complete
+        # This ensures perfect timing between intro finish and question display
+        logger.info(
+            "⏸️ Question broadcast deferred until countdown_complete for synchronized reveal"
+        )
+
+        # Step 4: Send a status update after game_started
         await asyncio.sleep(0.2)
 
         # Get player counts for accurate status
