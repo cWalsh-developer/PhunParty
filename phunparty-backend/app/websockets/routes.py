@@ -450,8 +450,39 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
     try:
         logger.info(f"🎮 Starting game for session {session_code}")
 
-        # Wait for all connections to be ready before proceeding
+        # CRITICAL: Ensure roster is synced before starting game
+        # Step 1: Wait for all WebSocket connections to be ready
         await manager.wait_for_ready_connections(session_code, timeout=2.0)
+
+        # Step 2: Verify roster synchronization between WebSocket and database
+        from app.database.dbCRUD import get_number_of_players_in_session
+
+        # Get connected mobile players from WebSocket
+        mobile_connections = manager.get_mobile_players(session_code)
+        ws_player_count = len(mobile_connections)
+
+        # Get registered players from database
+        db_player_count = get_number_of_players_in_session(db, session_code)
+
+        logger.info(
+            f"📊 Roster validation - WebSocket: {ws_player_count} players, Database: {db_player_count} players"
+        )
+
+        # If counts don't match, broadcast roster update and wait briefly
+        if ws_player_count != db_player_count:
+            logger.warning(
+                f"⚠️ Roster mismatch detected! Broadcasting roster update to sync..."
+            )
+            await manager.broadcast_player_roster_update(session_code)
+
+            # Give frontend time to update (small delay)
+            await asyncio.sleep(0.5)
+
+            # Re-check after roster update
+            db_player_count = get_number_of_players_in_session(db, session_code)
+            logger.info(
+                f"📊 After roster sync - WebSocket: {ws_player_count}, Database: {db_player_count}"
+            )
 
         # Update game state in database to mark as started
         from app.logic.game_logic import updateGameStartStatus, get_game_session_state

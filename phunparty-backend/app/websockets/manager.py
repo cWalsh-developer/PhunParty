@@ -109,15 +109,15 @@ class ConnectionManager:
 
         # Wait for client to be ready before broadcasting join events
         # This prevents race conditions where broadcasts happen before client is listening
-        await asyncio.sleep(0.3)  # Increased delay for more reliable connection
+        await asyncio.sleep(0.2)  # Reduced from 0.3s for faster response
 
         # Notify other clients about new connection (if mobile player joining)
         if client_type == "mobile" and player_name:
             logger.info(
-                f"Broadcasting player_joined for {player_name} to session {session_code}"
+                f"📢 Mobile player {player_name} connected - broadcasting to session {session_code}"
             )
 
-            # Get current player count
+            # Get current player count BEFORE broadcasting
             mobile_count = len(
                 [
                     c
@@ -127,6 +127,9 @@ class ConnectionManager:
                 ]
             )
 
+            logger.info(f"📊 Current mobile player count: {mobile_count}")
+
+            # CRITICAL: Broadcast player_joined immediately
             await self.broadcast_to_session(
                 session_code,
                 {
@@ -143,8 +146,15 @@ class ConnectionManager:
                 critical=True,  # Mark as critical for retry logic
             )
 
-            # Also send a roster update to all clients with full player list
+            logger.info(f"✅ Sent player_joined event for {player_name}")
+
+            # CRITICAL: Send roster update to ALL clients (web + mobile)
+            # This ensures everyone has the latest player list
             await self.broadcast_player_roster_update(session_code)
+
+            logger.info(
+                f"✅ Sent roster_update to all clients in session {session_code}"
+            )
 
     def disconnect(self, websocket: WebSocket):
         """Disconnect a client"""
