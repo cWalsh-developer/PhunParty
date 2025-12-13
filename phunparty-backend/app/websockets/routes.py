@@ -3,7 +3,7 @@ WebSocket routes for real-time game functionality
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import logging
 from typing import Optional
@@ -79,6 +79,23 @@ async def websocket_endpoint(
             # Use player info from database if not provided in query params
             player_name = player_name or player.player_name
             player_photo = player_photo or player.profile_photo_url
+            
+            # CRITICAL: Check for excessive connections (safety limit)
+            # The manager will close old connections, but this prevents abuse
+            MAX_CONNECTIONS_PER_PLAYER = 3
+            existing_count = manager.get_connection_count_for_player(
+                session_code, player_id
+            )
+            
+            if existing_count >= MAX_CONNECTIONS_PER_PLAYER:
+                logger.error(
+                    f"🚫 Player {player_id} has {existing_count} connections - rejecting (limit: {MAX_CONNECTIONS_PER_PLAYER})"
+                )
+                await websocket.close(
+                    code=1008, 
+                    reason=f"Too many connections ({existing_count}). Please refresh your app."
+                )
+                return
 
         # Connect to session
         await manager.connect(
@@ -731,6 +748,35 @@ async def handle_game_end(session_code: str, db: Session):
         # final_scores = get_final_scores(db, session_code)
 
         # Broadcast game ended to all clients
+
+
+@router.get("/health")
+async def health_check():
+    """Health check endpoint for monitoring"""
+    try:
+        active_sessions = len(manager.active_connections)
+        total_connections = sum(len(connections) for connections in manager.active_connections.values())
+        
+        # Get memory usage
+        import psutil
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        memory_mb = memory_info.rss / 1024 / 1024
+        
+        return {
+            "status": "healthy",
+            "active_sessions": active_sessions,
+            "total_connections": total_connections,
+            "memory_usage_mb": round(memory_mb, 2),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }
         await manager.broadcast_to_session(
             session_code,
             {
