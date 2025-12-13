@@ -43,6 +43,44 @@ class ConnectionManager:
         player_photo: Optional[str] = None,
     ):
         """Connect a client to a game session"""
+
+        # CRITICAL: Prevent duplicate player connections
+        # If this player is already connected, close old connections first
+        if client_type == "mobile" and player_id:
+            existing_connections = self.get_player_existing_connections(
+                session_code, player_id
+            )
+
+            if existing_connections:
+                logger.warning(
+                    f"⚠️ Player {player_id} ({player_name}) already has {len(existing_connections)} connection(s) - closing old connections"
+                )
+
+                # Close all existing connections for this player
+                for old_ws_id, old_conn in existing_connections.items():
+                    try:
+                        old_ws = old_conn.get("websocket")
+                        if old_ws:
+                            await old_ws.close(
+                                code=1000,
+                                reason="New connection established - closing duplicate",
+                            )
+                            logger.info(f"🔌 Closed old connection {old_ws_id}")
+                    except Exception as e:
+                        logger.error(f"Error closing old connection {old_ws_id}: {e}")
+
+                    # Remove from tracking
+                    if session_code in self.active_connections:
+                        if old_ws_id in self.active_connections[session_code]:
+                            del self.active_connections[session_code][old_ws_id]
+
+                    if old_ws_id in self.websocket_registry:
+                        del self.websocket_registry[old_ws_id]
+
+                logger.info(
+                    f"✅ Cleaned up {len(existing_connections)} duplicate connection(s)"
+                )
+
         await websocket.accept()
 
         ws_id = self.generate_websocket_id(websocket)
@@ -493,6 +531,30 @@ class ConnectionManager:
         logger.info(
             f"Reset player_answered for {count} players in session {session_code}"
         )
+
+    def get_player_existing_connections(
+        self, session_code: str, player_id: str
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Get all existing WebSocket connections for a specific player in a session.
+        Returns dict of {ws_id: connection_info} for all matching connections.
+        """
+        if session_code not in self.active_connections:
+            return {}
+
+        existing = {}
+        for ws_id, conn_info in self.active_connections[session_code].items():
+            if (
+                conn_info.get("player_id") == player_id
+                and conn_info.get("client_type") == "mobile"
+            ):
+                existing[ws_id] = conn_info
+
+        return existing
+
+    def get_connection_count_for_player(self, session_code: str, player_id: str) -> int:
+        """Get the number of active connections for a specific player."""
+        return len(self.get_player_existing_connections(session_code, player_id))
 
     def get_player_answered_status(self, session_code: str, player_id: str) -> bool:
         """Get the answered status for a specific player"""
