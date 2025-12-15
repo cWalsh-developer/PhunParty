@@ -79,21 +79,21 @@ async def websocket_endpoint(
             # Use player info from database if not provided in query params
             player_name = player_name or player.player_name
             player_photo = player_photo or player.profile_photo_url
-            
+
             # CRITICAL: Check for excessive connections (safety limit)
             # The manager will close old connections, but this prevents abuse
             MAX_CONNECTIONS_PER_PLAYER = 3
             existing_count = manager.get_connection_count_for_player(
                 session_code, player_id
             )
-            
+
             if existing_count >= MAX_CONNECTIONS_PER_PLAYER:
                 logger.error(
                     f"🚫 Player {player_id} has {existing_count} connections - rejecting (limit: {MAX_CONNECTIONS_PER_PLAYER})"
                 )
                 await websocket.close(
-                    code=1008, 
-                    reason=f"Too many connections ({existing_count}). Please refresh your app."
+                    code=1008,
+                    reason=f"Too many connections ({existing_count}). Please refresh your app.",
                 )
                 return
 
@@ -740,14 +740,45 @@ async def handle_next_question(session_code: str, game_handler, db: Session):
 async def handle_game_end(session_code: str, db: Session):
     """Handle game end event"""
     try:
-        # Update game state in database
-        # You'll need to implement this in dbCRUD
-        # update_game_session_ended(db, session_code)
+        logger.info(f"🏁 Ending game for session {session_code}")
 
-        # Get final scores (you'll need to implement this)
-        # final_scores = get_final_scores(db, session_code)
+        # Update game state in database to mark as ended
+        from app.logic.game_logic import get_game_session_state
+
+        game_state = get_game_session_state(db, session_code)
+        if game_state:
+            game_state.is_active = False
+            game_state.ended_at = datetime.utcnow()
+            db.commit()
+            logger.info(f"✅ Game state updated - marked as ended")
+
+        # Get final scores if available
+        final_scores = []
+        try:
+            from app.database.dbCRUD import get_session_scores
+
+            final_scores = get_session_scores(db, session_code)
+        except Exception as score_error:
+            logger.warning(f"Could not retrieve final scores: {score_error}")
 
         # Broadcast game ended to all clients
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "game_ended",
+                "data": {
+                    "session_code": session_code,
+                    "ended_at": datetime.utcnow().isoformat(),
+                    "final_scores": final_scores,
+                },
+            },
+            critical=True,
+        )
+
+        logger.info(f"🏁 Game end event broadcast for session {session_code}")
+
+    except Exception as e:
+        logger.error(f"Error ending game: {e}", exc_info=True)
 
 
 @router.get("/health")
@@ -755,42 +786,31 @@ async def health_check():
     """Health check endpoint for monitoring"""
     try:
         active_sessions = len(manager.active_connections)
-        total_connections = sum(len(connections) for connections in manager.active_connections.values())
-        
+        total_connections = sum(
+            len(connections) for connections in manager.active_connections.values()
+        )
+
         # Get memory usage
         import psutil
+
         process = psutil.Process()
         memory_info = process.memory_info()
         memory_mb = memory_info.rss / 1024 / 1024
-        
+
         return {
             "status": "healthy",
             "active_sessions": active_sessions,
             "total_connections": total_connections,
             "memory_usage_mb": round(memory_mb, 2),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         return {
             "status": "unhealthy",
             "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
-        await manager.broadcast_to_session(
-            session_code,
-            {
-                "type": "game_ended",
-                "data": {
-                    "session_code": session_code,
-                    "ended_at": "now",  # You can use proper datetime
-                    # "final_scores": final_scores
-                },
-            },
-        )
-
-    except Exception as e:
-        logger.error(f"Error ending game: {e}")
 
 
 # REST endpoints for WebSocket management
