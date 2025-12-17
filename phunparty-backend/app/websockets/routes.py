@@ -249,6 +249,17 @@ async def send_initial_session_state(
 
         await manager.send_personal_message(initial_state, websocket)
 
+        # For web clients, send an immediate follow-up roster update after initial state
+        # This ensures the web UI has the most current roster in case players joined
+        # while the web client was connecting
+        if client_type == "web":
+            # Small delay to ensure initial_state is processed first
+            await asyncio.sleep(0.05)
+            await manager.broadcast_player_roster_update(session_code)
+            logger.info(
+                f"📋 Sent follow-up roster update to newly connected web client"
+            )
+
     except Exception as e:
         logger.error(f"Error sending initial session state: {e}")
 
@@ -368,6 +379,11 @@ async def handle_websocket_message(
         logger.info(
             f"📢 Processed player_announce for {player_data.get('player_name')}"
         )
+
+    elif message_type == "request_roster" and client_type == "web":
+        # Web client requesting current player roster (e.g., if they think they're out of sync)
+        logger.info(f"📋 Web client requesting roster for session {session_code}")
+        await manager.broadcast_player_roster_update(session_code)
 
     elif message_type == "buzzer_press" and client_type == "mobile":
         # Player pressing buzzer (for buzzer games)

@@ -109,14 +109,11 @@ class ConnectionManager:
             # Don't continue if we can't confirm connection
             return
 
-        # Wait for client to be ready before broadcasting join events
-        # This prevents race conditions where broadcasts happen before client is listening
-        await asyncio.sleep(0.2)  # Reduced from 0.3s for faster response
-
-        # Notify other clients about new connection (if mobile player joining)
+        # Notify other clients about new connection IMMEDIATELY (if mobile player joining)
+        # REMOVED: await asyncio.sleep(0.2) - This delay was causing web UI to miss player joins
         if client_type == "mobile" and player_name:
             logger.info(
-                f"📢 Mobile player {player_name} connected - broadcasting to session {session_code}"
+                f"📢 Mobile player {player_name} connected - broadcasting IMMEDIATELY to session {session_code}"
             )
 
             # Get current player count BEFORE broadcasting
@@ -131,7 +128,8 @@ class ConnectionManager:
 
             logger.info(f"📊 Current mobile player count: {mobile_count}")
 
-            # CRITICAL: Broadcast player_joined immediately
+            # CRITICAL: Broadcast player_joined IMMEDIATELY - no delay
+            # Web clients should already be listening since they connected first
             await self.broadcast_to_session(
                 session_code,
                 {
@@ -157,6 +155,10 @@ class ConnectionManager:
             logger.info(
                 f"✅ Sent roster_update to all clients in session {session_code}"
             )
+
+            # Add small delay AFTER broadcasting to let the web UI process the updates
+            # This ensures the web client receives and processes the messages
+            await asyncio.sleep(0.05)  # Minimal delay just to ensure message delivery
 
     def disconnect(self, websocket: WebSocket):
         """Disconnect a client"""
@@ -680,21 +682,23 @@ class ConnectionManager:
         """Broadcast current player roster to all clients"""
         mobile_players = self.get_mobile_players(session_code)
 
+        roster_message = {
+            "type": "roster_update",
+            "data": {
+                "players": mobile_players,
+                "total_players": len(mobile_players),
+                "timestamp": datetime.now().isoformat(),
+            },
+        }
+
         await self.broadcast_to_session(
             session_code,
-            {
-                "type": "roster_update",
-                "data": {
-                    "players": mobile_players,
-                    "total_players": len(mobile_players),
-                    "timestamp": datetime.now().isoformat(),
-                },
-            },
+            roster_message,
             critical=True,
         )
 
         logger.info(
-            f"Broadcasted roster update to session {session_code}: {len(mobile_players)} players"
+            f"📋 Broadcasted roster update to session {session_code}: {len(mobile_players)} players - {[p['player_name'] for p in mobile_players]}"
         )
 
     async def wait_for_ready_connections(self, session_code: str, timeout: float = 2.0):
