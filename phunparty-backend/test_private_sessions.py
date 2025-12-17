@@ -44,7 +44,7 @@ def test_get_player_private_sessions_structure(mock_engine):
     mock_query.all.return_value = [(mock_session, mock_game, mock_state)]
 
     # Mock get_session_difficulty
-    with patch('app.database.dbCRUD.get_session_difficulty', return_value="Easy"):
+    with patch("app.database.dbCRUD.get_session_difficulty", return_value="Easy"):
         result = get_player_private_sessions(mock_db, "player123")
 
     # Verify structure
@@ -52,7 +52,13 @@ def test_get_player_private_sessions_structure(mock_engine):
     assert len(result) == 1
 
     session_data = result[0]
-    expected_keys = {"session_code", "genre", "number_of_questions", "difficulty", "ispublic"}
+    expected_keys = {
+        "session_code",
+        "genre",
+        "number_of_questions",
+        "difficulty",
+        "ispublic",
+    }
     assert set(session_data.keys()) == expected_keys
 
     # Verify values
@@ -64,6 +70,7 @@ def test_get_player_private_sessions_structure(mock_engine):
 
     print("Function returns expected structure")
     print(f"Sample result: {result}")
+
 
 if __name__ == "__main__":
     test_get_player_private_sessions_structure()
