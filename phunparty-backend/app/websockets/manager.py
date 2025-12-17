@@ -25,9 +25,11 @@ class ConnectionManager:
         # Question queue: session_code -> {question_id: question_data}
         # Stores questions that have been broadcast so mobile clients can retrieve them
         self.question_queue: Dict[str, Dict[str, Any]] = {}
-        # Start heartbeat checker
+        # Start heartbeat checker and automatic ping broadcaster
         self._heartbeat_task = None
+        self._ping_task = None
         self._start_heartbeat_checker()
+        self._start_automatic_ping()
 
     def generate_websocket_id(self, websocket: WebSocket) -> str:
         """Generate unique ID for WebSocket connection"""
@@ -725,31 +727,49 @@ class ConnectionManager:
         async def check_stale_connections():
             while True:
                 try:
-                    await asyncio.sleep(30)  # Check every 30 seconds
+                    await asyncio.sleep(20)  # Check every 20 seconds
                     stale_threshold = (
-                        60  # Consider stale after 60 seconds of no heartbeat
+                        45  # Consider stale after 45 seconds of no heartbeat
                     )
 
                     stale_websockets = []
+                    total_connections = 0
                     now = datetime.now()
 
                     for session_code, connections in list(
                         self.active_connections.items()
                     ):
+                        total_connections += len(connections)
                         for ws_id, conn_info in list(connections.items()):
                             last_heartbeat = conn_info.get("last_heartbeat")
-                            if (
-                                last_heartbeat
-                                and (now - last_heartbeat).total_seconds()
-                                > stale_threshold
-                            ):
-                                logger.warning(
-                                    f"Stale connection detected: {ws_id} in session {session_code}"
-                                )
-                                stale_websockets.append(conn_info["websocket"])
+                            if last_heartbeat:
+                                seconds_since_heartbeat = (
+                                    now - last_heartbeat
+                                ).total_seconds()
+
+                                if seconds_since_heartbeat > stale_threshold:
+                                    player_name = conn_info.get(
+                                        "player_name", "Unknown"
+                                    )
+                                    client_type = conn_info.get(
+                                        "client_type", "unknown"
+                                    )
+                                    logger.warning(
+                                        f"💀 Stale connection detected: {client_type} {player_name} (ws_id: {ws_id}) in session {session_code} - Last heartbeat: {seconds_since_heartbeat:.1f}s ago"
+                                    )
+                                    stale_websockets.append(conn_info["websocket"])
+
+                    if total_connections > 0:
+                        logger.debug(
+                            f"💓 Heartbeat check: {total_connections} active connections, {len(stale_websockets)} stale"
+                        )
 
                     # Clean up stale connections
                     for ws in stale_websockets:
+                        try:
+                            await ws.close(code=1001, reason="Connection timeout")
+                        except:
+                            pass
                         self.disconnect(ws)
 
                 except Exception as e:
@@ -759,6 +779,51 @@ class ConnectionManager:
         try:
             loop = asyncio.get_event_loop()
             self._heartbeat_task = loop.create_task(check_stale_connections())
+        except RuntimeError:
+            # No event loop running yet - this is fine, will start when app starts
+            pass
+
+    def _start_automatic_ping(self):
+        """Start background task to send automatic pings to all connections"""
+
+        async def send_periodic_pings():
+            while True:
+                try:
+                    await asyncio.sleep(15)  # Send ping every 15 seconds
+
+                    ping_message = {
+                        "type": "ping",
+                        "serverTime": int(datetime.utcnow().timestamp() * 1000),
+                        "auto": True,  # Mark as automatic server ping
+                    }
+
+                    total_sent = 0
+                    total_failed = 0
+
+                    for session_code, connections in list(
+                        self.active_connections.items()
+                    ):
+                        for ws_id, conn_info in list(connections.items()):
+                            try:
+                                websocket = conn_info["websocket"]
+                                await websocket.send_text(json.dumps(ping_message))
+                                total_sent += 1
+                            except Exception as e:
+                                total_failed += 1
+                                logger.debug(f"Failed to send ping to {ws_id}: {e}")
+
+                    if total_sent > 0:
+                        logger.debug(
+                            f"📡 Sent automatic ping to {total_sent} connections ({total_failed} failed)"
+                        )
+
+                except Exception as e:
+                    logger.error(f"Error in automatic ping broadcaster: {e}")
+
+        # Schedule the task
+        try:
+            loop = asyncio.get_event_loop()
+            self._ping_task = loop.create_task(send_periodic_pings())
         except RuntimeError:
             # No event loop running yet - this is fine, will start when app starts
             pass

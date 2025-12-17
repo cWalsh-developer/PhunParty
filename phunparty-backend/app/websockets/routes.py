@@ -128,6 +128,13 @@ async def websocket_endpoint(
             player_photo=player_photo,
         )
 
+        # Log connection stats for monitoring
+        total_connections = manager.get_total_connection_count()
+        session_connections = len(manager.active_connections.get(session_code, {}))
+        logger.info(
+            f"📊 Connection stats - Session: {session_connections}, Total: {total_connections}"
+        )
+
         # Send initial session state to the connecting client
         await send_initial_session_state(websocket, session_code, client_type, db)
 
@@ -281,6 +288,11 @@ async def handle_websocket_message(
             pong_data["clientSentAt"] = client_sent_at
 
         await manager.send_personal_message(pong_data, websocket)
+
+    elif message_type == "pong":
+        # Client responding to server ping - update heartbeat
+        manager.update_heartbeat(websocket)
+        # No response needed for pong
 
     elif message_type == "connection_ack":
         # Client acknowledging successful connection - mark as ready
