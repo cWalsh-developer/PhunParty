@@ -3,7 +3,7 @@ WebSocket routes for real-time game functionality
 """
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import logging
 from typing import Optional
@@ -80,22 +80,43 @@ async def websocket_endpoint(
             player_name = player_name or player.player_name
             player_photo = player_photo or player.profile_photo_url
 
-            # CRITICAL: Check for excessive connections (safety limit)
-            # The manager will close old connections, but this prevents abuse
-            MAX_CONNECTIONS_PER_PLAYER = 3
-            existing_count = manager.get_connection_count_for_player(
+            # CRITICAL: Check for existing connections from this player
+            # Prevent duplicate registrations that cause the 7x join bug
+            existing_connections = manager.get_player_connections(
                 session_code, player_id
             )
 
-            if existing_count >= MAX_CONNECTIONS_PER_PLAYER:
-                logger.error(
-                    f"🚫 Player {player_id} has {existing_count} connections - rejecting (limit: {MAX_CONNECTIONS_PER_PLAYER})"
+            if existing_connections:
+                logger.warning(
+                    f"⚠️ Player {player_id} ({player_name}) already has {len(existing_connections)} connection(s) to session {session_code}"
                 )
-                await websocket.close(
-                    code=1008,
-                    reason=f"Too many connections ({existing_count}). Please refresh your app.",
+                logger.info(
+                    f"🔌 Closing {len(existing_connections)} old connection(s) before establishing new one"
                 )
-                return
+
+                # Close all old connections from this player
+                for old_ws_id, old_conn_info in existing_connections.items():
+                    try:
+                        old_ws = old_conn_info.get("websocket")
+                        if old_ws:
+                            await old_ws.close(
+                                code=1000, reason="New connection established"
+                            )
+                            logger.info(
+                                f"✅ Closed old connection {old_ws_id} for player {player_id}"
+                            )
+                    except Exception as e:
+                        logger.error(f"Error closing old connection: {e}")
+
+                # Clean up the connection records
+                manager.disconnect_player_by_id(session_code, player_id)
+
+                # Small delay to ensure cleanup completes
+                await asyncio.sleep(0.2)
+
+                logger.info(
+                    f"✅ Cleanup complete - ready for new connection from {player_name}"
+                )
 
         # Connect to session
         await manager.connect(
@@ -740,26 +761,26 @@ async def handle_next_question(session_code: str, game_handler, db: Session):
 async def handle_game_end(session_code: str, db: Session):
     """Handle game end event"""
     try:
-        logger.info(f"🏁 Ending game for session {session_code}")
+        from app.database.dbCRUD import (
+            update_game_session_ended,
+            get_final_scores,
+        )
 
-        # Update game state in database to mark as ended
-        from app.logic.game_logic import get_game_session_state
+        # Update game state in database and calculate final results
+        success = update_game_session_ended(db, session_code)
+        if not success:
+            logger.error(f"Failed to end game session {session_code}")
+            return
 
-        game_state = get_game_session_state(db, session_code)
-        if game_state:
-            game_state.is_active = False
-            game_state.ended_at = datetime.utcnow()
-            db.commit()
-            logger.info(f"✅ Game state updated - marked as ended")
+        # Get final scores ranked by score
+        final_scores = get_final_scores(db, session_code)
 
-        # Get final scores if available
-        final_scores = []
-        try:
-            from app.database.dbCRUD import get_session_scores
+        # Get current time for ended_at
+        ended_at = datetime.now().isoformat()
 
-            final_scores = get_session_scores(db, session_code)
-        except Exception as score_error:
-            logger.warning(f"Could not retrieve final scores: {score_error}")
+        logger.info(
+            f"🏁 Game ended for session {session_code} with {len(final_scores)} players"
+        )
 
         # Broadcast game ended to all clients
         await manager.broadcast_to_session(
@@ -768,52 +789,75 @@ async def handle_game_end(session_code: str, db: Session):
                 "type": "game_ended",
                 "data": {
                     "session_code": session_code,
-                    "ended_at": datetime.utcnow().isoformat(),
+                    "ended_at": ended_at,
                     "final_scores": final_scores,
                 },
             },
             critical=True,
         )
 
-        logger.info(f"🏁 Game end event broadcast for session {session_code}")
+        logger.info(f"✅ Game end broadcast complete for session {session_code}")
 
     except Exception as e:
         logger.error(f"Error ending game: {e}", exc_info=True)
 
 
-@router.get("/health")
-async def health_check():
-    """Health check endpoint for monitoring"""
-    try:
-        active_sessions = len(manager.active_connections)
-        total_connections = sum(
-            len(connections) for connections in manager.active_connections.values()
-        )
-
-        # Get memory usage
-        import psutil
-
-        process = psutil.Process()
-        memory_info = process.memory_info()
-        memory_mb = memory_info.rss / 1024 / 1024
-
-        return {
-            "status": "healthy",
-            "active_sessions": active_sessions,
-            "total_connections": total_connections,
-            "memory_usage_mb": round(memory_mb, 2),
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return {
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-
 # REST endpoints for WebSocket management
+@router.get("/ws/health")
+async def websocket_health_check():
+    """
+    Health check endpoint for WebSocket infrastructure.
+    Monitor this endpoint to detect API issues early.
+    """
+    import psutil
+    import os
+
+    # Get system memory info
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    memory_mb = memory_info.rss / 1024 / 1024
+
+    # Get WebSocket stats
+    total_connections = manager.get_total_connection_count()
+    active_sessions = manager.get_active_session_count()
+
+    # Calculate per-session average
+    avg_connections_per_session = (
+        total_connections / active_sessions if active_sessions > 0 else 0
+    )
+
+    # Determine health status
+    status = "healthy"
+    warnings = []
+
+    # Check for warning conditions
+    if total_connections > 100:
+        warnings.append(f"High connection count: {total_connections} (threshold: 100)")
+        status = "warning"
+
+    if memory_mb > 500:
+        warnings.append(f"High memory usage: {memory_mb:.1f}MB (threshold: 500MB)")
+        status = "warning"
+
+    if avg_connections_per_session > 10:
+        warnings.append(
+            f"High connections per session: {avg_connections_per_session:.1f} (possible duplicate bug)"
+        )
+        status = "critical"
+
+    return {
+        "status": status,
+        "timestamp": datetime.now().isoformat(),
+        "metrics": {
+            "total_connections": total_connections,
+            "active_sessions": active_sessions,
+            "avg_connections_per_session": round(avg_connections_per_session, 2),
+            "memory_usage_mb": round(memory_mb, 2),
+        },
+        "warnings": warnings,
+    }
+
+
 @router.get("/ws/sessions/{session_code}/stats")
 async def get_session_websocket_stats(session_code: str):
     """Get WebSocket connection statistics for a session"""

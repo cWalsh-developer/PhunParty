@@ -1113,3 +1113,97 @@ def update_password(db: Session, phone: str, new_password: str) -> bool:
         db.commit()
         return True
     return False
+
+
+def update_game_session_ended(db: Session, session_code: str) -> bool:
+    """
+    Mark a game session as ended by setting ended_at timestamp and is_active to False.
+    Also calculates final game results (win/lose/draw) for all players.
+
+    Args:
+        db: Database session
+        session_code: The session code to end
+
+    Returns:
+        bool: True if successfully ended, False otherwise
+    """
+    try:
+        # Get the game session state
+        game_state = get_game_session_state(db, session_code)
+        if not game_state:
+            logger.warning(f"Game session state not found for {session_code}")
+            return False
+
+        # Update game state to mark as ended
+        game_state.is_active = False
+        game_state.ended_at = datetime.utcnow()
+
+        # Calculate game results (win/lose/draw) for all players
+        try:
+            calculate_game_results(db, session_code)
+        except ValueError as e:
+            logger.warning(f"Could not calculate game results for {session_code}: {e}")
+
+        db.commit()
+        db.refresh(game_state)
+
+        logger.info(f"Game session {session_code} ended at {game_state.ended_at}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error ending game session {session_code}: {e}")
+        db.rollback()
+        return False
+
+
+def get_final_scores(db: Session, session_code: str) -> list[dict]:
+    """
+    Get final scores for a game session, ranked by score (highest first).
+    Includes player details and their results (win/lose/draw).
+
+    Args:
+        db: Database session
+        session_code: The session code to get scores for
+
+    Returns:
+        list[dict]: List of score dictionaries with player info, sorted by score descending
+    """
+    try:
+        # Join Scores with Players to get player details
+        scores_query = (
+            db.query(Scores, Players)
+            .join(Players, Scores.player_id == Players.player_id)
+            .filter(Scores.session_code == session_code)
+            .order_by(Scores.score.desc())
+            .all()
+        )
+
+        if not scores_query:
+            logger.warning(f"No scores found for session {session_code}")
+            return []
+
+        # Format the results
+        final_scores = []
+        for score, player in scores_query:
+            final_scores.append(
+                {
+                    "player_id": player.player_id,
+                    "player_name": player.player_name,
+                    "player_photo": getattr(player, "player_photo", None),
+                    "score": score.score,
+                    "result": (
+                        score.result.value if score.result else None
+                    ),  # win/lose/draw
+                    "rank": len([s for s, _ in scores_query if s.score > score.score])
+                    + 1,
+                }
+            )
+
+        logger.info(
+            f"Retrieved {len(final_scores)} final scores for session {session_code}"
+        )
+        return final_scores
+
+    except Exception as e:
+        logger.error(f"Error getting final scores for {session_code}: {e}")
+        return []
