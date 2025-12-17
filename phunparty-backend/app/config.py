@@ -20,11 +20,11 @@ if not DatabaseURL:
     db_host = os.getenv("DB_Host")
     db_port = os.getenv("DB_Port")
     db_name = os.getenv("DB_Name")
-    
+
     # Validate port - default to 5432 if None or 'None' string
     if not db_port or db_port == "None":
         db_port = "5432"
-    
+
     DatabaseURL = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
 engine = create_engine(

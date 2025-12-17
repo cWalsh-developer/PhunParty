@@ -1,6 +1,7 @@
 """
 Simple test script to verify get_player_private_sessions function
 """
+
 import os
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +13,7 @@ test_env_vars = {
     "DB_Port": "5432",
     "DB_Name": "test_db",
 }
+
 
 @patch.dict(os.environ, test_env_vars)
 @patch("app.config.create_engine")
