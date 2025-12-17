@@ -446,19 +446,59 @@ async def handle_websocket_message(
                 # Queue the question for late joiners and reconnections
                 manager.queue_question(session_code, question_data)
 
+                question_message = {
+                    "type": "question_started",
+                    "data": question_data,
+                }
+
                 # Broadcast to ALL clients with synchronized timing
                 await manager.broadcast_to_session(
                     session_code,
-                    {
-                        "type": "question_started",
-                        "data": question_data,
-                    },
+                    question_message,
                     critical=True,
                 )
 
                 logger.info(
-                    f"✅ Question queued and broadcast - all clients will reveal at {start_at_iso}"
+                    f"✅ Question broadcast complete - all clients will reveal at {start_at_iso}"
                 )
+
+                # CRITICAL FALLBACK: Send question directly to each mobile client
+                # This ensures mobiles receive it even if broadcast fails
+                mobile_players = manager.get_mobile_players(session_code)
+                if mobile_players:
+                    logger.info(
+                        f"📱 Sending question directly to {len(mobile_players)} mobile clients as fallback"
+                    )
+
+                    for mobile_player in mobile_players:
+                        player_id = mobile_player.get("player_id")
+                        player_name = mobile_player.get("player_name")
+
+                        # Find this player's websocket connection(s)
+                        connections = manager.get_player_connections(
+                            session_code, player_id
+                        )
+
+                        for ws_id, conn_info in connections.items():
+                            websocket_obj = conn_info.get("websocket")
+                            if websocket_obj:
+                                try:
+                                    await manager.send_personal_message(
+                                        question_message, websocket_obj
+                                    )
+                                    logger.info(
+                                        f"✅ Sent question directly to {player_name} (ws_id: {ws_id})"
+                                    )
+                                except Exception as e:
+                                    logger.error(
+                                        f"❌ Failed to send question to {player_name}: {e}"
+                                    )
+
+                    logger.info(
+                        f"📋 Question delivery complete: queued + broadcast + {len(mobile_players)} individual sends"
+                    )
+                else:
+                    logger.warning(f"⚠️ No mobile players found for question delivery!")
             else:
                 logger.warning(f"No current question found after countdown_complete")
         except Exception as e:

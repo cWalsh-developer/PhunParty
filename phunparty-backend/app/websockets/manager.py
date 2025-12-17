@@ -454,6 +454,19 @@ class ConnectionManager:
             return self.websocket_registry[websocket_id]["websocket"]
         return None
 
+    def get_player_name_from_websocket(self, websocket: WebSocket) -> str:
+        """Get player name from websocket for logging purposes"""
+        for ws_id, info in self.websocket_registry.items():
+            if info["websocket"] == websocket:
+                session_code = info["session_code"]
+                if (
+                    session_code in self.active_connections
+                    and ws_id in self.active_connections[session_code]
+                ):
+                    conn_info = self.active_connections[session_code][ws_id]
+                    return conn_info.get("player_name") or "Unknown"
+        return "Unknown"
+
     def get_player_connections(
         self, session_code: str, player_id: str
     ) -> Dict[str, Dict[str, Any]]:
