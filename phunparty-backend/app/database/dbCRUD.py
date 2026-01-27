@@ -272,9 +272,39 @@ def update_player_game_code(db: Session, player_id: str, game_code: str) -> Play
     return player
 
 
+def resetAllPlayerIDForeignKeys(
+    db: Session, old_player_id: str, new_player_id: str
+) -> None:
+    """Reset all foreign key references from old_player_id to new_player_id across related tables."""
+    # Update SessionAssignment table
+    db.query(SessionAssignment).filter(
+        SessionAssignment.player_id == old_player_id
+    ).update({SessionAssignment.player_id: new_player_id}, synchronize_session=False)
+
+    # Update Scores table
+    db.query(Scores).filter(Scores.player_id == old_player_id).update(
+        {Scores.player_id: new_player_id}, synchronize_session=False
+    )
+
+    # Update PlayerResponse table
+    db.query(PlayerResponse).filter(PlayerResponse.player_id == old_player_id).update(
+        {PlayerResponse.player_id: new_player_id}, synchronize_session=False
+    )
+
+    # Update ownerPlayerID in GameSession table
+    db.query(GameSession).filter(GameSession.owner_player_id == old_player_id).update(
+        {GameSession.owner_player_id: new_player_id}, synchronize_session=False
+    )
+
+    db.commit()
+
+
 def delete_player(db: Session, player_id: str) -> None:
     """Delete a player from the database."""
     player = get_player_by_ID(db, player_id)
+    resetAllPlayerIDForeignKeys(
+        db, player_id, 0
+    )  # Reset foreign keys before deleting the player
     db.delete(player)
     db.commit()
 
