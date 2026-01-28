@@ -5,10 +5,8 @@ Run this script daily via cron job.
 
 import sys
 import logging
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from app.database.dbCRUD import cleanup_expired_deactivated_accounts
-from app.config import settings
+from app.config import SessionLocal
 
 # Configure logging
 import os
@@ -34,8 +32,6 @@ def main():
         logger.info("Starting deactivated account cleanup task...")
 
         # Create database session
-        engine = create_engine(settings.DATABASE_URL)
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         db = SessionLocal()
 
         try:
