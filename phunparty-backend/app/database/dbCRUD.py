@@ -253,18 +253,7 @@ def get_all_players(db: Session) -> list[Players]:
 
 
 def get_player_by_email(db: Session, player_email: str) -> Players:
-    """Retrieve an active player by their email (excludes deactivated and deleted accounts)."""
-    return (
-        db.query(Players)
-        .filter(Players.player_email == player_email)
-        .filter(Players.is_deleted == False)
-        .filter(Players.is_deactivated == False)
-        .first()
-    )
-
-
-def get_player_by_email_include_deactivated(db: Session, player_email: str) -> Players:
-    """Retrieve a player by their email, including deactivated accounts (for login/reactivation)."""
+    """Retrieve a player by their email (excludes deleted accounts, includes deactivated)."""
     return (
         db.query(Players)
         .filter(Players.player_email == player_email)
@@ -350,29 +339,13 @@ def deactivate_player(db: Session, player_id: str) -> dict:
     }
 
 
-def reactivate_player(
-    db: Session, player_id: str = None, player_email: str = None
-) -> Players:
+def reactivate_player(db: Session, player: Players) -> Players:
     """Reactivate a deactivated player account if within grace period.
 
-    Can search by player_id or email.
+    Assumes caller has already verified:
+    - Player exists
+    - Player is deactivated
     """
-    if player_id:
-        player = get_player_by_ID_include_deactivated(db, player_id)
-    elif player_email:
-        player = get_player_by_email_include_deactivated(db, player_email)
-    else:
-        raise ValueError("Must provide either player_id or player_email")
-
-    if not player:
-        raise ValueError("Player not found")
-
-    if player.is_deleted:
-        raise ValueError("Account has been permanently deleted and cannot be recovered")
-
-    if not player.is_deactivated:
-        raise ValueError("Account is not deactivated")
-
     # Check if still within grace period (30 days)
     from dateutil.relativedelta import relativedelta
 

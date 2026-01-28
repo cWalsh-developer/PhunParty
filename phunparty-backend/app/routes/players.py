@@ -86,18 +86,24 @@ def get_all_players_route(db: Session = Depends(get_db)):
 @router.delete("/{player_id}", tags=["Players"])
 def delete_player_route(player_id: str, db: Session = Depends(get_db)):
     """
-    Delete a player from the game.
+    Deactivate a player account (30-day grace period before permanent deletion).
     """
     try:
         player = get_player_by_ID(db, player_id)
         if not player:
             raise HTTPException(status_code=404, detail="Player not found")
-        delete_player(db, player_id)
-        return {"detail": "Player deleted successfully"}
+
+        # This now deactivates the account instead of immediately deleting
+        result = delete_player(db, player_id)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to delete player")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to deactivate account: {str(e)}"
+        )
 
 
 @router.put("/{player_id}", tags=["Players"])
