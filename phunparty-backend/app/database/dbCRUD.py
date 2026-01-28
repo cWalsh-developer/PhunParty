@@ -303,7 +303,7 @@ def delete_player(db: Session, player_id: str) -> None:
     """Delete a player from the database."""
     player = get_player_by_ID(db, player_id)
     resetAllPlayerIDForeignKeys(
-        db, player_id, 0
+        db, player_id, "0"
     )  # Reset foreign keys before deleting the player
     db.delete(player)
     db.commit()
