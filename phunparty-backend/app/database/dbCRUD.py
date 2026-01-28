@@ -223,51 +223,54 @@ def end_game_session(db: Session, session_code: str) -> dict:
 
 def get_player_by_ID(db: Session, player_ID: str) -> Players:
     """Retrieve an active player by their ID (excludes deactivated and deleted accounts)."""
-    return db.query(Players).filter(
-        Players.player_id == player_ID
-    ).filter(
-        Players.is_deleted == False
-    ).filter(
-        Players.is_deactivated == False
-    ).first()
+    return (
+        db.query(Players)
+        .filter(Players.player_id == player_ID)
+        .filter(Players.is_deleted == False)
+        .filter(Players.is_deactivated == False)
+        .first()
+    )
 
 
 def get_player_by_ID_include_deactivated(db: Session, player_ID: str) -> Players:
     """Retrieve a player by their ID, including deactivated accounts (for reactivation)."""
-    return db.query(Players).filter(
-        Players.player_id == player_ID
-    ).filter(
-        Players.is_deleted == False
-    ).first()
+    return (
+        db.query(Players)
+        .filter(Players.player_id == player_ID)
+        .filter(Players.is_deleted == False)
+        .first()
+    )
 
 
 def get_all_players(db: Session) -> list[Players]:
     """Retrieve all active (non-deleted, non-deactivated) players."""
-    return db.query(Players).filter(
-        Players.is_deleted == False
-    ).filter(
-        Players.is_deactivated == False
-    ).all()
+    return (
+        db.query(Players)
+        .filter(Players.is_deleted == False)
+        .filter(Players.is_deactivated == False)
+        .all()
+    )
 
 
 def get_player_by_email(db: Session, player_email: str) -> Players:
     """Retrieve an active player by their email (excludes deactivated and deleted accounts)."""
-    return db.query(Players).filter(
-        Players.player_email == player_email
-    ).filter(
-        Players.is_deleted == False
-    ).filter(
-        Players.is_deactivated == False
-    ).first()
+    return (
+        db.query(Players)
+        .filter(Players.player_email == player_email)
+        .filter(Players.is_deleted == False)
+        .filter(Players.is_deactivated == False)
+        .first()
+    )
 
 
 def get_player_by_email_include_deactivated(db: Session, player_email: str) -> Players:
     """Retrieve a player by their email, including deactivated accounts (for login/reactivation)."""
-    return db.query(Players).filter(
-        Players.player_email == player_email
-    ).filter(
-        Players.is_deleted == False
-    ).first()
+    return (
+        db.query(Players)
+        .filter(Players.player_email == player_email)
+        .filter(Players.is_deleted == False)
+        .first()
+    )
 
 
 def create_player(
@@ -308,47 +311,50 @@ def update_player_game_code(db: Session, player_id: str, game_code: str) -> Play
 
 def deactivate_player(db: Session, player_id: str) -> dict:
     """Deactivate a player account with grace period before permanent deletion.
-    
+
     Returns information about the deactivation including grace period.
     """
     player = get_player_by_ID_include_deactivated(db, player_id)
     if not player:
         raise ValueError("Player not found")
-    
+
     if player.is_deleted:
         raise ValueError("Player account is already permanently deleted")
-    
+
     if player.is_deactivated:
         raise ValueError("Player account is already deactivated")
-    
+
     # Deactivate account
     player.is_deactivated = True
     player.deactivated_at = datetime.now(timezone.utc).isoformat()
-    
+
     # Clear active game code if they're in a game
     if player.active_game_code:
         player.active_game_code = None
-    
+
     db.commit()
     db.refresh(player)
-    
+
     # Calculate grace period expiration (30 days by default)
     from dateutil.relativedelta import relativedelta
+
     deactivated_dt = datetime.fromisoformat(player.deactivated_at)
     expiration_dt = deactivated_dt + relativedelta(days=30)
-    
+
     return {
         "message": "Account deactivated successfully",
         "deactivated_at": player.deactivated_at,
         "grace_period_days": 30,
         "permanent_deletion_date": expiration_dt.isoformat(),
-        "reactivation_available": True
+        "reactivation_available": True,
     }
 
 
-def reactivate_player(db: Session, player_id: str = None, player_email: str = None) -> Players:
+def reactivate_player(
+    db: Session, player_id: str = None, player_email: str = None
+) -> Players:
     """Reactivate a deactivated player account if within grace period.
-    
+
     Can search by player_id or email.
     """
     if player_id:
@@ -357,69 +363,70 @@ def reactivate_player(db: Session, player_id: str = None, player_email: str = No
         player = get_player_by_email_include_deactivated(db, player_email)
     else:
         raise ValueError("Must provide either player_id or player_email")
-    
+
     if not player:
         raise ValueError("Player not found")
-    
+
     if player.is_deleted:
         raise ValueError("Account has been permanently deleted and cannot be recovered")
-    
+
     if not player.is_deactivated:
         raise ValueError("Account is not deactivated")
-    
+
     # Check if still within grace period (30 days)
     from dateutil.relativedelta import relativedelta
+
     deactivated_dt = datetime.fromisoformat(player.deactivated_at)
     grace_period_end = deactivated_dt + relativedelta(days=30)
-    
+
     if datetime.now(timezone.utc) > grace_period_end:
         raise ValueError("Grace period has expired. Account cannot be recovered.")
-    
+
     # Reactivate account
     player.is_deactivated = False
     player.deactivated_at = None
-    
+
     db.commit()
     db.refresh(player)
-    
+
     return player
 
 
 def permanently_delete_player(db: Session, player_id: str) -> None:
     """GDPR-compliant permanent player deletion - deletes ALL personal data while preserving game statistics.
-    
+
     This is called automatically after grace period expires, or can be called immediately for admin deletions.
     """
     # Get player including deactivated ones
     player = db.query(Players).filter(Players.player_id == player_id).first()
-    
+
     if not player:
         raise ValueError("Player not found")
-    
+
     if player.is_deleted:
         return  # Already deleted, nothing to do
-    
+
     # GDPR COMPLIANCE: Delete ALL Personal Identifiable Information (PII)
     # We keep only the player_id as an anonymized reference for game history integrity
-    
+
     player.is_deleted = True
     player.deleted_at = datetime.now(timezone.utc).isoformat()
     player.is_deactivated = False  # No longer deactivated, now deleted
-    
+
     # Clear active game code if they're in a game
     if player.active_game_code:
         player.active_game_code = None
-    
+
     # DELETE all PII - GDPR compliant
     player.player_name = "Deleted User"  # Generic, non-identifying
     player.player_email = None  # DELETED
     player.player_mobile = None  # DELETED
     player.hashed_password = None  # DELETED (prevents login)
     player.profile_photo_url = None  # DELETED
-    
+
     db.commit()
     db.refresh(player)
-    
+
     # What remains: player_id (anonymized reference only), is_deleted flag, deleted_at timestamp
     # Game history (SessionAssignment, Scores, PlayerResponse) preserved for other players' records
     # but contains no PII - only anonymized player_id and game statistics
@@ -427,43 +434,44 @@ def permanently_delete_player(db: Session, player_id: str) -> None:
 
 def cleanup_expired_deactivated_accounts(db: Session) -> dict:
     """Permanently delete all accounts whose deactivation grace period has expired.
-    
+
     Should be run as a scheduled task (e.g., daily cron job).
     Returns count of accounts permanently deleted.
     """
     from dateutil.relativedelta import relativedelta
-    
+
     # Find all deactivated accounts
-    deactivated_players = db.query(Players).filter(
-        Players.is_deactivated == True
-    ).filter(
-        Players.is_deleted == False
-    ).all()
-    
+    deactivated_players = (
+        db.query(Players)
+        .filter(Players.is_deactivated == True)
+        .filter(Players.is_deleted == False)
+        .all()
+    )
+
     deleted_count = 0
     grace_period_days = 30
-    
+
     for player in deactivated_players:
         if player.deactivated_at:
             deactivated_dt = datetime.fromisoformat(player.deactivated_at)
             grace_period_end = deactivated_dt + relativedelta(days=grace_period_days)
-            
+
             # Check if grace period has expired
             if datetime.now(timezone.utc) > grace_period_end:
                 permanently_delete_player(db, player.player_id)
                 deleted_count += 1
-    
+
     return {
         "accounts_checked": len(deactivated_players),
         "accounts_permanently_deleted": deleted_count,
-        "grace_period_days": grace_period_days
+        "grace_period_days": grace_period_days,
     }
 
 
 # Legacy function - now redirects to deactivate
 def delete_player(db: Session, player_id: str) -> dict:
     """Deactivate a player account (with 30-day grace period).
-    
+
     Note: This now deactivates instead of immediately deleting.
     Use permanently_delete_player() for immediate deletion (admin only).
     """
