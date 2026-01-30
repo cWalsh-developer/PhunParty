@@ -38,7 +38,7 @@ This project combines:
 | **Mobile App** | React Native |
 | **Web Host UI** | React (learning) |
 | **Database** | PostgreSQL (learning) |
-| **Deployment** | TBD (Considerations = Render, Netlify, etc.) |
+| **Deployment** | Linode Server and GitHub Pages |
 
 ---
 
