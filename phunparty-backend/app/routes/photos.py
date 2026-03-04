@@ -31,7 +31,6 @@ DICEBEAR_STYLES = [
 ]
 
 router = APIRouter(dependencies=[Depends(get_api_key)])
-photoGetRouter = APIRouter()
 
 
 def cleanup_old_player_photos(player_id: str, upload_dir: Path = UPLOAD_DIR):
@@ -325,31 +324,6 @@ async def generate_avatar_preview(style: str, seed: str = "preview", size: int =
 
 
 @router.get("/{filename}", tags=["Photos"])
-async def get_photo(filename: str):
-    """
-    Serve a photo file.
-    """
-    try:
-        file_path = UPLOAD_DIR / filename
-
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail="Photo not found")
-
-        # You might want to use FileResponse here for better performance
-        from fastapi.responses import FileResponse
-
-        return FileResponse(
-            path=file_path,
-            media_type="image/*",
-            headers={"Cache-Control": "max-age=3600"},  # Cache for 1 hour
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@photoGetRouter.get("/noKey/{filename}", tags=["Photos"])
 async def get_photo(filename: str):
     """
     Serve a photo file.
