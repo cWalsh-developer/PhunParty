@@ -349,7 +349,7 @@ async def get_photo(filename: str):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@photoGetRouter.get("/{filename}", tags=["Photos"])
+@photoGetRouter.get("/noKey/{filename}", tags=["Photos"])
 async def get_photo(filename: str):
     """
     Serve a photo file.
