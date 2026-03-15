@@ -359,24 +359,11 @@ async def handle_websocket_message(
             await game_handler.handle_player_answer(player_id, answer, question_id, db)
     elif message_type == "player_announce" and client_type == "mobile":
         # Mobile client announcing presence after connection (backup mechanism)
+        # Use authoritative roster sync to avoid duplicate/missed join states.
         player_data = data or {}
-        await manager.broadcast_to_session(
-            session_code,
-            {
-                "type": "player_joined",
-                "data": {
-                    "player_id": player_data.get("player_id") or player_id,
-                    "player_name": player_data.get("player_name"),
-                    "player_photo": player_data.get("player_photo"),
-                    "timestamp": player_data.get("timestamp")
-                    or datetime.now().isoformat(),
-                },
-            },
-            exclude_client_types=["mobile"],
-            critical=True,
-        )
+        await manager.broadcast_player_roster_update(session_code)
         logger.info(
-            f"📢 Processed player_announce for {player_data.get('player_name')}"
+            f"📢 Processed player_announce for {player_data.get('player_name')} with roster sync"
         )
 
     elif message_type == "request_roster" and client_type == "web":

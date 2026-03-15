@@ -19,8 +19,9 @@ class ConnectionManager:
 
     HEARTBEAT_CHECK_INTERVAL_SECONDS = 10
     HEARTBEAT_STALE_SECONDS = 90
+    MOBILE_HEARTBEAT_STALE_SECONDS = 300
     PING_INTERVAL_SECONDS = 10
-    MOBILE_DISCONNECT_GRACE_SECONDS = 25
+    MOBILE_DISCONNECT_GRACE_SECONDS = 180
 
     def __init__(self):
         # session_code -> {websocket_id: {websocket, client_type, player_info}}
@@ -55,11 +56,21 @@ class ConnectionManager:
             )
         self.pending_player_leave_tasks.pop(task_key, None)
 
+    def _is_player_leave_pending(
+        self, session_code: str, player_id: Optional[str]
+    ) -> bool:
+        if not player_id:
+            return False
+
+        task_key = self._player_task_key(session_code, player_id)
+        task = self.pending_player_leave_tasks.get(task_key)
+        return bool(task and not task.done())
+
     def _schedule_mobile_leave(self, session_code: str, client_info: Dict[str, Any]):
         player_id = client_info.get("player_id")
-        player_name = client_info.get("player_name")
+        player_name = client_info.get("player_name") or "Unknown"
 
-        if not player_id or not player_name:
+        if not player_id:
             return
 
         self._cancel_pending_player_leave(session_code, player_id)
@@ -127,6 +138,12 @@ class ConnectionManager:
     ):
         """Connect a client to a game session"""
         await websocket.accept()
+
+        reconnecting_mobile_player = False
+        if client_type == "mobile" and player_id:
+            reconnecting_mobile_player = self._is_player_leave_pending(
+                session_code, player_id
+            )
 
         ws_id = self.generate_websocket_id(websocket)
 
@@ -214,25 +231,29 @@ class ConnectionManager:
 
             logger.info(f"📊 Current mobile player count: {mobile_count}")
 
-            # CRITICAL: Broadcast player_joined IMMEDIATELY - no delay
-            # Web clients should already be listening since they connected first
-            await self.broadcast_to_session(
-                session_code,
-                {
-                    "type": "player_joined",
-                    "data": {
-                        "player_id": player_id,
-                        "player_name": player_name,
-                        "player_photo": player_photo,
-                        "timestamp": datetime.now().isoformat(),
-                        "total_players": mobile_count,
+            # Only emit player_joined for true fresh joins.
+            # Reconnects within grace should keep presence stable without join/leave flicker.
+            if not reconnecting_mobile_player:
+                await self.broadcast_to_session(
+                    session_code,
+                    {
+                        "type": "player_joined",
+                        "data": {
+                            "player_id": player_id,
+                            "player_name": player_name,
+                            "player_photo": player_photo,
+                            "timestamp": datetime.now().isoformat(),
+                            "total_players": mobile_count,
+                        },
                     },
-                },
-                exclude_client_types=["mobile"],  # Only notify web clients
-                critical=True,  # Mark as critical for retry logic
-            )
-
-            logger.info(f"✅ Sent player_joined event for {player_name}")
+                    exclude_client_types=["mobile"],  # Only notify web clients
+                    critical=True,  # Mark as critical for retry logic
+                )
+                logger.info(f"✅ Sent player_joined event for {player_name}")
+            else:
+                logger.info(
+                    f"🔁 Player {player_name} reconnected within grace window; skipping duplicate player_joined"
+                )
 
             # CRITICAL: Send roster update to ALL clients (web + mobile)
             # This ensures everyone has the latest player list
@@ -279,7 +300,7 @@ class ConnectionManager:
             if (
                 client_info
                 and client_info.get("client_type") == "mobile"
-                and client_info.get("player_name")
+                and client_info.get("player_id")
             ):
                 self._schedule_mobile_leave(session_code, client_info)
 
@@ -848,8 +869,6 @@ class ConnectionManager:
             while True:
                 try:
                     await asyncio.sleep(self.HEARTBEAT_CHECK_INTERVAL_SECONDS)
-                    stale_threshold = self.HEARTBEAT_STALE_SECONDS
-
                     stale_websockets = []
                     total_connections = 0
                     now = datetime.now()
@@ -861,6 +880,11 @@ class ConnectionManager:
                         for ws_id, conn_info in list(connections.items()):
                             last_heartbeat = conn_info.get("last_heartbeat")
                             if last_heartbeat:
+                                stale_threshold = (
+                                    self.MOBILE_HEARTBEAT_STALE_SECONDS
+                                    if conn_info.get("client_type") == "mobile"
+                                    else self.HEARTBEAT_STALE_SECONDS
+                                )
                                 seconds_since_heartbeat = (
                                     now - last_heartbeat
                                 ).total_seconds()
