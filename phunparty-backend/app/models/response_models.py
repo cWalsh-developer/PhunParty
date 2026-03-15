@@ -1,6 +1,6 @@
 from typing import Optional, List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.models.enums import DifficultyLevel, ResultType, HistoryResultType
 
@@ -12,10 +12,12 @@ class GameResponse(BaseModel):
 
 
 class PlayerResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     player_id: str
     player_name: str
     player_email: str
-    player_mobile: str = None
+    player_mobile: Optional[str] = None
     profile_photo_url: Optional[str] = None
     active_game_code: Optional[str] = None
 
