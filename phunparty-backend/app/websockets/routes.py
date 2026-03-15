@@ -223,20 +223,15 @@ async def send_initial_session_state(
             },
         }
 
-        # Add current question ONLY for web clients AND only if game has started
-        # Mobile clients should NOT receive question in initial state - they get it via game_started flow
-        if (
-            client_type == "web"
-            and game_state
-            and game_state.get("is_active")
-            and game_state.get("isstarted")
-        ):
+        # Include current question when game is already active/started so reconnecting
+        # clients (web or mobile) can recover if they missed a prior broadcast.
+        if game_state and game_state.get("is_active") and game_state.get("isstarted"):
             try:
                 current_question = get_current_question_details(db, session_code)
                 if current_question:
                     initial_state["data"]["current_question"] = current_question
                     logger.info(
-                        f"Included current question in initial state for web client"
+                        f"Included current question in initial state for {client_type} client"
                     )
             except Exception as e:
                 logger.warning(f"Could not get current question: {e}")
