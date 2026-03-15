@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 class ConnectionManager:
     """Manages WebSocket connections for game sessions"""
 
+    HEARTBEAT_CHECK_INTERVAL_SECONDS = 10
+    HEARTBEAT_STALE_SECONDS = 90
+    PING_INTERVAL_SECONDS = 10
+    MOBILE_DISCONNECT_GRACE_SECONDS = 25
+
     def __init__(self):
         # session_code -> {websocket_id: {websocket, client_type, player_info}}
         self.active_connections: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -25,11 +30,87 @@ class ConnectionManager:
         # Question queue: session_code -> {question_id: question_data}
         # Stores questions that have been broadcast so mobile clients can retrieve them
         self.question_queue: Dict[str, Dict[str, Any]] = {}
+        # player leave tasks: "session_code:player_id" -> asyncio.Task
+        # Used to avoid flapping presence when mobile networks briefly disconnect.
+        self.pending_player_leave_tasks: Dict[str, asyncio.Task] = {}
         # Start heartbeat checker and automatic ping broadcaster
         self._heartbeat_task = None
         self._ping_task = None
         self._start_heartbeat_checker()
         self._start_automatic_ping()
+
+    def _player_task_key(self, session_code: str, player_id: str) -> str:
+        return f"{session_code}:{player_id}"
+
+    def _cancel_pending_player_leave(self, session_code: str, player_id: Optional[str]):
+        if not player_id:
+            return
+
+        task_key = self._player_task_key(session_code, player_id)
+        existing_task = self.pending_player_leave_tasks.get(task_key)
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
+            logger.info(
+                f"♻️ Cancelled pending leave for player {player_id} in session {session_code}"
+            )
+        self.pending_player_leave_tasks.pop(task_key, None)
+
+    def _schedule_mobile_leave(self, session_code: str, client_info: Dict[str, Any]):
+        player_id = client_info.get("player_id")
+        player_name = client_info.get("player_name")
+
+        if not player_id or not player_name:
+            return
+
+        self._cancel_pending_player_leave(session_code, player_id)
+        task_key = self._player_task_key(session_code, player_id)
+
+        async def delayed_leave_broadcast():
+            try:
+                await asyncio.sleep(self.MOBILE_DISCONNECT_GRACE_SECONDS)
+
+                # If player reconnected during grace window, do not broadcast leave.
+                if self.get_player_connections(session_code, player_id):
+                    logger.info(
+                        f"✅ Player {player_name} reconnected within grace window in session {session_code}"
+                    )
+                    return
+
+                logger.info(
+                    f"📴 Player {player_name} did not reconnect after {self.MOBILE_DISCONNECT_GRACE_SECONDS}s grace period"
+                )
+
+                await self.broadcast_to_session(
+                    session_code,
+                    {
+                        "type": "player_left",
+                        "data": {
+                            "player_id": player_id,
+                            "player_name": player_name,
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                    },
+                    exclude_client_types=["mobile"],
+                    critical=True,
+                )
+
+                # Keep all clients in sync after confirmed leave.
+                await self.broadcast_player_roster_update(session_code)
+
+            except asyncio.CancelledError:
+                logger.debug(
+                    f"Pending leave task cancelled for {player_name} in session {session_code}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"Error during delayed leave broadcast for {player_name}: {e}"
+                )
+            finally:
+                self.pending_player_leave_tasks.pop(task_key, None)
+
+        self.pending_player_leave_tasks[task_key] = asyncio.create_task(
+            delayed_leave_broadcast()
+        )
 
     def generate_websocket_id(self, websocket: WebSocket) -> str:
         """Generate unique ID for WebSocket connection"""
@@ -106,8 +187,13 @@ class ConnectionManager:
 
         except Exception as e:
             logger.error(f"Failed to send connection confirmation: {e}")
-            # Don't continue if we can't confirm connection
+            # Clean up partially registered connection to avoid ghost players.
+            self.disconnect(websocket)
             return
+
+        # If this is a reconnect, cancel pending delayed leave for this player.
+        if client_type == "mobile" and player_id:
+            self._cancel_pending_player_leave(session_code, player_id)
 
         # Notify other clients about new connection IMMEDIATELY (if mobile player joining)
         # REMOVED: await asyncio.sleep(0.2) - This delay was causing web UI to miss player joins
@@ -156,9 +242,9 @@ class ConnectionManager:
                 f"✅ Sent roster_update to all clients in session {session_code}"
             )
 
-            # Add small delay AFTER broadcasting to let the web UI process the updates
-            # This ensures the web client receives and processes the messages
-            await asyncio.sleep(0.05)  # Minimal delay just to ensure message delivery
+            logger.info(
+                f"✅ Mobile join flow completed for {player_name} in session {session_code}"
+            )
 
     def disconnect(self, websocket: WebSocket):
         """Disconnect a client"""
@@ -189,26 +275,13 @@ class ConnectionManager:
 
             logger.info(f"Client disconnected from session {session_code}")
 
-            # Notify other clients if a mobile player left
+            # For mobile clients, delay leave notification to tolerate brief reconnect gaps.
             if (
                 client_info
                 and client_info.get("client_type") == "mobile"
                 and client_info.get("player_name")
             ):
-                asyncio.create_task(
-                    self.broadcast_to_session(
-                        session_code,
-                        {
-                            "type": "player_left",
-                            "data": {
-                                "player_id": client_info.get("player_id"),
-                                "player_name": client_info.get("player_name"),
-                                "timestamp": datetime.now().isoformat(),
-                            },
-                        },
-                        exclude_client_types=["mobile"],
-                    )
-                )
+                self._schedule_mobile_leave(session_code, client_info)
 
     async def send_personal_message(
         self, message: dict, websocket: WebSocket, retries: int = 2
@@ -399,23 +472,41 @@ class ConnectionManager:
     def get_mobile_players(self, session_code: str) -> List[Dict[str, Any]]:
         """Get list of mobile players in session"""
         connections = self.get_session_connections(session_code)
-        mobile_players = []
+        latest_by_player: Dict[str, Dict[str, Any]] = {}
+        unnamed_mobile_players: List[Dict[str, Any]] = []
 
         for connection_info in connections.values():
-            if connection_info["client_type"] == "mobile" and connection_info.get(
-                "player_name"
-            ):
-                mobile_players.append(
-                    {
-                        "player_id": connection_info.get("player_id"),
-                        "player_name": connection_info.get("player_name"),
-                        "player_photo": connection_info.get("player_photo"),
-                        "connected_at": connection_info.get("connected_at"),
-                        "player_answered": connection_info.get("player_answered", None),
-                    }
-                )
+            if connection_info.get("client_type") != "mobile":
+                continue
 
-        return mobile_players
+            player_name = connection_info.get("player_name")
+            player_id = connection_info.get("player_id")
+            if not player_name:
+                continue
+
+            player_data = {
+                "player_id": player_id,
+                "player_name": player_name,
+                "player_photo": connection_info.get("player_photo"),
+                "connected_at": connection_info.get("connected_at"),
+                "player_answered": connection_info.get("player_answered", None),
+            }
+
+            if player_id:
+                existing = latest_by_player.get(player_id)
+                existing_connected_at = existing.get("connected_at") if existing else ""
+                candidate_connected_at = player_data.get("connected_at") or ""
+                if not existing or candidate_connected_at >= existing_connected_at:
+                    latest_by_player[player_id] = player_data
+            else:
+                unnamed_mobile_players.append(player_data)
+
+        # Return deterministic ordering so roster updates are stable.
+        deduped_players = list(latest_by_player.values()) + unnamed_mobile_players
+        deduped_players.sort(
+            key=lambda p: (p.get("player_name") or "", p.get("connected_at") or "")
+        )
+        return deduped_players
 
     def get_session_stats(self, session_code: str) -> Dict[str, Any]:
         """Get statistics for a session"""
@@ -548,6 +639,9 @@ class ConnectionManager:
             return {
                 "exists": False,
                 "total_connections": 0,
+                "web_clients": 0,
+                "mobile_clients": 0,
+                "mobile_players": [],
                 "players": 0,
                 "hosts": 0,
                 "observers": 0,
@@ -556,6 +650,8 @@ class ConnectionManager:
 
         connections = self.active_connections[session_code]
         player_breakdown = {}
+        web_clients = 0
+        mobile_clients = 0
         hosts = 0
         observers = 0
 
@@ -567,6 +663,10 @@ class ConnectionManager:
                 hosts += 1
             elif client_type == "observer":
                 observers += 1
+            elif client_type == "web":
+                web_clients += 1
+            elif client_type == "mobile":
+                mobile_clients += 1
             elif player_id:
                 # Track connections per player
                 if player_id not in player_breakdown:
@@ -579,6 +679,9 @@ class ConnectionManager:
         return {
             "exists": True,
             "total_connections": len(connections),
+            "web_clients": web_clients,
+            "mobile_clients": mobile_clients,
+            "mobile_players": self.get_mobile_players(session_code),
             "players": len(player_breakdown),
             "hosts": hosts,
             "observers": observers,
@@ -744,10 +847,8 @@ class ConnectionManager:
         async def check_stale_connections():
             while True:
                 try:
-                    await asyncio.sleep(20)  # Check every 20 seconds
-                    stale_threshold = (
-                        45  # Consider stale after 45 seconds of no heartbeat
-                    )
+                    await asyncio.sleep(self.HEARTBEAT_CHECK_INTERVAL_SECONDS)
+                    stale_threshold = self.HEARTBEAT_STALE_SECONDS
 
                     stale_websockets = []
                     total_connections = 0
@@ -806,7 +907,7 @@ class ConnectionManager:
         async def send_periodic_pings():
             while True:
                 try:
-                    await asyncio.sleep(15)  # Send ping every 15 seconds
+                    await asyncio.sleep(self.PING_INTERVAL_SECONDS)
 
                     ping_message = {
                         "type": "ping",

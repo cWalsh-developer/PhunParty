@@ -94,25 +94,24 @@ async def websocket_endpoint(
                     f"🔌 Closing {len(existing_connections)} old connection(s) before establishing new one"
                 )
 
-                # Close all old connections from this player
+                # Remove old connections from manager state immediately so roster is stable.
+                manager.disconnect_player_by_id(session_code, player_id)
+
+                # Close old sockets in background to avoid blocking new connection setup.
                 for old_ws_id, old_conn_info in existing_connections.items():
                     try:
                         old_ws = old_conn_info.get("websocket")
                         if old_ws:
-                            await old_ws.close(
-                                code=1000, reason="New connection established"
+                            asyncio.create_task(
+                                old_ws.close(
+                                    code=1000, reason="New connection established"
+                                )
                             )
                             logger.info(
                                 f"✅ Closed old connection {old_ws_id} for player {player_id}"
                             )
                     except Exception as e:
                         logger.error(f"Error closing old connection: {e}")
-
-                # Clean up the connection records
-                manager.disconnect_player_by_id(session_code, player_id)
-
-                # Small delay to ensure cleanup completes
-                await asyncio.sleep(0.2)
 
                 logger.info(
                     f"✅ Cleanup complete - ready for new connection from {player_name}"
