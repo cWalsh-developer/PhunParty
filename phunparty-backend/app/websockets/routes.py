@@ -582,6 +582,9 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
     try:
         logger.info(f"🎮 Starting game for session {session_code}")
 
+        # Emit an authoritative roster snapshot at game-start boundary.
+        await manager.broadcast_player_roster_update(session_code)
+
         # CRITICAL: Ensure roster is synced before starting game
         # Step 1: Wait for all WebSocket connections to be ready
         await manager.wait_for_ready_connections(session_code, timeout=2.0)
@@ -692,6 +695,10 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
             },
             critical=True,
         )
+
+        # Re-emit roster right after game_started to keep leaderboard in sync
+        # during page transition/reconnect windows.
+        await manager.broadcast_player_roster_update(session_code)
 
         # Step 2: Send web-only preload so host can prepare UI during intro
         # This is NOT visible to mobiles - prevents the race condition
