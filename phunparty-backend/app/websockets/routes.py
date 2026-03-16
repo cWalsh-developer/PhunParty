@@ -223,15 +223,20 @@ async def send_initial_session_state(
             },
         }
 
-        # Include current question when game is already active/started so reconnecting
-        # clients (web or mobile) can recover if they missed a prior broadcast.
-        if game_state and game_state.get("is_active") and game_state.get("isstarted"):
+        # Include current question for web clients only.
+        # Mobile clients must stay synchronized with countdown_complete -> question_started.
+        if (
+            client_type == "web"
+            and game_state
+            and game_state.get("is_active")
+            and game_state.get("isstarted")
+        ):
             try:
                 current_question = get_current_question_details(db, session_code)
                 if current_question:
                     initial_state["data"]["current_question"] = current_question
                     logger.info(
-                        f"Included current question in initial state for {client_type} client"
+                        "Included current question in initial state for web client"
                     )
             except Exception as e:
                 logger.warning(f"Could not get current question: {e}")
@@ -325,25 +330,9 @@ async def handle_websocket_message(
             )
         else:
             logger.warning(f"⚠️ No queued question available for session {session_code}")
-            # Fallback: try to get from database
-            try:
-                from app.database.dbCRUD import get_current_question_details
-
-                game_status = get_current_question_details(db, session_code)
-                if game_status and game_status.get("current_question"):
-                    question_data = game_status["current_question"]
-                    logger.info(
-                        f"📤 Sending DB question {question_data.get('question_id')} to mobile client"
-                    )
-                    await manager.send_personal_message(
-                        {
-                            "type": "question_started",
-                            "data": question_data,
-                        },
-                        websocket,
-                    )
-            except Exception as e:
-                logger.error(f"Failed to get question from DB: {e}")
+            # No DB fallback here by design.
+            # Releasing question to mobile should happen only via synchronized
+            # countdown_complete -> question_started flow or queued recovery.
 
     elif message_type == "submit_answer" and client_type == "mobile":
         # Player submitting an answer
