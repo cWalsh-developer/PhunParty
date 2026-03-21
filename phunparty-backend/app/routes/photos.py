@@ -1,14 +1,12 @@
 import glob
 import os
-import shutil
 import uuid
 from pathlib import Path
-from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from app.database.dbCRUD import get_player_by_ID, update_player
+from app.database.dbCRUD import get_player_by_ID
 from app.dependencies import get_api_key, get_db
 
 # Create photos directory if it doesn't exist

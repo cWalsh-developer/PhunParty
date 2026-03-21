@@ -1,14 +1,10 @@
-from datetime import datetime, timedelta, timezone
-
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
-from sqlalchemy.orm import relationship
-
+from datetime import datetime, timezone
+from sqlalchemy import Boolean, Column, DateTime, Integer, String
 from app.config import Base
 
 
 class PasswordReset(Base):
     __tablename__ = "password_reset"
-
     id = Column(Integer, primary_key=True, index=True)
     mobile = Column(String, index=True, nullable=False)
     code = Column(String, nullable=False)

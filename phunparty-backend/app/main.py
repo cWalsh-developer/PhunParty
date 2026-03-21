@@ -1,18 +1,15 @@
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy.orm import Session
-
 from app.config import Base, engine
-from app.dependencies import get_db
-from app.models.game_model import Game
-from app.models.game_session_model import GameSession
-from app.models.game_state_models import GameSessionState, PlayerResponse
-from app.models.passwordReset import PasswordReset
-from app.models.players_model import Players
-from app.models.questions_model import Questions
-from app.models.scores_model import Scores
-from app.models.session_player_assignment_model import SessionAssignment
-from app.models.session_question_assignment import SessionQuestionAssignment
+from app.schemas.game_model import Game
+from app.schemas.game_session_model import GameSession
+from app.schemas.game_state_models import GameSessionState, PlayerResponse
+from app.schemas.passwordReset import PasswordReset
+from app.schemas.players_model import Players
+from app.schemas.questions_model import Questions
+from app.schemas.scores_model import Scores
+from app.schemas.session_player_assignment_model import SessionAssignment
+from app.schemas.session_question_assignment import SessionQuestionAssignment
 from app.routes import (
     authentication,
     game,

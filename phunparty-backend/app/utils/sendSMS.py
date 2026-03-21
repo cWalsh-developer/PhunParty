@@ -1,12 +1,11 @@
 import os
 
 from dotenv import load_dotenv
-from fastapi import Depends, HTTPException
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from twilio.rest import Client
 
 from app.database.dbCRUD import delete_expired_otps
-from app.dependencies import get_db
 
 load_dotenv()
 TWILIO_SID = os.getenv("TWILIO_SID")

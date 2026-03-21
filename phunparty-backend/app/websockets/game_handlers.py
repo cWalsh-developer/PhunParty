@@ -3,17 +3,14 @@ Game event handlers for different game types
 Handles the business logic for different game modes
 """
 
-import asyncio
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from sqlalchemy.orm import Session
 
 from app.database.dbCRUD import (
-    create_player_response,
     get_current_question_details,
-    get_game_session_state,
     get_player_by_ID,
 )
 from app.websockets.manager import manager

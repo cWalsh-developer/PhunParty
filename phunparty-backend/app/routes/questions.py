@@ -1,4 +1,3 @@
-from typing import List
 import json
 import random
 
@@ -8,9 +7,8 @@ from sqlalchemy.orm import Session
 from app.database.dbCRUD import get_question_by_id, submit_questions
 from app.dependencies import get_api_key, get_db
 from app.models.enums import DifficultyLevel
-from app.models.questions_model import Questions
+from app.schemas.questions_model import Questions
 from app.models.response_models import QuestionRequest, QuestionsAddedResponseModel
-from app.models.session_question_assignment import SessionQuestionAssignment
 
 router = APIRouter(dependencies=[Depends(get_api_key)])
 

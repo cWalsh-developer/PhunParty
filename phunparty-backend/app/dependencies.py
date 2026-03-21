@@ -1,9 +1,8 @@
 import os
 
 from dotenv import load_dotenv
-from fastapi import Depends, HTTPException, Security
+from fastapi import HTTPException, Security
 from fastapi.security.api_key import APIKeyHeader
-from sqlalchemy.orm import Session
 
 from app.config import SessionLocal
 

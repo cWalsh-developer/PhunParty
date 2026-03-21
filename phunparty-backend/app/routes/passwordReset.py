@@ -24,9 +24,6 @@ def generate_otp():
     return str(random.randint(100000, 999999))
 
 
-import traceback
-
-
 @router.post("/request", tags=["Password Reset"])
 def request_password_reset(phone: PasswordResetRequest, db: Session = Depends(get_db)):
     try:

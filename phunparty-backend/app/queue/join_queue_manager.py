@@ -1,12 +1,12 @@
 import asyncio
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Optional, Set
 from dataclasses import dataclass
 from enum import Enum
 import logging
 
-from app.database.dbCRUD import get_session_by_code, join_game
+from app.database.dbCRUD import join_game
 from app.websockets.manager import manager as websocket_manager
 
 logger = logging.getLogger(__name__)

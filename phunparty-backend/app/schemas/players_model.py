@@ -1,6 +1,4 @@
-from sqlalchemy import JSON, Column, ForeignKey, Integer, String, Boolean
-from datetime import datetime
-
+from sqlalchemy import Column, ForeignKey, String, Boolean
 from app.config import Base
 
 

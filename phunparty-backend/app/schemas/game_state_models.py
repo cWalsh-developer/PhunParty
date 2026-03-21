@@ -1,7 +1,5 @@
 from datetime import datetime
-
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
-
 from app.config import Base
 
 
@@ -9,7 +7,6 @@ class PlayerResponse(Base):
     """Track individual player responses to questions in a session"""
 
     __tablename__ = "player_responses"
-
     response_id = Column(String, primary_key=True, index=True)
     session_code = Column(
         String, ForeignKey("game_sessions.session_code"), nullable=False
@@ -25,7 +22,6 @@ class GameSessionState(Base):
     """Track the current state of a game session"""
 
     __tablename__ = "game_session_states"
-
     session_code = Column(
         String, ForeignKey("game_sessions.session_code"), primary_key=True
     )
@@ -38,5 +34,3 @@ class GameSessionState(Base):
     total_questions = Column(Integer, nullable=False)
     ispublic = Column(Boolean, default=True)
     isstarted = Column(Boolean, default=False)
-    started_at = Column(DateTime, default=datetime.utcnow)
-    ended_at = Column(DateTime, nullable=True)

@@ -1,5 +1,4 @@
 from sqlalchemy import Column, ForeignKey, Integer, String, Enum as SAEnum
-
 from app.config import Base
 from app.models.enums import ResultType
 

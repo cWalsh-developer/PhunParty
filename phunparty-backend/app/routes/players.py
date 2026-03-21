@@ -12,14 +12,10 @@ from app.database.dbCRUD import (
     get_player_by_email,
     get_player_by_ID,
     update_player,
-    update_player_game_code,
 )
 from app.dependencies import get_api_key, get_db
-from app.models.loginRequest import LoginRequest
 from app.models.players import Player, PlayerUpdate
 from app.models.response_models import PlayerResponse
-from app.utils.generateJWT import create_access_token
-from app.utils.hash_password import verify_password
 
 router = APIRouter(dependencies=[Depends(get_api_key)])
 
@@ -188,7 +184,7 @@ def leave_session_route(player_id: str, db: Session = Depends(get_db)):
             player.active_game_code = None
 
             # Also clear any session assignments for this player
-            from app.models.session_player_assignment_model import SessionAssignment
+            from app.schemas.session_player_assignment_model import SessionAssignment
             from datetime import datetime
 
             # End any active session assignments (those without session_end)
@@ -224,7 +220,7 @@ def get_player_status_route(player_id: str, db: Session = Depends(get_db)):
             raise HTTPException(status_code=404, detail="Player not found")
 
         # Get active assignments
-        from app.models.session_player_assignment_model import SessionAssignment
+        from app.schemas.session_player_assignment_model import SessionAssignment
 
         active_assignments = (
             db.query(SessionAssignment)

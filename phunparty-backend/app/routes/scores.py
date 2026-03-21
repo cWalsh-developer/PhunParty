@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session
 from app.database.dbCRUD import *
 from app.dependencies import get_api_key, get_db
 from app.models.response_models import ScoresResponseModel
-from app.models.scores_model import Scores
 
 router = APIRouter(dependencies=[Depends(get_api_key)])
 

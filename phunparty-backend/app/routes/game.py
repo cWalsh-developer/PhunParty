@@ -1,6 +1,6 @@
-from typing import List, Optional
+from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database.dbCRUD import create_game as cg, end_game_session
@@ -19,7 +19,6 @@ from app.database.dbCRUD import (
 )
 from app.dependencies import get_api_key, get_db
 from app.models.game import GameCreation, GameJoinRequest, GameSessionCreation
-from app.models.game_model import Game
 from app.models.response_models import GameHistoryResponse, GameResponse
 from app.websockets.manager import manager
 from app.queue.join_queue_manager import join_queue_manager

@@ -10,7 +10,6 @@ from typing import Optional
 
 from fastapi import (
     APIRouter,
-    Depends,
     HTTPException,
     Query,
     WebSocket,
@@ -25,7 +24,7 @@ from app.database.dbCRUD import (
     get_session_by_code,
 )
 from app.dependencies import get_db
-from app.websockets.game_handlers import GAME_HANDLERS, create_game_handler
+from app.websockets.game_handlers import create_game_handler
 from app.websockets.manager import manager
 
 logger = logging.getLogger(__name__)
