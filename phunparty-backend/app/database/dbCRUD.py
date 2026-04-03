@@ -59,27 +59,64 @@ def create_game_session(
         difficulty: Optional difficulty level ('easy', 'medium', 'hard')
     """
     session_code = generate_session_code()
-    gameSession = GameSession(
-        session_code=session_code,
-        host_name=host_name,
-        number_of_questions=number_of_questions,
-        game_code=game_code,
-        owner_player_id=owner_player_id,
-    )
-    db.add(gameSession)
-    db.commit()
-    db.refresh(gameSession)
-    if not gameSession:
-        raise ValueError("Failed to create game session")
-    add_question_to_session(db, session_code, difficulty)
-
-    # Initialize game state tracking
     try:
-        create_game_session_state(db, session_code, ispublic)
-    except Exception as e:
-        print(f"Warning: Could not initialize game state: {e}")
+        gameSession = GameSession(
+            session_code=session_code,
+            host_name=host_name,
+            number_of_questions=number_of_questions,
+            game_code=game_code,
+            owner_player_id=owner_player_id,
+        )
+        db.add(gameSession)
+        db.commit()
+        db.refresh(gameSession)
+        if not gameSession:
+            raise ValueError("Failed to create game session")
 
-    return gameSession
+        add_question_to_session(db, session_code, difficulty)
+        create_game_session_state(db, session_code, ispublic)
+        return gameSession
+    except Exception:
+        db.rollback()
+        _cleanup_partial_game_session(db, session_code)
+        logger.exception("Failed to create game session %s", session_code)
+        raise
+
+
+def _cleanup_partial_game_session(db: Session, session_code: str) -> None:
+    """Delete a partially-created session after setup fails."""
+    try:
+        (
+            db.query(GameSessionState)
+            .filter(GameSessionState.session_code == session_code)
+            .delete(synchronize_session=False)
+        )
+        (
+            db.query(SessionQuestionAssignment)
+            .filter(SessionQuestionAssignment.session_code == session_code)
+            .delete(synchronize_session=False)
+        )
+        (
+            db.query(SessionAssignment)
+            .filter(SessionAssignment.session_code == session_code)
+            .delete(synchronize_session=False)
+        )
+        (
+            db.query(Scores)
+            .filter(Scores.session_code == session_code)
+            .delete(synchronize_session=False)
+        )
+        (
+            db.query(GameSession)
+            .filter(GameSession.session_code == session_code)
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Failed to clean up partially-created game session %s", session_code
+        )
 
 
 def get_session_by_code(db: Session, session_code: str) -> GameSession:
@@ -578,8 +615,7 @@ def add_question_to_session(
             session_code=session_code,
         )
         db.add(assignment)
-        db.commit()
-        db.refresh(assignment)
+    db.commit()
 
 
 def submit_questions(db: Session, question: Questions) -> Questions:
@@ -766,7 +802,7 @@ def get_session_details(db: Session, session_code: str) -> dict:
 
     if game_state:
         is_active = game_state.is_active
-        is_public = game_state.is_public
+        is_public = game_state.ispublic
         started_at = game_state.started_at
         ended_at = game_state.ended_at
 
@@ -1122,6 +1158,9 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
     if not game_state:
         return {"error": "Game session not found"}
 
+    started_at = getattr(game_state, "started_at", None)
+    ended_at = getattr(game_state, "ended_at", None)
+
     current_question = None
     question_details = None
 
@@ -1218,10 +1257,8 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
             "waiting": total_players - players_answered,
         },
         "game_state": "active" if game_state.isstarted else "waiting",
-        "started_at": (
-            game_state.started_at.isoformat() if game_state.started_at else None
-        ),
-        "ended_at": game_state.ended_at.isoformat() if game_state.ended_at else None,
+        "started_at": started_at.isoformat() if started_at else None,
+        "ended_at": ended_at.isoformat() if ended_at else None,
     }
 
 

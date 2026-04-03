@@ -23,11 +23,20 @@ def get_question_by_id_route(question_id: str, db: Session = Depends(get_db)):
         if not question:
             raise HTTPException(status_code=404, detail="Question not found")
 
+        raw_options = getattr(question, "question_options", None)
         # Always randomize the options
-        incorrect_options = json.loads(question.question_options)
-        all_options = incorrect_options + [question.answer]
-        random.shuffle(all_options)
-        correct_index = all_options.index(question.answer)
+        incorrect_options = []
+        if raw_options:
+            if isinstance(raw_options, str):
+                incorrect_options = json.loads(raw_options)
+            elif isinstance(raw_options, list):
+                incorrect_options = raw_options
+        all_options = []
+        correct_index = None
+        if incorrect_options:
+            all_options = incorrect_options + [question.answer]
+            random.shuffle(all_options)
+            correct_index = all_options.index(question.answer)
 
         return {
             "question_id": question.question_id,
@@ -35,7 +44,7 @@ def get_question_by_id_route(question_id: str, db: Session = Depends(get_db)):
             "answer": question.answer,
             "genre": question.genre,
             "difficulty": question.difficulty,
-            "question_options": question.question_options,
+            "question_options": raw_options if raw_options else [],
             "display_options": all_options,
             "correct_index": correct_index,
         }
@@ -54,18 +63,21 @@ def add_question_route(
     """
     try:
         # Create SQLAlchemy model from Pydantic request
-        question = Questions(
-            question=question_request.question,
-            answer=question_request.answer,
-            genre=question_request.genre,
-            difficulty=question_request.difficulty,
-            question_options=(
+        question_data = {
+            "question": question_request.question,
+            "answer": question_request.answer,
+            "genre": question_request.genre,
+            "difficulty": question_request.difficulty,
+        }
+        if hasattr(Questions, "question_options"):
+            question_data["question_options"] = (
                 json.dumps(question_request.question_options)
                 if hasattr(question_request, "question_options")
                 and question_request.question_options
                 else "[]"
-            ),
-        )
+            )
+
+        question = Questions(**question_data)
 
         submitted_question = submit_questions(db, question)
         return QuestionsAddedResponseModel(

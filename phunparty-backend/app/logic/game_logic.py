@@ -3,6 +3,7 @@ Game Logic Module - Handles automatic game progression (Business Logic Only)
 All database operations are delegated to dbCRUD.py
 """
 
+from datetime import UTC, datetime
 import json
 import random
 import logging
@@ -75,6 +76,8 @@ def updateGameStartStatus(db: Session, session_code: str, is_started: bool) -> N
         raise ValueError("Game session not found")
 
     game_state.isstarted = is_started
+    if is_started and not game_state.started_at:
+        game_state.started_at = datetime.now(UTC).replace(tzinfo=None)
     db.commit()
 
 
@@ -206,10 +209,12 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
         if not question:
             raise ValueError("Question not found")
 
+        raw_options = getattr(question, "question_options", None)
+
         # Handle questions that might not have options yet
-        if not question.question_options:
+        if not raw_options:
             logger.warning(
-                f"Question {question_id} has no question_options, returning answer only"
+                f"Question {question_id} has no question_options, falling back to text input"
             )
             return {
                 "question_id": question.question_id,
@@ -220,17 +225,16 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
                     question.difficulty.value if question.difficulty else "easy"
                 ),
                 "question_options": [],
-                "display_options": [question.answer],  # Just the correct answer
-                "correct_index": 0,
+                "display_options": [],
+                "correct_index": None,
             }
 
         # Parse and randomize the options with robust error handling
         logger.info(
-            f"Question {question_id} question_options raw value: {repr(question.question_options)}"
+            f"Question {question_id} question_options raw value: {repr(raw_options)}"
         )
 
         incorrect_options = []
-        raw_options = question.question_options
 
         if raw_options:
             # Check if it's already a list (PostgreSQL JSON field) or needs parsing
@@ -280,8 +284,8 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
                             question.difficulty.value if question.difficulty else "easy"
                         ),
                         "question_options": [],
-                        "display_options": [question.answer],
-                        "correct_index": 0,
+                        "display_options": [],
+                        "correct_index": None,
                     }
             else:
                 # Unknown type
@@ -293,13 +297,13 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
                     "question": question.question,
                     "answer": question.answer,
                     "genre": question.genre,
-                    "difficulty": (
-                        question.difficulty.value if question.difficulty else "easy"
-                    ),
-                    "question_options": [],
-                    "display_options": [question.answer],
-                    "correct_index": 0,
-                }
+                        "difficulty": (
+                            question.difficulty.value if question.difficulty else "easy"
+                        ),
+                        "question_options": [],
+                        "display_options": [],
+                        "correct_index": None,
+                    }
 
         # Combine incorrect options with correct answer
         all_options = incorrect_options + [question.answer]
@@ -312,7 +316,7 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
             "answer": question.answer,
             "genre": question.genre,
             "difficulty": question.difficulty.value if question.difficulty else "easy",
-            "question_options": question.question_options,
+            "question_options": raw_options if raw_options else [],
             "display_options": all_options,
             "correct_index": correct_index,
         }
@@ -332,8 +336,8 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
             "genre": "Trivia",
             "difficulty": "easy",
             "question_options": [],
-            "display_options": ["Unable to load question options"],
-            "correct_index": 0,
+            "display_options": [],
+            "correct_index": None,
         }
 
 
