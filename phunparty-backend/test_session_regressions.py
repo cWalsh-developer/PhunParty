@@ -46,7 +46,7 @@ from app.database import dbCRUD
 from app.logic import game_logic
 from app.schemas.game_state_models import GameSessionState
 from app.websockets import game_lifecycle, routes, scheduler
-from app.websockets.manager import SessionPhase
+from app.websockets.manager import SessionPhase, manager
 
 sqlalchemy.create_engine = _real_create_engine
 
@@ -277,3 +277,51 @@ def test_game_lifecycle_broadcasts_final_scores_for_already_ended_session():
     message = mock_manager.broadcast_to_session.await_args.args[1]
     assert message["type"] == "game_ended"
     assert message["data"]["final_scores"] == final_scores
+
+
+def test_buzzer_state_is_shared_per_session():
+    manager.reset_buzzer_state("SESSION123")
+
+    first_state = manager.get_buzzer_state("SESSION123")
+    second_state = manager.get_buzzer_state("SESSION123")
+
+    first_state["current_buzzer_winner"] = "P1"
+
+    assert second_state["current_buzzer_winner"] == "P1"
+
+
+def test_start_buzzer_question_resets_session_buzzer_state():
+    manager.get_buzzer_state("SESSION123")["frozen_players"].add("P1")
+
+    state = manager.start_buzzer_question("SESSION123", "Q2")
+
+    assert state["question_active"] is True
+    assert state["current_question_id"] == "Q2"
+    assert state["current_buzzer_winner"] is None
+    assert state["frozen_players"] == set()
+
+
+def test_advance_or_end_current_question_reveals_next_question():
+    with patch.object(
+        scheduler,
+        "advance_to_next_question",
+        return_value={"action": "next_question"},
+    ):
+        with patch.object(
+            scheduler,
+            "get_current_question_details",
+            return_value={"current_question": {"question_id": "Q2"}},
+        ):
+            with patch.object(
+                scheduler, "reveal_current_question", new_callable=AsyncMock
+            ) as reveal:
+                reveal.return_value = True
+
+                result = asyncio.run(
+                    scheduler.advance_or_end_current_question(
+                        "SESSION123", MagicMock(), reason="test"
+                    )
+                )
+
+    assert result is True
+    reveal.assert_awaited_once()

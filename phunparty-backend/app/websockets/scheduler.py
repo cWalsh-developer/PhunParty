@@ -7,7 +7,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.database.dbCRUD import get_current_question_details
+from app.database.dbCRUD import advance_to_next_question, get_current_question_details
 from app.dependencies import get_db
 from app.websockets.manager import SessionPhase, manager
 
@@ -16,10 +16,15 @@ logger = logging.getLogger(__name__)
 COUNTDOWN_DURATION_MS = 3000
 NEXT_QUESTION_REVEAL_DELAY_MS = 250
 QUESTION_BROADCAST_LEAD_MS = 500
+QUESTION_DURATION_MS = 15000
 
 
 def iso_utc(dt: datetime) -> str:
     return dt.isoformat() + "Z"
+
+
+def parse_iso_utc(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", ""))
 
 
 def normalize_countdown_duration_ms(
@@ -41,6 +46,39 @@ def normalize_countdown_duration_ms(
         )
 
     return COUNTDOWN_DURATION_MS
+
+
+async def advance_or_end_current_question(
+    session_code: str, db: Session, reason: str = "question_timeout"
+) -> bool:
+    """Advance the DB question pointer and broadcast the next authoritative state."""
+    result = advance_to_next_question(db, session_code)
+    action = result.get("action")
+
+    if action == "next_question":
+        game_status = get_current_question_details(db, session_code)
+        current_question = game_status.get("current_question") if game_status else None
+        if not current_question:
+            logger.warning(
+                f"Could not reveal next question for {session_code}; no current question after {reason}"
+            )
+            return False
+
+        manager.clear_question_queue(session_code)
+        question_start_at = datetime.utcnow() + timedelta(
+            milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
+        )
+        return await reveal_current_question(session_code, db, iso_utc(question_start_at))
+
+    if action == "game_ended":
+        from app.websockets.game_lifecycle import handle_game_end
+
+        return await handle_game_end(session_code, db)
+
+    logger.warning(
+        f"Unexpected advance result for {session_code} after {reason}: {result}"
+    )
+    return False
 
 
 async def reveal_current_question(
@@ -65,11 +103,25 @@ async def reveal_current_question(
         )
         return False
 
+    try:
+        question_starts_at = parse_iso_utc(start_at_iso)
+    except ValueError:
+        logger.warning(
+            f"Invalid question start_at for {session_code}: {start_at_iso}; using current time"
+        )
+        question_starts_at = datetime.utcnow()
+
+    expires_at = question_starts_at + timedelta(milliseconds=QUESTION_DURATION_MS)
+    expires_at_iso = iso_utc(expires_at)
     question_data["start_at"] = start_at_iso
+    question_data["expires_at"] = expires_at_iso
+    question_data["duration_ms"] = QUESTION_DURATION_MS
     phase_state = manager.set_session_phase(
         session_code,
         SessionPhase.QUESTION,
         start_at=start_at_iso,
+        question_expires_at=expires_at_iso,
+        question_duration_ms=QUESTION_DURATION_MS,
         current_question_id=question_data.get("question_id"),
         current_question_index=game_status.get("current_question_index"),
         total_questions=game_status.get("total_questions"),
@@ -77,6 +129,8 @@ async def reveal_current_question(
     question_data["phase"] = phase_state["phase"]
     question_data["server_time_ms"] = phase_state["server_time_ms"]
 
+    manager.reset_all_players_answered(session_code)
+    manager.start_buzzer_question(session_code, question_id)
     manager.queue_question(session_code, question_data)
     await manager.broadcast_to_session(
         session_code,
@@ -90,7 +144,50 @@ async def reveal_current_question(
     logger.info(
         f"Question {question_data.get('question_id')} scheduled for session {session_code} at {start_at_iso}"
     )
+    if question_id:
+        asyncio.create_task(
+            scheduled_question_timeout(session_code, question_id, expires_at)
+        )
     return True
+
+
+async def scheduled_question_timeout(
+    session_code: str, question_id: str, expires_at: datetime
+):
+    """Advance the current question when the server-owned question timer expires."""
+    sleep_seconds = max(0, (expires_at - datetime.utcnow()).total_seconds())
+    await asyncio.sleep(sleep_seconds)
+
+    phase_state = manager.get_session_phase_state(session_code)
+    if phase_state.get("phase") != SessionPhase.QUESTION.value:
+        logger.info(
+            f"Skipping question timeout for {session_code}; phase is {phase_state.get('phase')}"
+        )
+        return
+
+    if phase_state.get("current_question_id") != question_id:
+        logger.info(
+            f"Skipping stale question timeout for {session_code}; current question is {phase_state.get('current_question_id')}"
+        )
+        return
+
+    expected_expires_at = phase_state.get("question_expires_at")
+    expires_at_iso = iso_utc(expires_at)
+    if expected_expires_at and expected_expires_at != expires_at_iso:
+        logger.info(
+            f"Skipping stale question timeout for {session_code}; expected {expected_expires_at}"
+        )
+        return
+
+    db_generator = get_db()
+    db = next(db_generator)
+    try:
+        logger.info(f"Question {question_id} timed out for session {session_code}")
+        await advance_or_end_current_question(
+            session_code, db, reason="question_timeout"
+        )
+    finally:
+        db_generator.close()
 
 
 async def scheduled_question_reveal(session_code: str, question_start_at: datetime):

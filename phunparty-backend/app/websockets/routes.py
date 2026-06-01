@@ -3,7 +3,7 @@ WebSocket routes for real-time game functionality
 """
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import logging
 from typing import Optional
@@ -29,9 +29,8 @@ from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.manager import SessionPhase, manager
 from app.websockets.scheduler import (
     COUNTDOWN_DURATION_MS,
-    NEXT_QUESTION_REVEAL_DELAY_MS,
+    advance_or_end_current_question,
     iso_utc,
-    reveal_current_question,
     start_countdown,
 )
 
@@ -497,6 +496,14 @@ async def handle_websocket_message(
         await handle_game_start(session_code, game_handler, db)
 
     elif message_type == "intro_complete" and client_type == "web":
+        current_phase = manager.get_session_phase_state(session_code).get("phase")
+        if current_phase != SessionPhase.INTRO_AUDIO.value:
+            logger.info(
+                f"Ignoring intro_complete for {session_code}; current phase is {current_phase}"
+            )
+            manager.update_heartbeat(websocket)
+            return
+
         countdown_duration_ms = (
             data.get("duration_ms", COUNTDOWN_DURATION_MS)
             if data
@@ -520,6 +527,14 @@ async def handle_websocket_message(
         )
 
     elif message_type == "skip_intro" and client_type == "web":
+        current_phase = manager.get_session_phase_state(session_code).get("phase")
+        if current_phase != SessionPhase.INTRO_AUDIO.value:
+            logger.info(
+                f"Ignoring skip_intro for {session_code}; current phase is {current_phase}"
+            )
+            manager.update_heartbeat(websocket)
+            return
+
         await manager.broadcast_to_session(
             session_code,
             {
@@ -889,8 +904,7 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
 async def handle_next_question(session_code: str, game_handler, db: Session):
     """Handle moving to next question"""
     try:
-        # Use the game logic to advance to next question
-        from app.logic.game_logic import check_and_advance_game, get_game_session_state
+        from app.logic.game_logic import get_game_session_state
 
         # Get current game state
         game_state = get_game_session_state(db, session_code)
@@ -898,27 +912,7 @@ async def handle_next_question(session_code: str, game_handler, db: Session):
             logger.error(f"No current question found for session {session_code}")
             return
 
-        # Force advance to next question
-        result = check_and_advance_game(
-            db, session_code, game_state.current_question_id
-        )
-
-        # Get the updated game state
-        updated_game_state = get_game_session_state(db, session_code)
-
-        if updated_game_state and updated_game_state.current_question_id:
-            manager.clear_question_queue(session_code)
-            question_start_at = datetime.utcnow() + timedelta(
-                milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
-            )
-            await reveal_current_question(
-                session_code,
-                db,
-                iso_utc(question_start_at),
-            )
-        else:
-            # No more questions - end game
-            await handle_game_end(session_code, db)
+        await advance_or_end_current_question(session_code, db, reason="next_question")
 
     except Exception as e:
         logger.error(f"Error advancing to next question: {e}")

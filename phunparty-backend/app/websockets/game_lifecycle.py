@@ -45,6 +45,7 @@ async def handle_game_end(session_code: str, db: Session) -> bool:
             ended_at=ended_at,
         )
         manager.clear_question_queue(session_code)
+        manager.reset_buzzer_state(session_code)
 
         logger.info(
             f"Game ended for session {session_code} with {len(final_scores)} players"

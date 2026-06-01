@@ -17,6 +17,7 @@ from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.manager import SessionPhase, manager
 from app.websockets.scheduler import (
     NEXT_QUESTION_REVEAL_DELAY_MS,
+    advance_or_end_current_question,
     iso_utc,
     reveal_current_question,
 )
@@ -287,28 +288,27 @@ class BuzzerGameHandler(GameEventHandler):
 
     def __init__(self, session_code: str):
         super().__init__(session_code, "buzzer")
-        self.buzzer_state = {
-            "current_buzzer_winner": None,
-            "frozen_players": set(),
-            "question_active": False,
-            "attempts": [],
-        }
+
+    @property
+    def buzzer_state(self) -> Dict[str, Any]:
+        return manager.get_buzzer_state(self.session_code)
 
     async def handle_buzzer_press(self, player_id: str, db: Session):
         """Handle player pressing buzzer"""
-        if not self.buzzer_state["question_active"]:
+        state = self.buzzer_state
+        if not state["question_active"]:
             return
 
         # Check if player is frozen
-        if player_id in self.buzzer_state["frozen_players"]:
+        if player_id in state["frozen_players"]:
             return
 
         # Check if someone already buzzed in
-        if self.buzzer_state["current_buzzer_winner"]:
+        if state["current_buzzer_winner"]:
             return
 
         # This player wins the buzzer!
-        self.buzzer_state["current_buzzer_winner"] = player_id
+        state["current_buzzer_winner"] = player_id
 
         player = get_player_by_ID(db, player_id)
         player_name = player.player_name if player else "Unknown Player"
@@ -333,12 +333,24 @@ class BuzzerGameHandler(GameEventHandler):
         self, player_id: str, answer: str, question_id: str, db: Session
     ):
         """Handle buzzer game answer submission"""
+        state = self.buzzer_state
         # Only the current buzzer winner can answer
-        if self.buzzer_state["current_buzzer_winner"] != player_id:
+        if state["current_buzzer_winner"] != player_id:
             return
 
         # Check if answer is correct (you'll need to implement this logic)
         is_correct = await self.check_answer_correctness(answer, question_id, db)
+        from app.logic.game_logic import submit_player_answer
+
+        submission_result = submit_player_answer(
+            db, self.session_code, player_id, question_id, answer
+        )
+        if "error" in submission_result:
+            logger.warning(
+                f"Could not record buzzer answer for {player_id}: {submission_result['error']}"
+            )
+            return
+        action = submission_result.get("game_state", {}).get("action")
 
         player = get_player_by_ID(db, player_id)
         player_name = player.player_name if player else "Unknown Player"
@@ -360,12 +372,29 @@ class BuzzerGameHandler(GameEventHandler):
 
             # Reset buzzer state for next question
             await self.reset_buzzer_state()
+            if action == "next_question":
+                await self.reveal_current_db_question(db, "buzzer_correct_answer")
+            elif action == "game_ended":
+                await handle_game_end(self.session_code, db)
+            else:
+                await advance_or_end_current_question(
+                    self.session_code, db, reason="buzzer_correct_answer"
+                )
 
         else:
+            if action == "next_question":
+                await self.reset_buzzer_state()
+                await self.reveal_current_db_question(db, "buzzer_all_answered")
+                return
+            if action == "game_ended":
+                await self.reset_buzzer_state()
+                await handle_game_end(self.session_code, db)
+                return
+
             # Wrong answer - freeze this player and reset buzzer
-            self.buzzer_state["frozen_players"].add(player_id)
-            self.buzzer_state["current_buzzer_winner"] = None
-            self.buzzer_state["attempts"].append(
+            state["frozen_players"].add(player_id)
+            state["current_buzzer_winner"] = None
+            state["attempts"].append(
                 {
                     "player_id": player_id,
                     "answer": answer,
@@ -383,23 +412,38 @@ class BuzzerGameHandler(GameEventHandler):
                         "player_name": player_name,
                         "answer": answer,
                         "correct": False,
-                        "frozen_players": list(self.buzzer_state["frozen_players"]),
+                        "frozen_players": list(state["frozen_players"]),
                     },
                 },
             )
 
             # Check if all players are frozen
             active_players = len(manager.get_mobile_players(self.session_code))
-            if len(self.buzzer_state["frozen_players"]) >= active_players:
-                # Unfreeze all players for another round
-                self.buzzer_state["frozen_players"].clear()
+            if active_players and len(state["frozen_players"]) >= active_players:
+                await manager.broadcast_to_session(
+                    self.session_code,
+                    {
+                        "type": "question_failed",
+                        "data": {
+                            "question_id": question_id,
+                            "reason": "all_players_frozen",
+                        },
+                    },
+                    critical=True,
+                )
+                await self.reset_buzzer_state()
+                await advance_or_end_current_question(
+                    self.session_code, db, reason="buzzer_all_wrong"
+                )
+                return
 
             await self.update_mobile_buzzer_ui()
 
     async def start_question(self, question_data: Dict[str, Any]):
         """Start a new buzzer question"""
-        self.buzzer_state["question_active"] = True
-        self.buzzer_state["current_buzzer_winner"] = None
+        manager.start_buzzer_question(
+            self.session_code, question_data.get("question_id")
+        )
 
         await self.broadcast_question(question_data)
         await self.update_mobile_buzzer_ui()
@@ -415,19 +459,23 @@ class BuzzerGameHandler(GameEventHandler):
             player_id = connection_info.get("player_id")
 
             ui_state = {"game_type": "buzzer", "ui_mode": "buzzer"}
+            state = self.buzzer_state
 
-            if player_id in self.buzzer_state["frozen_players"]:
+            if player_id in state["frozen_players"]:
                 ui_state["button_state"] = "frozen"
                 ui_state["message"] = "You're frozen out this round!"
-            elif self.buzzer_state["current_buzzer_winner"] == player_id:
+            elif state["current_buzzer_winner"] == player_id:
                 ui_state["button_state"] = "answer_mode"
                 ui_state["message"] = "You buzzed in! Enter your answer:"
                 ui_state["ui_mode"] = "text_input"
-            elif self.buzzer_state["current_buzzer_winner"]:
+            elif state["current_buzzer_winner"]:
                 ui_state["button_state"] = "waiting"
                 ui_state["message"] = (
-                    f"Waiting for {self.buzzer_state['current_buzzer_winner']} to answer..."
+                    f"Waiting for {state['current_buzzer_winner']} to answer..."
                 )
+            elif not state["question_active"]:
+                ui_state["button_state"] = "waiting"
+                ui_state["message"] = "Waiting for the next question..."
             else:
                 ui_state["button_state"] = "active"
                 ui_state["message"] = "Press to buzz in!"
@@ -436,14 +484,30 @@ class BuzzerGameHandler(GameEventHandler):
                 {"type": "ui_update", "data": ui_state}, connection_info["websocket"]
             )
 
+    async def reveal_current_db_question(self, db: Session, reason: str) -> bool:
+        """Reveal the DB's current question after answer logic has already advanced it."""
+        from app.logic.game_logic import get_game_session_state
+
+        game_state = get_game_session_state(db, self.session_code)
+        if not game_state or not game_state.current_question_id:
+            logger.warning(
+                f"No current question to reveal for {self.session_code} after {reason}"
+            )
+            return False
+
+        manager.clear_question_queue(self.session_code)
+        question_start_at = datetime.utcnow() + timedelta(
+            milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
+        )
+        return await reveal_current_question(
+            self.session_code,
+            db,
+            iso_utc(question_start_at),
+        )
+
     async def reset_buzzer_state(self):
         """Reset buzzer state for next question"""
-        self.buzzer_state = {
-            "current_buzzer_winner": None,
-            "frozen_players": set(),
-            "question_active": False,
-            "attempts": [],
-        }
+        manager.reset_buzzer_state(self.session_code)
 
     async def check_answer_correctness(
         self, answer: str, question_id: str, db: Session
@@ -452,7 +516,8 @@ class BuzzerGameHandler(GameEventHandler):
         # This is a placeholder - implement your answer checking logic
         try:
             question_details = get_current_question_details(db, self.session_code)
-            correct_answer = question_details.get("answer", "").lower().strip()
+            current_question = question_details.get("current_question") or {}
+            correct_answer = str(current_question.get("answer", "")).lower().strip()
             return answer.lower().strip() == correct_answer
         except Exception as e:
             logger.error(f"Error checking answer: {e}")

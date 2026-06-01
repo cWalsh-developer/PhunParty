@@ -56,6 +56,9 @@ class ConnectionManager:
         self.question_queue: Dict[str, Dict[str, Any]] = {}
         # session_code -> authoritative phase/timing snapshot.
         self.session_phase_state: Dict[str, Dict[str, Any]] = {}
+        # session_code -> shared buzzer state. Handlers are per-connection, so
+        # buzzer state must live at session scope.
+        self.buzzer_states: Dict[str, Dict[str, Any]] = {}
         # event_id -> delivery/ack state for critical phase messages.
         self.pending_acks: Dict[str, Dict[str, Any]] = {}
         # session_code:player_id values for players who explicitly left.
@@ -1348,6 +1351,45 @@ class ConnectionManager:
         if session_code in self.question_queue:
             del self.question_queue[session_code]
             logger.info(f"🗑️ Cleared question queue for session {session_code}")
+
+    def get_buzzer_state(self, session_code: str) -> Dict[str, Any]:
+        """Return shared per-session buzzer state."""
+        return self.buzzer_states.setdefault(
+            session_code,
+            {
+                "current_buzzer_winner": None,
+                "frozen_players": set(),
+                "question_active": False,
+                "current_question_id": None,
+                "attempts": [],
+            },
+        )
+
+    def start_buzzer_question(self, session_code: str, question_id: Optional[str]):
+        """Mark a buzzer question active for all connections in the session."""
+        state = self.get_buzzer_state(session_code)
+        state.update(
+            {
+                "current_buzzer_winner": None,
+                "frozen_players": set(),
+                "question_active": True,
+                "current_question_id": question_id,
+                "attempts": [],
+            }
+        )
+        logger.info(f"Buzzer question active for session {session_code}: {question_id}")
+        return state
+
+    def reset_buzzer_state(self, session_code: str):
+        """Reset shared buzzer state for a session."""
+        self.buzzer_states[session_code] = {
+            "current_buzzer_winner": None,
+            "frozen_players": set(),
+            "question_active": False,
+            "current_question_id": None,
+            "attempts": [],
+        }
+        logger.info(f"Reset buzzer state for session {session_code}")
 
 
 # Global connection manager instance
