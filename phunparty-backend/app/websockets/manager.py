@@ -42,7 +42,6 @@ class ConnectionManager:
         "intro_started",
         "intro_skipped",
         "countdown_started",
-        "countdown_complete",
         "question_started",
         "game_ended",
     }
