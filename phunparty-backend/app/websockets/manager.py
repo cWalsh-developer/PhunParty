@@ -597,6 +597,47 @@ class ConnectionManager:
         except Exception as e:
             logger.error(f"Error sending personal message by ID: {e}")
 
+    async def send_personal_critical_message(
+        self, session_code: str, message: dict, websocket: WebSocket
+    ) -> bool:
+        """Send one critical event with normal event_id/ACK tracking metadata."""
+        data = message.get("data", {})
+        message_id = message.get("message_id") or self.make_event_id(
+            session_code,
+            message.get("type", "event"),
+            data if isinstance(data, dict) else {},
+        )
+        message_with_metadata = {
+            **message,
+            "message_id": message_id,
+            "event_id": message.get("event_id") or message_id,
+            "requires_ack": True,
+        }
+
+        sent = await self.send_personal_message(message_with_metadata, websocket)
+        if not sent:
+            return False
+
+        for ws_id, registry_info in self.websocket_registry.items():
+            if registry_info["websocket"] != websocket:
+                continue
+
+            connection_info = self.active_connections.get(session_code, {}).get(ws_id)
+            if not connection_info:
+                return sent
+
+            self._track_ack_target(
+                message_with_metadata["event_id"],
+                session_code,
+                message_with_metadata,
+                ws_id,
+                connection_info,
+            )
+            self._schedule_ack_retry(message_with_metadata["event_id"])
+            break
+
+        return sent
+
     async def broadcast_to_session(
         self,
         session_code: str,

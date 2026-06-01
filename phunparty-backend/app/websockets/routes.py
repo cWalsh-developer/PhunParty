@@ -171,6 +171,9 @@ async def start_countdown(
     duration_ms: int = COUNTDOWN_DURATION_MS,
     delay_ms: int = 250,
     reason: str = "intro_complete",
+    current_question_id: Optional[str] = None,
+    current_question_index: Optional[int] = None,
+    total_questions: Optional[int] = None,
 ):
     """Enter COUNTDOWN and schedule the authoritative QUESTION transition."""
     countdown_start = datetime.utcnow() + timedelta(milliseconds=delay_ms)
@@ -185,6 +188,9 @@ async def start_countdown(
         duration_ms=duration_ms,
         question_start_at=question_start_at_iso,
         countdown_reason=reason,
+        current_question_id=current_question_id,
+        current_question_index=current_question_index,
+        total_questions=total_questions,
     )
 
     await manager.broadcast_to_session(
@@ -497,7 +503,8 @@ async def handle_websocket_message(
             logger.info(
                 f"ðŸ“¤ Sending queued question {current_question.get('question_id')} to mobile client"
             )
-            await manager.send_personal_message(
+            await manager.send_personal_critical_message(
+                session_code,
                 {
                     "type": "question_started",
                     "data": current_question,
@@ -612,18 +619,10 @@ async def handle_websocket_message(
         )
 
     elif message_type == "countdown_complete" and client_type == "web":
-        phase_state = manager.get_session_phase_state(session_code)
-        if phase_state.get("phase") == SessionPhase.QUESTION.value:
-            logger.info(f"Ignoring duplicate countdown_complete for {session_code}")
-            return
-
-        start_at_iso = phase_state.get("question_start_at")
-        if not start_at_iso:
-            start_at_iso = iso_utc(
-                datetime.utcnow() + timedelta(milliseconds=QUESTION_BROADCAST_LEAD_MS)
-            )
-
-        await reveal_current_question(session_code, db, start_at_iso)
+        logger.info(
+            f"Received countdown_complete for {session_code}; server scheduler owns reveal"
+        )
+        manager.update_heartbeat(websocket)
         return
 
 
@@ -967,25 +966,14 @@ async def handle_next_question(session_code: str, game_handler, db: Session):
         updated_game_state = get_game_session_state(db, session_code)
 
         if updated_game_state and updated_game_state.current_question_id:
-            manager.set_session_phase(
+            manager.clear_question_queue(session_code)
+            await start_countdown(
                 session_code,
-                SessionPhase.QUESTION,
                 current_question_id=updated_game_state.current_question_id,
                 current_question_index=updated_game_state.current_question_index,
                 total_questions=updated_game_state.total_questions,
+                reason="next_question",
             )
-            # Broadcast the new question with randomized options
-            if hasattr(game_handler, "broadcast_question_with_options"):
-                await game_handler.broadcast_question_with_options(
-                    updated_game_state.current_question_id, db
-                )
-            else:
-                # Fallback to regular broadcast
-                current_question = get_current_question_details(db, session_code)
-                if current_question and hasattr(game_handler, "start_question"):
-                    await game_handler.start_question(current_question)
-                elif current_question:
-                    await game_handler.broadcast_question(current_question)
         else:
             # No more questions - end game
             await handle_game_end(session_code, db)
