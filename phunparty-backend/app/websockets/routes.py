@@ -3,7 +3,7 @@ WebSocket routes for real-time game functionality
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import logging
 from typing import Optional
@@ -26,10 +26,17 @@ from app.database.dbCRUD import (
 from app.dependencies import get_db
 from app.websockets.game_handlers import create_game_handler
 from app.websockets.manager import SessionPhase, manager
-from app.websockets.scheduler import COUNTDOWN_DURATION_MS, iso_utc, start_countdown
+from app.websockets.scheduler import (
+    COUNTDOWN_DURATION_MS,
+    NEXT_QUESTION_REVEAL_DELAY_MS,
+    iso_utc,
+    reveal_current_question,
+    start_countdown,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+INTRO_RECOVERY_WINDOW_SECONDS = 15
 
 
 def serialize_game_state(game_state_obj) -> Optional[dict]:
@@ -74,12 +81,37 @@ def build_sync_state(session_code: str, db: Session) -> dict:
             )
             sync_state.update(phase_state)
         elif game_state.get("isstarted") and sync_state.get("phase") == "lobby":
+            started_at = game_state_obj.started_at if game_state_obj else None
+            seconds_since_start = None
+            if started_at:
+                seconds_since_start = (
+                    datetime.utcnow() - started_at.replace(tzinfo=None)
+                ).total_seconds()
+
+            is_fresh_intro = (
+                game_state.get("current_question_index", 0) == 0
+                and (
+                    seconds_since_start is not None
+                    and seconds_since_start <= INTRO_RECOVERY_WINDOW_SECONDS
+                )
+            )
+            recovery_phase = (
+                SessionPhase.INTRO_AUDIO
+                if is_fresh_intro
+                else SessionPhase.QUESTION
+            )
+            phase_updates = {
+                "current_question_id": game_state.get("current_question_id"),
+                "current_question_index": game_state.get("current_question_index"),
+                "total_questions": game_state.get("total_questions"),
+            }
+            if recovery_phase == SessionPhase.QUESTION:
+                phase_updates["start_at"] = iso_utc(datetime.utcnow())
+
             phase_state = manager.set_session_phase(
                 session_code,
-                SessionPhase.INTRO_AUDIO,
-                current_question_id=game_state.get("current_question_id"),
-                current_question_index=game_state.get("current_question_index"),
-                total_questions=game_state.get("total_questions"),
+                recovery_phase,
+                **phase_updates,
             )
             sync_state.update(phase_state)
 
@@ -869,12 +901,13 @@ async def handle_next_question(session_code: str, game_handler, db: Session):
 
         if updated_game_state and updated_game_state.current_question_id:
             manager.clear_question_queue(session_code)
-            await start_countdown(
+            question_start_at = datetime.utcnow() + timedelta(
+                milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
+            )
+            await reveal_current_question(
                 session_code,
-                current_question_id=updated_game_state.current_question_id,
-                current_question_index=updated_game_state.current_question_index,
-                total_questions=updated_game_state.total_questions,
-                reason="next_question",
+                db,
+                iso_utc(question_start_at),
             )
         else:
             # No more questions - end game

@@ -14,6 +14,7 @@ from app.websockets.manager import SessionPhase, manager
 logger = logging.getLogger(__name__)
 
 COUNTDOWN_DURATION_MS = 3000
+NEXT_QUESTION_REVEAL_DELAY_MS = 250
 QUESTION_BROADCAST_LEAD_MS = 500
 
 
@@ -25,16 +26,24 @@ async def reveal_current_question(
     session_code: str, db: Session, start_at_iso: str
 ) -> bool:
     """Move the server-owned phase to QUESTION and broadcast exactly once."""
-    if manager.get_session_phase_state(session_code).get("phase") == "question":
-        logger.info(f"Question already revealed for session {session_code}; skipping")
-        return False
-
     game_status = get_current_question_details(db, session_code)
     if not game_status or not game_status.get("current_question"):
         logger.warning(f"No current question found for session {session_code}")
         return False
 
     question_data = game_status["current_question"]
+    question_id = question_data.get("question_id")
+    phase_state = manager.get_session_phase_state(session_code)
+    if (
+        phase_state.get("phase") == SessionPhase.QUESTION.value
+        and question_id
+        and phase_state.get("current_question_id") == question_id
+    ):
+        logger.info(
+            f"Question {question_id} already revealed for session {session_code}; skipping"
+        )
+        return False
+
     question_data["start_at"] = start_at_iso
     phase_state = manager.set_session_phase(
         session_code,

@@ -1,9 +1,10 @@
+import asyncio
 import os
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import sqlalchemy
@@ -44,6 +45,8 @@ sys.modules.setdefault("passlib.context", passlib_context_module)
 from app.database import dbCRUD
 from app.logic import game_logic
 from app.schemas.game_state_models import GameSessionState
+from app.websockets import routes, scheduler
+from app.websockets.manager import SessionPhase
 
 sqlalchemy.create_engine = _real_create_engine
 
@@ -139,3 +142,99 @@ def test_question_fallback_without_options_does_not_expose_answer():
     assert result["question_options"] == []
     assert result["display_options"] == []
     assert result["correct_index"] is None
+
+
+def test_build_sync_state_recovers_active_game_to_question_not_intro():
+    game_state = SimpleNamespace(
+        session_code="SESSION123",
+        current_question_index=1,
+        current_question_id="Q2",
+        is_active=True,
+        is_waiting_for_players=True,
+        isstarted=True,
+        total_questions=5,
+        ispublic=True,
+        started_at=datetime.utcnow() - timedelta(seconds=60),
+        ended_at=None,
+    )
+
+    with patch.object(routes, "get_game_session_state", return_value=game_state):
+        with patch.object(routes, "manager") as mock_manager:
+            mock_manager.get_session_sync_state.return_value = {
+                "session_code": "SESSION123",
+                "phase": "lobby",
+            }
+            mock_manager.set_session_phase.return_value = {
+                "session_code": "SESSION123",
+                "phase": "question",
+                "current_question_id": "Q2",
+            }
+            mock_manager.get_mobile_players.return_value = []
+            mock_manager.get_current_question.return_value = None
+
+            result = routes.build_sync_state("SESSION123", MagicMock())
+
+    assert result["phase"] == "question"
+    mock_manager.set_session_phase.assert_called_once()
+    assert mock_manager.set_session_phase.call_args.args[1] == SessionPhase.QUESTION
+
+
+def test_reveal_current_question_allows_new_question_while_phase_is_question():
+    question = {
+        "question_id": "Q2",
+        "question": "Next?",
+        "genre": "Trivia",
+        "difficulty": "easy",
+    }
+
+    with patch.object(
+        scheduler,
+        "get_current_question_details",
+        return_value={"current_question": question},
+    ):
+        with patch.object(scheduler, "manager") as mock_manager:
+            mock_manager.get_session_phase_state.return_value = {
+                "phase": "question",
+                "current_question_id": "Q1",
+            }
+            mock_manager.set_session_phase.return_value = {
+                "phase": "question",
+                "server_time_ms": 123,
+            }
+            mock_manager.broadcast_to_session = AsyncMock()
+
+            result = asyncio.run(
+                scheduler.reveal_current_question(
+                    "SESSION123", MagicMock(), "2026-06-01T12:00:00Z"
+                )
+            )
+
+    assert result is True
+    mock_manager.queue_question.assert_called_once()
+    mock_manager.broadcast_to_session.assert_awaited_once()
+
+
+def test_reveal_current_question_skips_same_question_duplicate():
+    question = {"question_id": "Q1", "question": "Same?"}
+
+    with patch.object(
+        scheduler,
+        "get_current_question_details",
+        return_value={"current_question": question},
+    ):
+        with patch.object(scheduler, "manager") as mock_manager:
+            mock_manager.get_session_phase_state.return_value = {
+                "phase": "question",
+                "current_question_id": "Q1",
+            }
+            mock_manager.broadcast_to_session = AsyncMock()
+
+            result = asyncio.run(
+                scheduler.reveal_current_question(
+                    "SESSION123", MagicMock(), "2026-06-01T12:00:00Z"
+                )
+            )
+
+    assert result is False
+    mock_manager.set_session_phase.assert_not_called()
+    mock_manager.broadcast_to_session.assert_not_awaited()

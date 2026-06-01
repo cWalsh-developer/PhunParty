@@ -4,7 +4,7 @@ Handles the business logic for different game modes
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict
 
 from sqlalchemy.orm import Session
@@ -14,7 +14,11 @@ from app.database.dbCRUD import (
     get_player_by_ID,
 )
 from app.websockets.manager import SessionPhase, manager
-from app.websockets.scheduler import start_countdown
+from app.websockets.scheduler import (
+    NEXT_QUESTION_REVEAL_DELAY_MS,
+    iso_utc,
+    reveal_current_question,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,19 +188,20 @@ class TriviaGameHandler(GameEventHandler):
 
             if action == "next_question":
                 logger.info(
-                    f"Scheduling next question countdown for session {self.session_code}"
+                    f"Revealing next question for session {self.session_code}"
                 )
                 from app.logic.game_logic import get_game_session_state
 
                 game_state = get_game_session_state(db, self.session_code)
                 if game_state and game_state.current_question_id:
                     manager.clear_question_queue(self.session_code)
-                    await start_countdown(
+                    question_start_at = datetime.utcnow() + timedelta(
+                        milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
+                    )
+                    await reveal_current_question(
                         self.session_code,
-                        reason="auto_advance",
-                        current_question_id=game_state.current_question_id,
-                        current_question_index=game_state.current_question_index,
-                        total_questions=game_state.total_questions,
+                        db,
+                        iso_utc(question_start_at),
                     )
                 else:
                     logger.warning(
