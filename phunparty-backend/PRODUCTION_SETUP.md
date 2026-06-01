@@ -66,7 +66,24 @@ The system will automatically generate the correct WebSocket URLs:
 pip install -r requirements.txt
 ```
 
-### 3. Nginx Configuration Example
+### 3. Run the WebSocket Backend with One Worker
+
+The WebSocket manager currently keeps live connection, ACK, roster, and phase
+state in process memory. Until that state is moved into Redis or another shared
+channel layer, run the backend with exactly one worker:
+
+```bash
+gunicorn app.main:app \
+  --worker-class uvicorn.workers.UvicornWorker \
+  --workers 1 \
+  --bind 0.0.0.0:8000
+```
+
+Do not increase `--workers` for this WebSocket backend yet. Multiple workers can
+split players for the same session across separate in-memory managers, causing
+missed broadcasts, partial rosters, and inconsistent ACK tracking.
+
+### 4. Nginx Configuration Example
 
 ```nginx
 # Add to your nginx config for WebSocket support
@@ -82,7 +99,7 @@ location /ws/ {
 }
 ```
 
-### 4. Testing Production WebSockets
+### 5. Testing Production WebSockets
 
 ```javascript
 // Test WebSocket connection in browser console

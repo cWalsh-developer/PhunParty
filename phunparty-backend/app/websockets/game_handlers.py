@@ -1,4 +1,4 @@
-"""
+﻿"""
 Game event handlers for different game types
 Handles the business logic for different game modes
 """
@@ -14,6 +14,7 @@ from app.database.dbCRUD import (
     get_player_by_ID,
 )
 from app.websockets.manager import SessionPhase, manager
+from app.websockets.scheduler import start_countdown
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +41,14 @@ class GameEventHandler:
         """Broadcast question to all clients with different formats"""
         # Reset all players' answered status for the new question
         manager.reset_all_players_answered(self.session_code)
+        start_at = datetime.utcnow().isoformat() + "Z"
         phase_state = manager.set_session_phase(
             self.session_code,
             SessionPhase.QUESTION,
+            start_at=start_at,
             current_question_id=question_data.get("question_id"),
         )
+        question_data["start_at"] = start_at
         question_data["phase"] = phase_state["phase"]
         question_data["server_time_ms"] = phase_state["server_time_ms"]
 
@@ -180,38 +184,28 @@ class TriviaGameHandler(GameEventHandler):
 
             if action == "next_question":
                 logger.info(
-                    f"Advancing to next question for session {self.session_code}"
+                    f"Scheduling next question countdown for session {self.session_code}"
                 )
-                # Get the new question details and broadcast with options
                 from app.logic.game_logic import get_game_session_state
 
                 game_state = get_game_session_state(db, self.session_code)
                 if game_state and game_state.current_question_id:
-                    logger.info(
-                        f"Broadcasting new question {game_state.current_question_id} with options"
-                    )
-                    await self.broadcast_question_with_options(
-                        game_state.current_question_id, db
+                    manager.clear_question_queue(self.session_code)
+                    await start_countdown(
+                        self.session_code,
+                        reason="auto_advance",
+                        current_question_id=game_state.current_question_id,
+                        current_question_index=game_state.current_question_index,
+                        total_questions=game_state.total_questions,
                     )
                 else:
                     logger.warning(
-                        "No current question ID found, using fallback method"
+                        "No current question ID found after auto-advance"
                     )
-                    # Fallback to old method if no current question ID
-                    from app.database.dbCRUD import get_current_question_details
-
-                    current_question = get_current_question_details(
-                        db, self.session_code
-                    )
-                    if current_question:
-                        logger.info(f"📝 Broadcasting question via fallback method")
-                        await self.broadcast_question(current_question)
-                    else:
-                        logger.error("No current question found via fallback method")
 
             # If game ended, broadcast game end
             elif action == "game_ended":
-                logger.info(f"🏁 Game ended for session {self.session_code}")
+                logger.info(f"ðŸ Game ended for session {self.session_code}")
                 await manager.broadcast_to_session(
                     self.session_code,
                     {

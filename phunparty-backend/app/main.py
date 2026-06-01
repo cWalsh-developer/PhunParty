@@ -1,3 +1,6 @@
+import logging
+import os
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from app.config import Base, engine
@@ -21,6 +24,8 @@ from app.routes import (
     scores,
 )
 from app.websockets import routes as websocket_routes
+
+logger = logging.getLogger(__name__)
 
 
 """PhunParty Backend API main application module.
@@ -129,6 +134,29 @@ try:
     Base.metadata.create_all(bind=engine)
 except Exception as e:
     print(f"Warning: Could not create database tables: {e}")
+
+
+@app.on_event("startup")
+async def warn_about_websocket_process_state():
+    """Warn when deployment hints suggest multiple in-memory WebSocket managers."""
+    worker_hints = " ".join(
+        [
+            os.getenv("WEB_CONCURRENCY", ""),
+            os.getenv("GUNICORN_CMD_ARGS", ""),
+        ]
+    )
+    if (
+        "--workers 1" in worker_hints
+        or "--workers=1" in worker_hints
+        or "-w 1" in worker_hints
+        or worker_hints.strip() == "1"
+    ):
+        return
+
+    logger.warning(
+        "WebSocket session, phase, ACK, and roster state is in process memory. "
+        "Run this backend with one worker until that state moves to Redis/pub-sub."
+    )
 
 
 @app.get("/")
