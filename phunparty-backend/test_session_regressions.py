@@ -45,7 +45,7 @@ sys.modules.setdefault("passlib.context", passlib_context_module)
 from app.database import dbCRUD
 from app.logic import game_logic
 from app.schemas.game_state_models import GameSessionState
-from app.websockets import routes, scheduler
+from app.websockets import game_lifecycle, routes, scheduler
 from app.websockets.manager import SessionPhase
 
 sqlalchemy.create_engine = _real_create_engine
@@ -238,3 +238,42 @@ def test_reveal_current_question_skips_same_question_duplicate():
     assert result is False
     mock_manager.set_session_phase.assert_not_called()
     mock_manager.broadcast_to_session.assert_not_awaited()
+
+
+def test_countdown_duration_is_server_owned():
+    assert scheduler.normalize_countdown_duration_ms(24000, "SESSION123") == 3000
+    assert scheduler.normalize_countdown_duration_ms("24000", "SESSION123") == 3000
+    assert scheduler.normalize_countdown_duration_ms(None, "SESSION123") == 3000
+
+
+def test_game_lifecycle_broadcasts_final_scores_for_already_ended_session():
+    ended_at = datetime(2026, 6, 1, 12, 0, 0)
+    game_state = SimpleNamespace(ended_at=ended_at)
+    final_scores = [{"player_id": "P1", "player_name": "Player", "score": 2}]
+    mock_db = MagicMock()
+    mock_db.query.return_value.filter.return_value.first.return_value = game_state
+
+    with patch.object(
+        game_lifecycle, "update_game_session_ended", return_value=False
+    ):
+        with patch.object(
+            game_lifecycle, "get_final_scores", return_value=final_scores
+        ):
+            with patch.object(game_lifecycle, "manager") as mock_manager:
+                mock_manager.set_session_phase.return_value = {
+                    "phase": "ended",
+                    "phase_started_at": "2026-06-01T12:00:00",
+                    "server_time_ms": 123,
+                }
+                mock_manager.broadcast_to_session = AsyncMock()
+
+                result = asyncio.run(
+                    game_lifecycle.handle_game_end("SESSION123", mock_db)
+                )
+
+    assert result is True
+    mock_manager.clear_question_queue.assert_called_once_with("SESSION123")
+    mock_manager.broadcast_to_session.assert_awaited_once()
+    message = mock_manager.broadcast_to_session.await_args.args[1]
+    assert message["type"] == "game_ended"
+    assert message["data"]["final_scores"] == final_scores

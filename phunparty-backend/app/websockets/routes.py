@@ -25,6 +25,7 @@ from app.database.dbCRUD import (
 )
 from app.dependencies import get_db
 from app.websockets.game_handlers import create_game_handler
+from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.manager import SessionPhase, manager
 from app.websockets.scheduler import (
     COUNTDOWN_DURATION_MS,
@@ -496,10 +497,13 @@ async def handle_websocket_message(
         await handle_game_start(session_code, game_handler, db)
 
     elif message_type == "intro_complete" and client_type == "web":
-        countdown_duration_ms = int(
+        countdown_duration_ms = (
             data.get("duration_ms", COUNTDOWN_DURATION_MS)
             if data
             else COUNTDOWN_DURATION_MS
+        )
+        logger.info(
+            f"Starting countdown for {session_code}: reason=intro_complete duration_ms={countdown_duration_ms} data={data}"
         )
         game_state = get_game_session_state(db, session_code)
         await start_countdown(
@@ -528,10 +532,13 @@ async def handle_websocket_message(
             critical=True,
             require_ack=True,
         )
-        countdown_duration_ms = int(
+        countdown_duration_ms = (
             data.get("duration_ms", COUNTDOWN_DURATION_MS)
             if data
             else COUNTDOWN_DURATION_MS
+        )
+        logger.info(
+            f"Starting countdown for {session_code}: reason=skip_intro duration_ms={countdown_duration_ms} data={data}"
         )
         game_state = get_game_session_state(db, session_code)
         await start_countdown(
@@ -915,60 +922,6 @@ async def handle_next_question(session_code: str, game_handler, db: Session):
 
     except Exception as e:
         logger.error(f"Error advancing to next question: {e}")
-
-
-async def handle_game_end(session_code: str, db: Session):
-    """Handle game end event"""
-    try:
-        from app.database.dbCRUD import (
-            update_game_session_ended,
-            get_final_scores,
-        )
-
-        # Update game state in database and calculate final results
-        success = update_game_session_ended(db, session_code)
-        if not success:
-            logger.error(f"Failed to end game session {session_code}")
-            return
-
-        # Get final scores ranked by score
-        final_scores = get_final_scores(db, session_code)
-
-        # Get current time for ended_at
-        ended_at = datetime.now().isoformat()
-        phase_state = manager.set_session_phase(
-            session_code,
-            SessionPhase.ENDED,
-            ended_at=ended_at,
-        )
-        manager.clear_question_queue(session_code)
-
-        logger.info(
-            f"ðŸ Game ended for session {session_code} with {len(final_scores)} players"
-        )
-
-        # Broadcast game ended to all clients
-        await manager.broadcast_to_session(
-            session_code,
-            {
-                "type": "game_ended",
-                "data": {
-                    "session_code": session_code,
-                    "ended_at": ended_at,
-                    "phase": phase_state["phase"],
-                    "phase_started_at": phase_state["phase_started_at"],
-                    "server_time_ms": phase_state["server_time_ms"],
-                    "final_scores": final_scores,
-                },
-            },
-            critical=True,
-            require_ack=True,
-        )
-
-        logger.info(f"âœ… Game end broadcast complete for session {session_code}")
-
-    except Exception as e:
-        logger.error(f"Error ending game: {e}", exc_info=True)
 
 
 # REST endpoints for WebSocket management

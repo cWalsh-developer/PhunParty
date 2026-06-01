@@ -13,6 +13,7 @@ from app.database.dbCRUD import (
     get_current_question_details,
     get_player_by_ID,
 )
+from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.manager import SessionPhase, manager
 from app.websockets.scheduler import (
     NEXT_QUESTION_REVEAL_DELAY_MS,
@@ -210,14 +211,8 @@ class TriviaGameHandler(GameEventHandler):
 
             # If game ended, broadcast game end
             elif action == "game_ended":
-                logger.info(f"ðŸ Game ended for session {self.session_code}")
-                await manager.broadcast_to_session(
-                    self.session_code,
-                    {
-                        "type": "game_ended",
-                        "data": result.get("game_state", {}),
-                    },
-                )
+                logger.info(f"Game ended for session {self.session_code}")
+                await handle_game_end(self.session_code, db)
             elif action is None:
                 logger.info(
                     f" No action needed - waiting for more players or other conditions"

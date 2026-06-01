@@ -22,6 +22,27 @@ def iso_utc(dt: datetime) -> str:
     return dt.isoformat() + "Z"
 
 
+def normalize_countdown_duration_ms(
+    duration_ms: Optional[int], session_code: str = "", reason: str = ""
+) -> int:
+    """Keep countdown timing server-owned even if a client sends bad duration data."""
+    try:
+        parsed_duration_ms = int(duration_ms) if duration_ms is not None else None
+    except (TypeError, ValueError):
+        parsed_duration_ms = None
+
+    if parsed_duration_ms != COUNTDOWN_DURATION_MS:
+        logger.warning(
+            "Ignoring client countdown duration for session %s reason=%s: %s; using %sms",
+            session_code,
+            reason,
+            duration_ms,
+            COUNTDOWN_DURATION_MS,
+        )
+
+    return COUNTDOWN_DURATION_MS
+
+
 async def reveal_current_question(
     session_code: str, db: Session, start_at_iso: str
 ) -> bool:
@@ -103,7 +124,7 @@ async def scheduled_question_reveal(session_code: str, question_start_at: dateti
 
 async def start_countdown(
     session_code: str,
-    duration_ms: int = COUNTDOWN_DURATION_MS,
+    duration_ms: Optional[int] = COUNTDOWN_DURATION_MS,
     delay_ms: int = 250,
     reason: str = "intro_complete",
     current_question_id: Optional[str] = None,
@@ -111,6 +132,7 @@ async def start_countdown(
     total_questions: Optional[int] = None,
 ):
     """Enter COUNTDOWN and schedule the authoritative QUESTION transition."""
+    duration_ms = normalize_countdown_duration_ms(duration_ms, session_code, reason)
     countdown_start = datetime.utcnow() + timedelta(milliseconds=delay_ms)
     question_start_at = countdown_start + timedelta(milliseconds=duration_ms)
     countdown_start_iso = iso_utc(countdown_start)
