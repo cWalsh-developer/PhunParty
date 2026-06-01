@@ -327,7 +327,7 @@ class BuzzerGameHandler(GameEventHandler):
         )
 
         # Update mobile UI - winner can now answer, others wait
-        await self.update_mobile_buzzer_ui()
+        await self.update_mobile_buzzer_ui(db)
 
     async def handle_player_answer(
         self, player_id: str, answer: str, question_id: str, db: Session
@@ -437,7 +437,7 @@ class BuzzerGameHandler(GameEventHandler):
                 )
                 return
 
-            await self.update_mobile_buzzer_ui()
+            await self.update_mobile_buzzer_ui(db)
 
     async def start_question(self, question_data: Dict[str, Any]):
         """Start a new buzzer question"""
@@ -448,9 +448,21 @@ class BuzzerGameHandler(GameEventHandler):
         await self.broadcast_question(question_data)
         await self.update_mobile_buzzer_ui()
 
-    async def update_mobile_buzzer_ui(self):
+    async def update_mobile_buzzer_ui(self, db: Session = None):
         """Update mobile UI based on current buzzer state"""
         mobile_connections = manager.get_session_connections(self.session_code)
+        state = self.buzzer_state
+        current_question = None
+        if db and state.get("current_buzzer_winner"):
+            question_status = get_current_question_details(db, self.session_code)
+            current_question = (
+                question_status.get("current_question") if question_status else None
+            )
+
+        winner_name = None
+        if db and state.get("current_buzzer_winner"):
+            winner = get_player_by_ID(db, state["current_buzzer_winner"])
+            winner_name = winner.player_name if winner else "the current player"
 
         for connection_id, connection_info in mobile_connections.items():
             if connection_info.get("client_type") != "mobile":
@@ -458,31 +470,64 @@ class BuzzerGameHandler(GameEventHandler):
 
             player_id = connection_info.get("player_id")
 
-            ui_state = {"game_type": "buzzer", "ui_mode": "buzzer"}
-            state = self.buzzer_state
+            ui_state = {
+                "game_type": "buzzer",
+                "ui_mode": "buzzer",
+                "is_current_player": False,
+            }
 
             if player_id in state["frozen_players"]:
                 ui_state["button_state"] = "frozen"
+                ui_state["is_current_player"] = False
                 ui_state["message"] = "You're frozen out this round!"
             elif state["current_buzzer_winner"] == player_id:
+                answer_payload = self.format_buzzer_answer_payload(current_question)
+                ui_state.update(answer_payload)
                 ui_state["button_state"] = "answer_mode"
-                ui_state["message"] = "You buzzed in! Enter your answer:"
-                ui_state["ui_mode"] = "text_input"
+                ui_state["is_current_player"] = True
+                ui_state["message"] = answer_payload.get(
+                    "message", "You buzzed first. Choose your answer."
+                )
             elif state["current_buzzer_winner"]:
                 ui_state["button_state"] = "waiting"
+                ui_state["is_current_player"] = False
+                ui_state["current_buzzer_winner"] = state["current_buzzer_winner"]
                 ui_state["message"] = (
-                    f"Waiting for {state['current_buzzer_winner']} to answer..."
+                    f"Waiting for {winner_name or 'the current player'} to answer..."
                 )
             elif not state["question_active"]:
                 ui_state["button_state"] = "waiting"
+                ui_state["is_current_player"] = False
                 ui_state["message"] = "Waiting for the next question..."
             else:
                 ui_state["button_state"] = "active"
+                ui_state["is_current_player"] = False
                 ui_state["message"] = "Press to buzz in!"
 
             await manager.send_personal_message(
                 {"type": "ui_update", "data": ui_state}, connection_info["websocket"]
             )
+
+    def format_buzzer_answer_payload(self, question_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Build answer-mode data for the buzzer winner only."""
+        question_data = question_data or {}
+        options = question_data.get("display_options") or question_data.get("options") or []
+        ui_mode = "multiple_choice" if options else "text_input"
+
+        return {
+            "ui_mode": ui_mode,
+            "question_id": question_data.get("question_id"),
+            "question": question_data.get("question"),
+            "genre": question_data.get("genre"),
+            "difficulty": question_data.get("difficulty"),
+            "display_options": options,
+            "options": options,
+            "message": (
+                "You buzzed first. Choose your answer."
+                if options
+                else "You buzzed first. Enter your answer."
+            ),
+        }
 
     async def reveal_current_db_question(self, db: Session, reason: str) -> bool:
         """Reveal the DB's current question after answer logic has already advanced it."""

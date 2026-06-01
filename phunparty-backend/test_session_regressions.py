@@ -45,7 +45,7 @@ sys.modules.setdefault("passlib.context", passlib_context_module)
 from app.database import dbCRUD
 from app.logic import game_logic
 from app.schemas.game_state_models import GameSessionState
-from app.websockets import game_lifecycle, game_modes, routes, scheduler
+from app.websockets import game_handlers, game_lifecycle, game_modes, routes, scheduler
 from app.websockets.manager import SessionPhase, manager
 
 sqlalchemy.create_engine = _real_create_engine
@@ -371,3 +371,65 @@ def test_mobile_initial_state_sends_queued_question_during_question_phase():
         {"type": "question_started", "data": queued_question},
         websocket,
     )
+
+
+def test_buzzer_ui_update_sends_answer_data_only_to_winner():
+    winner_ws = MagicMock()
+    waiting_ws = MagicMock()
+    question = {
+        "question_id": "Q1",
+        "question": "Pick one",
+        "genre": "Trivia",
+        "difficulty": "easy",
+        "display_options": ["A", "B", "C", "D"],
+    }
+
+    handler = game_handlers.BuzzerGameHandler("SESSION123")
+
+    with patch.object(game_handlers, "manager") as mock_manager:
+        mock_manager.get_buzzer_state.return_value = {
+            "current_buzzer_winner": "P1",
+            "frozen_players": set(),
+            "question_active": True,
+            "current_question_id": "Q1",
+            "attempts": [],
+        }
+        mock_manager.get_session_connections.return_value = {
+            "ws1": {
+                "client_type": "mobile",
+                "player_id": "P1",
+                "websocket": winner_ws,
+            },
+            "ws2": {
+                "client_type": "mobile",
+                "player_id": "P2",
+                "websocket": waiting_ws,
+            },
+        }
+        mock_manager.send_personal_message = AsyncMock()
+
+        with patch.object(
+            game_handlers,
+            "get_current_question_details",
+            return_value={"current_question": question},
+        ):
+            with patch.object(
+                game_handlers,
+                "get_player_by_ID",
+                return_value=SimpleNamespace(player_name="Winner"),
+            ):
+                asyncio.run(handler.update_mobile_buzzer_ui(MagicMock()))
+
+    sent_messages = [
+        call.args[0]["data"]
+        for call in mock_manager.send_personal_message.await_args_list
+    ]
+    winner_message = next(data for data in sent_messages if data["button_state"] == "answer_mode")
+    waiting_message = next(data for data in sent_messages if data["button_state"] == "waiting")
+
+    assert winner_message["is_current_player"] is True
+    assert winner_message["ui_mode"] == "multiple_choice"
+    assert winner_message["question_id"] == "Q1"
+    assert winner_message["display_options"] == ["A", "B", "C", "D"]
+    assert waiting_message["is_current_player"] is False
+    assert waiting_message["current_buzzer_winner"] == "P1"
