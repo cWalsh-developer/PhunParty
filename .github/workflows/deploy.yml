@@ -19,7 +19,7 @@ jobs:
                   script_stop: true
                   script: |
                       set -euo pipefail
-                      TARGET_DIR=/home/jay/apps/phun-api/PhunParty
+                      TARGET_DIR=/home/connor/apps/phun-api/PhunParty
                       BRANCH=main
 
                       # Ensure repo present and up-to-date
