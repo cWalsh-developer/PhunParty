@@ -383,7 +383,7 @@ async def send_initial_session_state(
         }
 
         # Include current question for web clients only.
-        # Mobile clients must stay synchronized with countdown_complete -> question_started.
+        # Mobile clients must stay synchronized with scheduled question_started.
         if (
             client_type == "web"
             and game_state
@@ -516,8 +516,8 @@ async def handle_websocket_message(
                 f"âš ï¸ No queued question available for session {session_code}"
             )
             # No DB fallback here by design.
-            # Releasing question to mobile should happen only via synchronized
-            # countdown_complete -> question_started flow or queued recovery.
+            # Releasing question to mobile should happen only via the server
+            # countdown scheduler or queued recovery.
 
     elif message_type == "leave_game" and client_type == "mobile":
         if not player_id:
@@ -525,7 +525,9 @@ async def handle_websocket_message(
 
         connections = manager.get_player_connections(session_code, player_id)
         player_name = manager.get_player_name_from_websocket(websocket)
-        manager.intentional_leaves.add(manager._player_task_key(session_code, player_id))
+        manager.intentional_leaves.add(
+            manager._player_task_key(session_code, player_id)
+        )
         manager.disconnect_player_by_id(session_code, player_id)
 
         await manager.broadcast_to_session(
@@ -588,10 +590,18 @@ async def handle_websocket_message(
             if data
             else COUNTDOWN_DURATION_MS
         )
+        game_state = get_game_session_state(db, session_code)
         await start_countdown(
             session_code,
             duration_ms=countdown_duration_ms,
             reason="intro_complete",
+            current_question_id=(
+                game_state.current_question_id if game_state else None
+            ),
+            current_question_index=(
+                game_state.current_question_index if game_state else None
+            ),
+            total_questions=(game_state.total_questions if game_state else None),
         )
 
     elif message_type == "skip_intro" and client_type == "web":
@@ -612,10 +622,18 @@ async def handle_websocket_message(
             if data
             else COUNTDOWN_DURATION_MS
         )
+        game_state = get_game_session_state(db, session_code)
         await start_countdown(
             session_code,
             duration_ms=countdown_duration_ms,
             reason="skip_intro",
+            current_question_id=(
+                game_state.current_question_id if game_state else None
+            ),
+            current_question_index=(
+                game_state.current_question_index if game_state else None
+            ),
+            total_questions=(game_state.total_questions if game_state else None),
         )
 
     elif message_type == "countdown_complete" and client_type == "web":
@@ -653,7 +671,7 @@ async def handle_websocket_message(
             )
 
     elif message_type == "broadcast_current_question" and client_type == "web":
-        # Host wants to broadcast current question to all players
+        # Legacy host command: route through synchronized countdown.
         await handle_broadcast_current_question(session_code, db)
 
     else:
@@ -685,11 +703,12 @@ async def handle_get_question_with_options(
 
 async def handle_broadcast_current_question(session_code: str, db: Session):
     """
-    Handle request to broadcast the current question to all players
+    Handle legacy request to reveal the current question.
+
+    This intentionally uses the synchronized countdown path instead of directly
+    broadcasting question_started.
     """
     try:
-        from app.logic.game_logic import broadcast_question_with_options
-
         # Get current game state
         game_state = get_game_session_state(db, session_code)
         if not game_state:
@@ -700,9 +719,13 @@ async def handle_broadcast_current_question(session_code: str, db: Session):
             logger.error(f"No current question for session {session_code}")
             return
 
-        # Broadcast the current question with options
-        await broadcast_question_with_options(
-            session_code, game_state.current_question_id, db
+        manager.clear_question_queue(session_code)
+        await start_countdown(
+            session_code,
+            reason="broadcast_current_question",
+            current_question_id=game_state.current_question_id,
+            current_question_index=game_state.current_question_index,
+            total_questions=game_state.total_questions,
         )
 
     except Exception as e:
