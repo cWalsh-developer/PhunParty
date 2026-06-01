@@ -8,7 +8,7 @@ import json
 import logging
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -31,6 +31,8 @@ class ConnectionManager:
     HEARTBEAT_CHECK_INTERVAL_SECONDS = 10
     HEARTBEAT_STALE_SECONDS = 90
     MOBILE_HEARTBEAT_STALE_SECONDS = 300
+    HEARTBEAT_UNSTABLE_SECONDS = 20
+    HEARTBEAT_DISCONNECTED_SECONDS = 60
     PING_INTERVAL_SECONDS = 10
     MOBILE_DISCONNECT_GRACE_SECONDS = 180
     ACK_RETRY_DELAY_SECONDS = 1.5
@@ -57,6 +59,8 @@ class ConnectionManager:
         self.session_phase_state: Dict[str, Dict[str, Any]] = {}
         # event_id -> delivery/ack state for critical phase messages.
         self.pending_acks: Dict[str, Dict[str, Any]] = {}
+        # session_code:player_id values for players who explicitly left.
+        self.intentional_leaves: Set[str] = set()
         # player leave tasks: "session_code:player_id" -> asyncio.Task
         # Used to avoid flapping presence when mobile networks briefly disconnect.
         self.pending_player_leave_tasks: Dict[str, asyncio.Task] = {}
@@ -158,6 +162,29 @@ class ConnectionManager:
 
     def _utc_now_iso(self) -> str:
         return datetime.utcnow().isoformat() + "Z"
+
+    def make_event_id(
+        self, session_code: str, event_type: str, data: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Build a deterministic event id so clients can safely ignore duplicates."""
+        data = data or {}
+        question_id = data.get("question_id") or data.get("current_question_id")
+        question_index = data.get("current_question_index")
+        start_at = data.get("start_at") or data.get("question_start_at")
+        phase_started_at_ms = data.get("phase_started_at_ms")
+
+        parts = [session_code, event_type]
+        if question_id:
+            parts.append(str(question_id))
+        elif question_index is not None:
+            parts.append(f"q{question_index}")
+
+        if start_at:
+            parts.append(str(start_at))
+        elif phase_started_at_ms:
+            parts.append(str(phase_started_at_ms))
+
+        return ":".join(parts)
 
     def set_session_phase(
         self, session_code: str, phase: Union[SessionPhase, str], **updates: Any
@@ -363,6 +390,9 @@ class ConnectionManager:
 
         reconnecting_mobile_player = False
         if client_type == "mobile" and player_id:
+            self.intentional_leaves.discard(
+                self._player_task_key(session_code, player_id)
+            )
             reconnecting_mobile_player = self._is_player_leave_pending(
                 session_code, player_id
             )
@@ -382,6 +412,7 @@ class ConnectionManager:
             "player_name": player_name,
             "player_photo": player_photo,
             "player_answered": False,
+            "connection_state": "connected",
             "last_heartbeat": datetime.now(),
             "ws_id": ws_id,
             "is_ready": False,  # Track if client acknowledged connection
@@ -523,6 +554,10 @@ class ConnectionManager:
                 client_info
                 and client_info.get("client_type") == "mobile"
                 and client_info.get("player_id")
+                and self._player_task_key(
+                    session_code, client_info.get("player_id")
+                )
+                not in self.intentional_leaves
             ):
                 self._schedule_mobile_leave(session_code, client_info)
 
@@ -583,7 +618,12 @@ class ConnectionManager:
         message_with_timestamp = {**message, "timestamp": datetime.now().timestamp()}
 
         # Add message ID for tracking
-        message_id = message.get("message_id") or f"{message.get('type')}_{datetime.now().timestamp()}"
+        data = message.get("data", {})
+        message_id = message.get("message_id") or self.make_event_id(
+            session_code,
+            message.get("type", "event"),
+            data if isinstance(data, dict) else {},
+        )
         message_with_timestamp["message_id"] = message_id
         should_require_ack = require_ack or message.get("type") in self.ACK_EVENT_TYPES
         if should_require_ack:
@@ -749,6 +789,9 @@ class ConnectionManager:
                 "player_photo": connection_info.get("player_photo"),
                 "connected_at": connection_info.get("connected_at"),
                 "player_answered": connection_info.get("player_answered", None),
+                "connection_state": connection_info.get(
+                    "connection_state", "connected"
+                ),
             }
 
             if player_id:
@@ -1042,6 +1085,9 @@ class ConnectionManager:
                     self.active_connections[session_code][ws_id][
                         "last_heartbeat"
                     ] = datetime.now()
+                    self.active_connections[session_code][ws_id][
+                        "connection_state"
+                    ] = "connected"
                 break
 
     def mark_client_ready(self, websocket: WebSocket):
@@ -1130,6 +1176,16 @@ class ConnectionManager:
                                 seconds_since_heartbeat = (
                                     now - last_heartbeat
                                 ).total_seconds()
+                                if (
+                                    seconds_since_heartbeat
+                                    > self.HEARTBEAT_DISCONNECTED_SECONDS
+                                ):
+                                    conn_info["connection_state"] = "disconnected"
+                                elif (
+                                    seconds_since_heartbeat
+                                    > self.HEARTBEAT_UNSTABLE_SECONDS
+                                ):
+                                    conn_info["connection_state"] = "unstable"
 
                                 if seconds_since_heartbeat > stale_threshold:
                                     player_name = conn_info.get(
