@@ -26,6 +26,7 @@ from app.database.dbCRUD import (
 from app.dependencies import get_db
 from app.websockets.game_handlers import create_game_handler
 from app.websockets.game_lifecycle import handle_game_end
+from app.websockets.game_modes import resolve_session_game_type
 from app.websockets.manager import SessionPhase, manager
 from app.websockets.scheduler import (
     COUNTDOWN_DURATION_MS,
@@ -39,12 +40,12 @@ router = APIRouter()
 INTRO_RECOVERY_WINDOW_SECONDS = 15
 
 
-def serialize_game_state(game_state_obj) -> Optional[dict]:
+def serialize_game_state(game_state_obj, game_type: Optional[str] = None) -> Optional[dict]:
     """Convert DB game state to a WebSocket-safe dict."""
     if not game_state_obj:
         return None
 
-    return {
+    serialized = {
         "session_code": game_state_obj.session_code,
         "current_question_index": game_state_obj.current_question_index,
         "current_question_id": game_state_obj.current_question_id,
@@ -62,12 +63,18 @@ def serialize_game_state(game_state_obj) -> Optional[dict]:
             game_state_obj.ended_at.isoformat() if game_state_obj.ended_at else None
         ),
     }
+    if game_type:
+        serialized["game_type"] = game_type
+    return serialized
 
 
-def build_sync_state(session_code: str, db: Session) -> dict:
+def build_sync_state(
+    session_code: str, db: Session, game_type: Optional[str] = None
+) -> dict:
     """Build authoritative state for initial load and reconnect recovery."""
     game_state_obj = get_game_session_state(db, session_code)
-    game_state = serialize_game_state(game_state_obj)
+    game_type = game_type or resolve_session_game_type(db, session_code)
+    game_state = serialize_game_state(game_state_obj, game_type)
     sync_state = manager.get_session_sync_state(session_code)
 
     if game_state:
@@ -116,6 +123,7 @@ def build_sync_state(session_code: str, db: Session) -> dict:
             sync_state.update(phase_state)
 
     sync_state["game_state"] = game_state
+    sync_state["game_type"] = game_type
     sync_state["connected_players"] = manager.get_mobile_players(session_code)
     sync_state["current_question"] = manager.get_current_question(session_code)
     return sync_state
@@ -132,6 +140,9 @@ async def websocket_endpoint(
     ),
     player_photo: Optional[str] = Query(
         None, description="Player photo URL for mobile clients"
+    ),
+    game_type: Optional[str] = Query(
+        None, description="Optional game mode override, e.g. 'trivia' or 'buzzer'"
     ),
 ):
     """
@@ -223,14 +234,23 @@ async def websocket_endpoint(
             f"ðŸ“Š Connection stats - Session: {session_connections}, Total: {total_connections}"
         )
 
-        # Send initial session state to the connecting client
-        await send_initial_session_state(websocket, session_code, client_type, db)
-
-        # Get game type for this session (you'll need to add this to your session model)
-        game_type = (
-            "trivia"  # Default - you can get this from session.game_type or similar
+        resolved_game_type = resolve_session_game_type(
+            db, session_code, session=session, requested_game_type=game_type
         )
-        game_handler = create_game_handler(session_code, game_type)
+
+        # Send initial session state to the connecting client
+        await send_initial_session_state(
+            websocket,
+            session_code,
+            client_type,
+            db,
+            game_type=resolved_game_type,
+        )
+
+        game_handler = create_game_handler(session_code, resolved_game_type)
+        logger.info(
+            f"Created {resolved_game_type} game handler for session {session_code}"
+        )
 
         # Message handling loop
         while True:
@@ -269,7 +289,11 @@ async def websocket_endpoint(
 
 
 async def send_initial_session_state(
-    websocket: WebSocket, session_code: str, client_type: str, db: Session
+    websocket: WebSocket,
+    session_code: str,
+    client_type: str,
+    db: Session,
+    game_type: Optional[str] = None,
 ):
     """Send initial state when client connects"""
     try:
@@ -278,8 +302,9 @@ async def send_initial_session_state(
 
         # Get current game state and convert to dict for JSON serialization
         game_state_obj = get_game_session_state(db, session_code)
-        game_state = serialize_game_state(game_state_obj)
-        authoritative_state = build_sync_state(session_code, db)
+        game_type = game_type or resolve_session_game_type(db, session_code)
+        game_state = serialize_game_state(game_state_obj, game_type)
+        authoritative_state = build_sync_state(session_code, db, game_type)
 
         initial_state = {
             "type": "initial_state",
@@ -287,6 +312,7 @@ async def send_initial_session_state(
                 "session_code": session_code,
                 "client_type": client_type,
                 "connection_stats": session_stats,
+                "game_type": game_type,
                 "game_state": game_state,
                 "connected_players": manager.get_mobile_players(session_code),
                 "authoritative_state": authoritative_state,
@@ -317,6 +343,22 @@ async def send_initial_session_state(
             )
 
         await manager.send_personal_message(initial_state, websocket)
+
+        if client_type == "mobile":
+            authoritative_phase = authoritative_state.get("phase")
+            queued_question = manager.get_current_question(session_code)
+            if authoritative_phase == SessionPhase.QUESTION.value and queued_question:
+                logger.info(
+                    f"Sending queued current question to reconnecting mobile in session {session_code}"
+                )
+                await manager.send_personal_critical_message(
+                    session_code,
+                    {
+                        "type": "question_started",
+                        "data": queued_question,
+                    },
+                    websocket,
+                )
 
         # For web clients, send an immediate follow-up roster update after initial state
         # This ensures the web UI has the most current roster in case players joined

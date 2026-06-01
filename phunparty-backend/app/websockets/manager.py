@@ -59,6 +59,8 @@ class ConnectionManager:
         # session_code -> shared buzzer state. Handlers are per-connection, so
         # buzzer state must live at session scope.
         self.buzzer_states: Dict[str, Dict[str, Any]] = {}
+        # session_code -> resolved game mode, shared across scheduler/handlers.
+        self.session_game_types: Dict[str, str] = {}
         # event_id -> delivery/ack state for critical phase messages.
         self.pending_acks: Dict[str, Dict[str, Any]] = {}
         # session_code:player_id values for players who explicitly left.
@@ -1390,6 +1392,15 @@ class ConnectionManager:
             "attempts": [],
         }
         logger.info(f"Reset buzzer state for session {session_code}")
+
+    def set_session_game_type(self, session_code: str, game_type: str):
+        """Store the resolved game type for scheduler and reconnect paths."""
+        self.session_game_types[session_code] = game_type
+        logger.info(f"Session {session_code} game type set to {game_type}")
+
+    def get_session_game_type(self, session_code: str) -> Optional[str]:
+        """Return the resolved game type for a session if known."""
+        return self.session_game_types.get(session_code)
 
 
 # Global connection manager instance

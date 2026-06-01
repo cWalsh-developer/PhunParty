@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.database.dbCRUD import advance_to_next_question, get_current_question_details
 from app.dependencies import get_db
+from app.websockets.game_modes import BUZZER_GAME_TYPE, resolve_session_game_type
 from app.websockets.manager import SessionPhase, manager
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,22 @@ def normalize_countdown_duration_ms(
         )
 
     return COUNTDOWN_DURATION_MS
+
+
+def format_buzzer_question_for_mobile(question_data: dict) -> dict:
+    """Return the mobile buzzer UI payload for a revealed question."""
+    return {
+        "game_type": BUZZER_GAME_TYPE,
+        "question_id": question_data.get("question_id"),
+        "start_at": question_data.get("start_at"),
+        "expires_at": question_data.get("expires_at"),
+        "duration_ms": question_data.get("duration_ms"),
+        "phase": question_data.get("phase"),
+        "server_time_ms": question_data.get("server_time_ms"),
+        "ui_mode": "buzzer",
+        "button_state": "active",
+        "message": "Press to buzz in!",
+    }
 
 
 async def advance_or_end_current_question(
@@ -91,6 +108,7 @@ async def reveal_current_question(
         return False
 
     question_data = game_status["current_question"]
+    game_type = resolve_session_game_type(db, session_code)
     question_id = question_data.get("question_id")
     phase_state = manager.get_session_phase_state(session_code)
     if (
@@ -128,19 +146,45 @@ async def reveal_current_question(
     )
     question_data["phase"] = phase_state["phase"]
     question_data["server_time_ms"] = phase_state["server_time_ms"]
+    question_data["game_type"] = game_type
 
     manager.reset_all_players_answered(session_code)
-    manager.start_buzzer_question(session_code, question_id)
-    manager.queue_question(session_code, question_data)
-    await manager.broadcast_to_session(
-        session_code,
-        {
-            "type": "question_started",
-            "data": question_data,
-        },
-        critical=True,
-        require_ack=True,
-    )
+    if game_type == BUZZER_GAME_TYPE:
+        manager.start_buzzer_question(session_code, question_id)
+        mobile_question_data = format_buzzer_question_for_mobile(question_data)
+        manager.queue_question(session_code, mobile_question_data)
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "question_started",
+                "data": question_data,
+            },
+            only_client_types=["web"],
+            critical=True,
+            require_ack=True,
+        )
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "question_started",
+                "data": mobile_question_data,
+            },
+            only_client_types=["mobile"],
+            critical=True,
+            require_ack=True,
+        )
+    else:
+        manager.reset_buzzer_state(session_code)
+        manager.queue_question(session_code, question_data)
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "question_started",
+                "data": question_data,
+            },
+            critical=True,
+            require_ack=True,
+        )
     logger.info(
         f"Question {question_data.get('question_id')} scheduled for session {session_code} at {start_at_iso}"
     )

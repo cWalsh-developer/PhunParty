@@ -45,7 +45,7 @@ sys.modules.setdefault("passlib.context", passlib_context_module)
 from app.database import dbCRUD
 from app.logic import game_logic
 from app.schemas.game_state_models import GameSessionState
-from app.websockets import game_lifecycle, routes, scheduler
+from app.websockets import game_lifecycle, game_modes, routes, scheduler
 from app.websockets.manager import SessionPhase, manager
 
 sqlalchemy.create_engine = _real_create_engine
@@ -325,3 +325,49 @@ def test_advance_or_end_current_question_reveals_next_question():
 
     assert result is True
     reveal.assert_awaited_once()
+
+
+def test_resolve_session_game_type_uses_game_rules():
+    session = SimpleNamespace(game_code="GAME1")
+    game = SimpleNamespace(rules='{"game_type": "buzzer"}', genre="Trivia")
+
+    with patch.object(game_modes, "get_game_by_code", return_value=game):
+        result = game_modes.resolve_session_game_type(
+            MagicMock(), "SESSION123", session=session
+        )
+
+    assert result == "buzzer"
+
+
+def test_mobile_initial_state_sends_queued_question_during_question_phase():
+    websocket = MagicMock()
+    queued_question = {"question_id": "Q1", "game_type": "trivia"}
+
+    with patch.object(routes, "get_game_session_state", return_value=None):
+        with patch.object(routes, "resolve_session_game_type", return_value="trivia"):
+            with patch.object(
+                routes,
+                "build_sync_state",
+                return_value={"phase": "question"},
+            ):
+                with patch.object(routes, "manager") as mock_manager:
+                    mock_manager.get_session_stats.return_value = {}
+                    mock_manager.get_mobile_players.return_value = []
+                    mock_manager.get_current_question.return_value = queued_question
+                    mock_manager.send_personal_message = AsyncMock(return_value=True)
+                    mock_manager.send_personal_critical_message = AsyncMock(
+                        return_value=True
+                    )
+
+                    asyncio.run(
+                        routes.send_initial_session_state(
+                            websocket, "SESSION123", "mobile", MagicMock()
+                        )
+                    )
+
+    mock_manager.send_personal_message.assert_awaited_once()
+    mock_manager.send_personal_critical_message.assert_awaited_once_with(
+        "SESSION123",
+        {"type": "question_started", "data": queued_question},
+        websocket,
+    )
