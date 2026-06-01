@@ -50,5 +50,5 @@ jobs:
                       fi
 
                       # Restart FastAPI service
-                      sudo systemctl restart phun-api
-                      sudo systemctl is-active phun-api
+                      sudo -n systemctl restart phun-api.service
+                      sudo -n systemctl is-active phun-api.service
