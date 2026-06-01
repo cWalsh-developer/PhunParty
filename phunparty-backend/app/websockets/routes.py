@@ -25,10 +25,67 @@ from app.database.dbCRUD import (
 )
 from app.dependencies import get_db
 from app.websockets.game_handlers import create_game_handler
-from app.websockets.manager import manager
+from app.websockets.manager import SessionPhase, manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def serialize_game_state(game_state_obj) -> Optional[dict]:
+    """Convert DB game state to a WebSocket-safe dict."""
+    if not game_state_obj:
+        return None
+
+    return {
+        "session_code": game_state_obj.session_code,
+        "current_question_index": game_state_obj.current_question_index,
+        "current_question_id": game_state_obj.current_question_id,
+        "is_active": game_state_obj.is_active,
+        "is_waiting_for_players": game_state_obj.is_waiting_for_players,
+        "isstarted": game_state_obj.isstarted,
+        "total_questions": game_state_obj.total_questions,
+        "ispublic": game_state_obj.ispublic,
+        "started_at": (
+            game_state_obj.started_at.isoformat()
+            if game_state_obj.started_at
+            else None
+        ),
+        "ended_at": (
+            game_state_obj.ended_at.isoformat() if game_state_obj.ended_at else None
+        ),
+    }
+
+
+def build_sync_state(session_code: str, db: Session) -> dict:
+    """Build authoritative state for initial load and reconnect recovery."""
+    game_state_obj = get_game_session_state(db, session_code)
+    game_state = serialize_game_state(game_state_obj)
+    sync_state = manager.get_session_sync_state(session_code)
+
+    if game_state:
+        if game_state.get("ended_at") and sync_state.get("phase") != "ended":
+            phase_state = manager.set_session_phase(
+                session_code,
+                SessionPhase.ENDED,
+                current_question_id=game_state.get("current_question_id"),
+                current_question_index=game_state.get("current_question_index"),
+                total_questions=game_state.get("total_questions"),
+            )
+            sync_state.update(phase_state)
+        elif game_state.get("isstarted") and sync_state.get("phase") == "lobby":
+            phase_state = manager.set_session_phase(
+                session_code,
+                SessionPhase.INTRO_AUDIO,
+                current_question_id=game_state.get("current_question_id"),
+                current_question_index=game_state.get("current_question_index"),
+                total_questions=game_state.get("total_questions"),
+            )
+            sync_state.update(phase_state)
+
+    sync_state["game_state"] = game_state
+    sync_state["connected_players"] = manager.get_mobile_players(session_code)
+    sync_state["current_question"] = manager.get_current_question(session_code)
+    return sync_state
 
 
 @router.websocket("/ws/session/{session_code}")
@@ -188,28 +245,8 @@ async def send_initial_session_state(
 
         # Get current game state and convert to dict for JSON serialization
         game_state_obj = get_game_session_state(db, session_code)
-        game_state = None
-        if game_state_obj:
-            game_state = {
-                "session_code": game_state_obj.session_code,
-                "current_question_index": game_state_obj.current_question_index,
-                "current_question_id": game_state_obj.current_question_id,
-                "is_active": game_state_obj.is_active,
-                "is_waiting_for_players": game_state_obj.is_waiting_for_players,
-                "isstarted": game_state_obj.isstarted,
-                "total_questions": game_state_obj.total_questions,
-                "ispublic": game_state_obj.ispublic,
-                "started_at": (
-                    game_state_obj.started_at.isoformat()
-                    if game_state_obj.started_at
-                    else None
-                ),
-                "ended_at": (
-                    game_state_obj.ended_at.isoformat()
-                    if game_state_obj.ended_at
-                    else None
-                ),
-            }
+        game_state = serialize_game_state(game_state_obj)
+        authoritative_state = build_sync_state(session_code, db)
 
         initial_state = {
             "type": "initial_state",
@@ -219,6 +256,7 @@ async def send_initial_session_state(
                 "connection_stats": session_stats,
                 "game_state": game_state,
                 "connected_players": manager.get_mobile_players(session_code),
+                "authoritative_state": authoritative_state,
             },
         }
 
@@ -309,6 +347,29 @@ async def handle_websocket_message(
         manager.update_heartbeat(websocket)
         logger.info(f"Client acknowledged connection for session {session_code}")
 
+    elif message_type == "ack":
+        event_id = (
+            message.get("event_id")
+            or message.get("message_id")
+            or data.get("event_id")
+            or data.get("message_id")
+        )
+        if event_id:
+            manager.acknowledge_event(websocket, event_id)
+            manager.update_heartbeat(websocket)
+        else:
+            logger.warning(f"ACK missing event_id from {client_type} client")
+
+    elif message_type == "sync_request":
+        manager.update_heartbeat(websocket)
+        await manager.send_personal_message(
+            {
+                "type": "sync_state",
+                "data": build_sync_state(session_code, db),
+            },
+            websocket,
+        )
+
     elif message_type == "request_current_question" and client_type == "mobile":
         # Mobile client requesting current question from queue
         logger.info(
@@ -328,7 +389,9 @@ async def handle_websocket_message(
                 websocket,
             )
         else:
-            logger.warning(f"⚠️ No queued question available for session {session_code}")
+            logger.warning(
+                f"⚠️ No queued question available for session {session_code}"
+            )
             # No DB fallback here by design.
             # Releasing question to mobile should happen only via synchronized
             # countdown_complete -> question_started flow or queued recovery.
@@ -363,6 +426,48 @@ async def handle_websocket_message(
         # Web client starting the game
         await handle_game_start(session_code, game_handler, db)
 
+    elif message_type == "skip_intro" and client_type == "web":
+        from datetime import timedelta
+
+        now = datetime.utcnow()
+        countdown_duration_ms = int(data.get("duration_ms", 3000) if data else 3000)
+        countdown_start = now + timedelta(milliseconds=250)
+        countdown_start_iso = countdown_start.isoformat() + "Z"
+        phase_state = manager.set_session_phase(
+            session_code,
+            SessionPhase.COUNTDOWN,
+            skipped_at=now.isoformat() + "Z",
+            start_at=countdown_start_iso,
+            duration_ms=countdown_duration_ms,
+        )
+
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "intro_skipped",
+                "data": {
+                    **phase_state,
+                    "start_at": countdown_start_iso,
+                    "duration_ms": countdown_duration_ms,
+                },
+            },
+            critical=True,
+            require_ack=True,
+        )
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "countdown_started",
+                "data": {
+                    **phase_state,
+                    "start_at": countdown_start_iso,
+                    "duration_ms": countdown_duration_ms,
+                },
+            },
+            critical=True,
+            require_ack=True,
+        )
+
     elif message_type == "countdown_complete" and client_type == "web":
         # Web client signaling countdown has completed
         # THIS is the synchronized trigger for question reveal on all devices
@@ -394,6 +499,7 @@ async def handle_websocket_message(
                 },
             },
             critical=True,
+            require_ack=True,
         )
 
         # Get the current question with synchronized start time
@@ -407,6 +513,16 @@ async def handle_websocket_message(
 
                 # Add synchronized start_at timestamp to question data
                 question_data["start_at"] = start_at_iso
+                phase_state = manager.set_session_phase(
+                    session_code,
+                    SessionPhase.QUESTION,
+                    start_at=start_at_iso,
+                    current_question_id=question_data.get("question_id"),
+                    current_question_index=game_status.get("current_question_index"),
+                    total_questions=game_status.get("total_questions"),
+                )
+                question_data["phase"] = phase_state["phase"]
+                question_data["server_time_ms"] = phase_state["server_time_ms"]
 
                 logger.info(
                     f"📤 Broadcasting synchronized question {question_data.get('question_id')} with start_at={start_at_iso}"
@@ -425,6 +541,7 @@ async def handle_websocket_message(
                     session_code,
                     question_message,
                     critical=True,
+                    require_ack=True,
                 )
 
                 logger.info(
@@ -653,10 +770,26 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
         # This prevents mobiles from rendering early before intro completes
         logger.info(f"📡 Broadcasting game_started message for session {session_code}")
 
+        phase_state = manager.set_session_phase(
+            session_code,
+            SessionPhase.INTRO_AUDIO,
+            current_question_id=(
+                game_state.current_question_id if game_state else None
+            ),
+            current_question_index=(
+                game_state.current_question_index if game_state else 0
+            ),
+            total_questions=(game_state.total_questions if game_state else 1),
+        )
+
         game_started_data = {
             "session_code": session_code,
             "started_at": datetime.now().isoformat(),
             "isstarted": True,
+            "phase": phase_state["phase"],
+            "phase_started_at": phase_state["phase_started_at"],
+            "phase_started_at_ms": phase_state["phase_started_at_ms"],
+            "server_time_ms": phase_state["server_time_ms"],
             "game_state": {
                 "isstarted": True,
                 "is_active": game_state.is_active if game_state else True,
@@ -677,6 +810,21 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
                 "data": game_started_data,
             },
             critical=True,
+            require_ack=True,
+        )
+
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "intro_started",
+                "data": {
+                    **phase_state,
+                    "session_code": session_code,
+                    "isstarted": True,
+                },
+            },
+            critical=True,
+            require_ack=True,
         )
 
         # Re-emit roster right after game_started to keep leaderboard in sync
@@ -701,6 +849,61 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
             logger.info(f"✅ Web host can now prepare question UI during intro")
         else:
             logger.warning("⚠️ No question data available for preload!")
+
+        # Fallback reveal path: if the frontend does not emit countdown_complete,
+        # the game must still continue instead of leaving the host in a loading state.
+        if first_question_data:
+            logger.info(
+                "⏱️ Scheduling fallback question reveal in case countdown_complete is not received"
+            )
+
+            async def fallback_reveal() -> None:
+                await asyncio.sleep(4.0)
+                try:
+                    queued_question = manager.get_current_question(session_code)
+                    if queued_question:
+                        logger.info(
+                            f"✅ Fallback skipped for session {session_code} because the question is already queued"
+                        )
+                        return
+
+                    logger.info(
+                        f"🚨 Fallback reveal triggered for session {session_code}"
+                    )
+                    fallback_start_at = datetime.utcnow().isoformat() + "Z"
+                    first_question_data["start_at"] = fallback_start_at
+                    fallback_phase_state = manager.set_session_phase(
+                        session_code,
+                        SessionPhase.QUESTION,
+                        start_at=fallback_start_at,
+                        current_question_id=first_question_data.get("question_id"),
+                        current_question_index=(
+                            game_state.current_question_index if game_state else 0
+                        ),
+                        total_questions=(
+                            game_state.total_questions if game_state else 1
+                        ),
+                    )
+                    first_question_data["phase"] = fallback_phase_state["phase"]
+                    first_question_data["server_time_ms"] = fallback_phase_state[
+                        "server_time_ms"
+                    ]
+                    manager.queue_question(session_code, first_question_data)
+                    await manager.broadcast_to_session(
+                        session_code,
+                        {
+                            "type": "question_started",
+                            "data": first_question_data,
+                        },
+                        critical=True,
+                        require_ack=True,
+                    )
+                except Exception as fallback_error:
+                    logger.warning(
+                        f"Fallback reveal skipped for session {session_code}: {fallback_error}"
+                    )
+
+            asyncio.create_task(fallback_reveal())
 
         # Step 3: DO NOT broadcast question_started here!
         # The synchronized question reveal happens ONLY after countdown_complete
@@ -782,6 +985,13 @@ async def handle_next_question(session_code: str, game_handler, db: Session):
         updated_game_state = get_game_session_state(db, session_code)
 
         if updated_game_state and updated_game_state.current_question_id:
+            manager.set_session_phase(
+                session_code,
+                SessionPhase.QUESTION,
+                current_question_id=updated_game_state.current_question_id,
+                current_question_index=updated_game_state.current_question_index,
+                total_questions=updated_game_state.total_questions,
+            )
             # Broadcast the new question with randomized options
             if hasattr(game_handler, "broadcast_question_with_options"):
                 await game_handler.broadcast_question_with_options(
@@ -821,6 +1031,12 @@ async def handle_game_end(session_code: str, db: Session):
 
         # Get current time for ended_at
         ended_at = datetime.now().isoformat()
+        phase_state = manager.set_session_phase(
+            session_code,
+            SessionPhase.ENDED,
+            ended_at=ended_at,
+        )
+        manager.clear_question_queue(session_code)
 
         logger.info(
             f"🏁 Game ended for session {session_code} with {len(final_scores)} players"
@@ -834,10 +1050,14 @@ async def handle_game_end(session_code: str, db: Session):
                 "data": {
                     "session_code": session_code,
                     "ended_at": ended_at,
+                    "phase": phase_state["phase"],
+                    "phase_started_at": phase_state["phase_started_at"],
+                    "server_time_ms": phase_state["server_time_ms"],
                     "final_scores": final_scores,
                 },
             },
             critical=True,
+            require_ack=True,
         )
 
         logger.info(f"✅ Game end broadcast complete for session {session_code}")

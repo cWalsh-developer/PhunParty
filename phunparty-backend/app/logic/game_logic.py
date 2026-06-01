@@ -348,7 +348,7 @@ async def broadcast_question_with_options(
     Broadcast a question with randomized display options to all players in a session
     """
     try:
-        from app.websockets.manager import manager
+        from app.websockets.manager import SessionPhase, manager
 
         # Get question with randomized options
         question_data = get_question_with_randomized_options(db, question_id)
@@ -415,6 +415,15 @@ async def broadcast_question_with_options(
         # CRITICAL: Queue the question data so mobile clients can retrieve it
         # This ensures questions are never lost even if WebSocket messages are missed
         mobile_question_data = player_message["data"]
+        phase_state = manager.set_session_phase(
+            session_code,
+            SessionPhase.QUESTION,
+            current_question_id=question_id,
+        )
+        mobile_question_data["phase"] = phase_state["phase"]
+        mobile_question_data["server_time_ms"] = phase_state["server_time_ms"]
+        host_message["data"]["phase"] = phase_state["phase"]
+        host_message["data"]["server_time_ms"] = phase_state["server_time_ms"]
         manager.queue_question(session_code, mobile_question_data)
         logger.info(f"📥 Question {question_id} queued for session {session_code}")
 

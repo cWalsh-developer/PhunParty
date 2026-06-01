@@ -7,11 +7,22 @@ import asyncio
 import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from enum import Enum
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
+
+
+class SessionPhase(str, Enum):
+    LOBBY = "lobby"
+    INTRO_AUDIO = "intro_audio"
+    COUNTDOWN = "countdown"
+    QUESTION = "question"
+    ANSWER_REVEAL = "answer_reveal"
+    RESULTS = "results"
+    ENDED = "ended"
 
 
 class ConnectionManager:
@@ -22,6 +33,17 @@ class ConnectionManager:
     MOBILE_HEARTBEAT_STALE_SECONDS = 300
     PING_INTERVAL_SECONDS = 10
     MOBILE_DISCONNECT_GRACE_SECONDS = 180
+    ACK_RETRY_DELAY_SECONDS = 1.5
+    ACK_MAX_RESENDS = 2
+    ACK_EVENT_TYPES = {
+        "game_started",
+        "intro_started",
+        "intro_skipped",
+        "countdown_started",
+        "countdown_complete",
+        "question_started",
+        "game_ended",
+    }
 
     def __init__(self):
         # session_code -> {websocket_id: {websocket, client_type, player_info}}
@@ -31,6 +53,10 @@ class ConnectionManager:
         # Question queue: session_code -> {question_id: question_data}
         # Stores questions that have been broadcast so mobile clients can retrieve them
         self.question_queue: Dict[str, Dict[str, Any]] = {}
+        # session_code -> authoritative phase/timing snapshot.
+        self.session_phase_state: Dict[str, Dict[str, Any]] = {}
+        # event_id -> delivery/ack state for critical phase messages.
+        self.pending_acks: Dict[str, Dict[str, Any]] = {}
         # player leave tasks: "session_code:player_id" -> asyncio.Task
         # Used to avoid flapping presence when mobile networks briefly disconnect.
         self.pending_player_leave_tasks: Dict[str, asyncio.Task] = {}
@@ -126,6 +152,202 @@ class ConnectionManager:
     def generate_websocket_id(self, websocket: WebSocket) -> str:
         """Generate unique ID for WebSocket connection"""
         return f"ws_{id(websocket)}_{datetime.now().timestamp()}"
+
+    def _utc_now_ms(self) -> int:
+        return int(datetime.utcnow().timestamp() * 1000)
+
+    def _utc_now_iso(self) -> str:
+        return datetime.utcnow().isoformat() + "Z"
+
+    def set_session_phase(
+        self, session_code: str, phase: Union[SessionPhase, str], **updates: Any
+    ) -> Dict[str, Any]:
+        """Update the authoritative in-memory phase snapshot for a session."""
+        phase_value = phase.value if isinstance(phase, SessionPhase) else str(phase)
+        now_iso = self._utc_now_iso()
+        now_ms = self._utc_now_ms()
+
+        state = self.session_phase_state.setdefault(
+            session_code,
+            {
+                "session_code": session_code,
+                "phase": SessionPhase.LOBBY.value,
+                "phase_started_at": now_iso,
+                "phase_started_at_ms": now_ms,
+            },
+        )
+
+        state.update(
+            {
+                "session_code": session_code,
+                "phase": phase_value,
+                "phase_started_at": now_iso,
+                "phase_started_at_ms": now_ms,
+                "server_time_ms": now_ms,
+                "updated_at": now_iso,
+            }
+        )
+        state.update({key: value for key, value in updates.items() if value is not None})
+        logger.info(f"Session {session_code} phase set to {phase_value}")
+        return dict(state)
+
+    def get_session_phase_state(self, session_code: str) -> Dict[str, Any]:
+        """Return the authoritative phase snapshot, defaulting to lobby."""
+        state = self.session_phase_state.get(session_code)
+        if state:
+            return {**state, "server_time_ms": self._utc_now_ms()}
+
+        now_iso = self._utc_now_iso()
+        now_ms = self._utc_now_ms()
+        return {
+            "session_code": session_code,
+            "phase": SessionPhase.LOBBY.value,
+            "phase_started_at": now_iso,
+            "phase_started_at_ms": now_ms,
+            "server_time_ms": now_ms,
+        }
+
+    def get_session_sync_state(self, session_code: str) -> Dict[str, Any]:
+        """Build a reconnect-safe snapshot from server-owned WebSocket state."""
+        phase_state = self.get_session_phase_state(session_code)
+        current_question = self.get_current_question(session_code)
+        return {
+            **phase_state,
+            "connected_players": self.get_mobile_players(session_code),
+            "connection_stats": self.get_session_stats(session_code),
+            "current_question": current_question,
+        }
+
+    def acknowledge_event(self, websocket: WebSocket, event_id: str) -> bool:
+        """Mark a critical event as acknowledged by this websocket."""
+        ws_id = None
+        for registry_ws_id, info in self.websocket_registry.items():
+            if info["websocket"] == websocket:
+                ws_id = registry_ws_id
+                break
+
+        if not ws_id:
+            logger.warning(f"ACK received for {event_id} from unknown websocket")
+            return False
+
+        event_state = self.pending_acks.get(event_id)
+        if not event_state:
+            logger.debug(f"ACK received for unknown or completed event {event_id}")
+            return False
+
+        target_state = event_state["targets"].get(ws_id)
+        if not target_state:
+            logger.debug(f"ACK received for {event_id} from non-target websocket {ws_id}")
+            return False
+
+        target_state["acked"] = True
+        target_state["acked_at"] = self._utc_now_iso()
+        logger.info(f"ACK received for {event_id} from {ws_id}")
+
+        if all(target.get("acked") for target in event_state["targets"].values()):
+            logger.info(f"All targets acknowledged {event_id}")
+            self.pending_acks.pop(event_id, None)
+
+        return True
+
+    def get_pending_ack_summary(self, session_code: Optional[str] = None) -> Dict[str, Any]:
+        events = [
+            event
+            for event in self.pending_acks.values()
+            if session_code is None or event.get("session_code") == session_code
+        ]
+        pending_targets = 0
+        for event in events:
+            pending_targets += sum(
+                1 for target in event["targets"].values() if not target.get("acked")
+            )
+
+        return {
+            "events": len(events),
+            "pending_targets": pending_targets,
+        }
+
+    def _track_ack_target(
+        self,
+        event_id: str,
+        session_code: str,
+        message: Dict[str, Any],
+        ws_id: str,
+        connection_info: Dict[str, Any],
+    ) -> None:
+        event_state = self.pending_acks.setdefault(
+            event_id,
+            {
+                "event_id": event_id,
+                "session_code": session_code,
+                "message": message,
+                "created_at": self._utc_now_iso(),
+                "resend_count": 0,
+                "targets": {},
+            },
+        )
+        event_state["targets"][ws_id] = {
+            "acked": False,
+            "client_type": connection_info.get("client_type"),
+            "player_id": connection_info.get("player_id"),
+            "player_name": connection_info.get("player_name"),
+            "sent_at": self._utc_now_iso(),
+        }
+
+    def _schedule_ack_retry(self, event_id: str) -> None:
+        try:
+            asyncio.create_task(self._retry_unacked_event(event_id))
+        except RuntimeError:
+            logger.debug(f"Could not schedule ACK retry for {event_id}; no event loop")
+
+    async def _retry_unacked_event(self, event_id: str) -> None:
+        while event_id in self.pending_acks:
+            await asyncio.sleep(self.ACK_RETRY_DELAY_SECONDS)
+            event_state = self.pending_acks.get(event_id)
+            if not event_state:
+                return
+
+            if all(target.get("acked") for target in event_state["targets"].values()):
+                self.pending_acks.pop(event_id, None)
+                return
+
+            resend_count = event_state.get("resend_count", 0)
+            if resend_count >= self.ACK_MAX_RESENDS:
+                missing = [
+                    ws_id
+                    for ws_id, target in event_state["targets"].items()
+                    if not target.get("acked")
+                ]
+                logger.warning(
+                    f"ACK timeout for {event_id}; missing {len(missing)} target(s): {missing}"
+                )
+                self.pending_acks.pop(event_id, None)
+                return
+
+            session_code = event_state["session_code"]
+            message = {
+                **event_state["message"],
+                "retry_count": resend_count + 1,
+            }
+
+            for ws_id, target in list(event_state["targets"].items()):
+                if target.get("acked"):
+                    continue
+
+                connection_info = self.active_connections.get(session_code, {}).get(ws_id)
+                if not connection_info:
+                    event_state["targets"].pop(ws_id, None)
+                    continue
+
+                sent = await self.send_personal_message(
+                    message,
+                    connection_info["websocket"],
+                    retries=0,
+                )
+                if sent:
+                    target["resent_at"] = self._utc_now_iso()
+
+            event_state["resend_count"] = resend_count + 1
 
     async def connect(
         self,
@@ -348,6 +570,7 @@ class ConnectionManager:
         only_client_types: Optional[List[str]] = None,
         exclude_client_types: Optional[List[str]] = None,
         critical: bool = False,
+        require_ack: bool = False,
     ):
         """Broadcast message to all clients in a session with filtering options and reliability"""
         if session_code not in self.active_connections:
@@ -360,8 +583,12 @@ class ConnectionManager:
         message_with_timestamp = {**message, "timestamp": datetime.now().timestamp()}
 
         # Add message ID for tracking
-        message_id = f"{message.get('type')}_{datetime.now().timestamp()}"
+        message_id = message.get("message_id") or f"{message.get('type')}_{datetime.now().timestamp()}"
         message_with_timestamp["message_id"] = message_id
+        should_require_ack = require_ack or message.get("type") in self.ACK_EVENT_TYPES
+        if should_require_ack:
+            message_with_timestamp["event_id"] = message.get("event_id") or message_id
+            message_with_timestamp["requires_ack"] = True
 
         disconnected_websockets = []
         success_count = 0
@@ -411,6 +638,14 @@ class ConnectionManager:
             for attempt in range(max_attempts):
                 try:
                     await websocket.send_text(json.dumps(message_with_timestamp))
+                    if should_require_ack:
+                        self._track_ack_target(
+                            message_with_timestamp["event_id"],
+                            session_code,
+                            message_with_timestamp,
+                            ws_id,
+                            connection_info,
+                        )
                     success_count += 1
                     if client_type == "mobile":
                         mobile_sent += 1
@@ -444,6 +679,9 @@ class ConnectionManager:
         # Clean up disconnected websockets
         for ws in disconnected_websockets:
             self.disconnect(ws)
+
+        if should_require_ack and success_count > 0:
+            self._schedule_ack_retry(message_with_timestamp["event_id"])
 
     async def broadcast_to_mobile_players(self, session_code: str, message: dict):
         """Broadcast message only to mobile clients"""
@@ -544,6 +782,8 @@ class ConnectionManager:
             "web_clients": web_clients,
             "mobile_clients": mobile_clients,
             "mobile_players": self.get_mobile_players(session_code),
+            "phase": self.get_session_phase_state(session_code).get("phase"),
+            "pending_acks": self.get_pending_ack_summary(session_code),
         }
 
     async def send_personal_message_by_id(self, message: dict, websocket_id: str):
@@ -703,6 +943,8 @@ class ConnectionManager:
             "web_clients": web_clients,
             "mobile_clients": mobile_clients,
             "mobile_players": self.get_mobile_players(session_code),
+            "phase": self.get_session_phase_state(session_code).get("phase"),
+            "pending_acks": self.get_pending_ack_summary(session_code),
             "players": len(player_breakdown),
             "hosts": hosts,
             "observers": observers,

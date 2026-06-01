@@ -13,7 +13,7 @@ from app.database.dbCRUD import (
     get_current_question_details,
     get_player_by_ID,
 )
-from app.websockets.manager import manager
+from app.websockets.manager import SessionPhase, manager
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,13 @@ class GameEventHandler:
         """Broadcast question to all clients with different formats"""
         # Reset all players' answered status for the new question
         manager.reset_all_players_answered(self.session_code)
+        phase_state = manager.set_session_phase(
+            self.session_code,
+            SessionPhase.QUESTION,
+            current_question_id=question_data.get("question_id"),
+        )
+        question_data["phase"] = phase_state["phase"]
+        question_data["server_time_ms"] = phase_state["server_time_ms"]
 
         logger.info(f"Broadcasting question to session {self.session_code}")
 
@@ -52,6 +59,7 @@ class GameEventHandler:
             },
             only_client_types=["web"],
             critical=True,
+            require_ack=True,
         )
 
         # Send appropriate mobile UI data to mobile clients with critical flag
@@ -61,6 +69,7 @@ class GameEventHandler:
             {"type": "question_started", "data": mobile_data},
             only_client_types=["mobile"],
             critical=True,
+            require_ack=True,
         )
 
     async def broadcast_question_with_options(self, question_id: str, db):
