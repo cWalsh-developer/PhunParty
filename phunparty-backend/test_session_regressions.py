@@ -373,6 +373,53 @@ def test_mobile_initial_state_sends_queued_question_during_question_phase():
     )
 
 
+def test_mobile_current_question_payload_rebuilds_missing_queue_from_db():
+    question = {
+        "question_id": "Q1",
+        "question": "Ready?",
+        "display_options": ["A", "B"],
+    }
+
+    with patch.object(routes, "manager") as mock_manager:
+        mock_manager.get_current_question.return_value = None
+        mock_manager.get_session_phase_state.return_value = {
+            "phase": "question",
+            "current_question_id": "Q1",
+            "start_at": "2026-06-01T12:00:00Z",
+            "question_expires_at": "2026-06-01T12:00:15Z",
+            "question_duration_ms": 15000,
+            "server_time_ms": 123,
+        }
+        with patch.object(
+            routes,
+            "get_current_question_details",
+            return_value={"current_question": question},
+        ):
+            payload = routes.get_mobile_current_question_payload(
+                "SESSION123", MagicMock(), "trivia"
+            )
+
+    assert payload["question_id"] == "Q1"
+    assert payload["start_at"] == "2026-06-01T12:00:00Z"
+    assert payload["expires_at"] == "2026-06-01T12:00:15Z"
+    assert payload["duration_ms"] == 15000
+    mock_manager.queue_question.assert_called_once_with("SESSION123", payload)
+
+
+def test_mobile_current_question_payload_does_not_fallback_before_question_phase():
+    with patch.object(routes, "manager") as mock_manager:
+        mock_manager.get_current_question.return_value = None
+        mock_manager.get_session_phase_state.return_value = {"phase": "countdown"}
+        with patch.object(routes, "get_current_question_details") as get_details:
+            payload = routes.get_mobile_current_question_payload(
+                "SESSION123", MagicMock(), "trivia"
+            )
+
+    assert payload is None
+    get_details.assert_not_called()
+    mock_manager.queue_question.assert_not_called()
+
+
 def test_buzzer_ui_update_sends_answer_data_only_to_winner():
     winner_ws = MagicMock()
     waiting_ws = MagicMock()

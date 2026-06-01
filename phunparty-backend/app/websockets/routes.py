@@ -26,11 +26,12 @@ from app.database.dbCRUD import (
 from app.dependencies import get_db
 from app.websockets.game_handlers import create_game_handler
 from app.websockets.game_lifecycle import handle_game_end
-from app.websockets.game_modes import resolve_session_game_type
+from app.websockets.game_modes import BUZZER_GAME_TYPE, resolve_session_game_type
 from app.websockets.manager import SessionPhase, manager
 from app.websockets.scheduler import (
     COUNTDOWN_DURATION_MS,
     advance_or_end_current_question,
+    format_buzzer_question_for_mobile,
     iso_utc,
     start_countdown,
 )
@@ -125,8 +126,58 @@ def build_sync_state(
     sync_state["game_state"] = game_state
     sync_state["game_type"] = game_type
     sync_state["connected_players"] = manager.get_mobile_players(session_code)
-    sync_state["current_question"] = manager.get_current_question(session_code)
+    sync_state["current_question"] = get_mobile_current_question_payload(
+        session_code, db, game_type
+    )
     return sync_state
+
+
+def get_mobile_current_question_payload(
+    session_code: str, db: Session, game_type: Optional[str] = None
+) -> Optional[dict]:
+    """Return a recovery-safe current question payload for mobile clients."""
+    queued_question = manager.get_current_question(session_code)
+    if queued_question:
+        return queued_question
+
+    phase_state = manager.get_session_phase_state(session_code)
+    if phase_state.get("phase") != SessionPhase.QUESTION.value:
+        return None
+
+    game_status = get_current_question_details(db, session_code)
+    question_data = game_status.get("current_question") if game_status else None
+    if not question_data:
+        return None
+
+    question_id = question_data.get("question_id")
+    expected_question_id = phase_state.get("current_question_id")
+    if expected_question_id and question_id != expected_question_id:
+        logger.warning(
+            f"Refusing current question fallback for {session_code}; DB question {question_id} != phase question {expected_question_id}"
+        )
+        return None
+
+    game_type = game_type or resolve_session_game_type(db, session_code)
+    question_data = {
+        **question_data,
+        "game_type": game_type,
+        "start_at": phase_state.get("start_at"),
+        "expires_at": phase_state.get("question_expires_at"),
+        "duration_ms": phase_state.get("question_duration_ms"),
+        "phase": phase_state.get("phase"),
+        "server_time_ms": phase_state.get("server_time_ms"),
+    }
+
+    payload = (
+        format_buzzer_question_for_mobile(question_data)
+        if game_type == BUZZER_GAME_TYPE
+        else question_data
+    )
+    manager.queue_question(session_code, payload)
+    logger.info(
+        f"Rebuilt queued current question {payload.get('question_id')} for mobile recovery in session {session_code}"
+    )
+    return payload
 
 
 @router.websocket("/ws/session/{session_code}")
@@ -346,7 +397,9 @@ async def send_initial_session_state(
 
         if client_type == "mobile":
             authoritative_phase = authoritative_state.get("phase")
-            queued_question = manager.get_current_question(session_code)
+            queued_question = get_mobile_current_question_payload(
+                session_code, db, game_type
+            )
             if authoritative_phase == SessionPhase.QUESTION.value and queued_question:
                 logger.info(
                     f"Sending queued current question to reconnecting mobile in session {session_code}"
@@ -450,7 +503,7 @@ async def handle_websocket_message(
         logger.info(
             f"ðŸ“² Mobile client requesting current question for session {session_code}"
         )
-        current_question = manager.get_current_question(session_code)
+        current_question = get_mobile_current_question_payload(session_code, db)
 
         if current_question:
             logger.info(
@@ -468,9 +521,8 @@ async def handle_websocket_message(
             logger.warning(
                 f"âš ï¸ No queued question available for session {session_code}"
             )
-            # No DB fallback here by design.
-            # Releasing question to mobile should happen only via the server
-            # countdown scheduler or queued recovery.
+            # The DB fallback above only runs once the authoritative server phase
+            # is already question, so unanswered pre-reveal questions stay hidden.
 
     elif message_type == "leave_game" and client_type == "mobile":
         if not player_id:
