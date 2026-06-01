@@ -43,6 +43,7 @@ sys.modules.setdefault("passlib", passlib_module)
 sys.modules.setdefault("passlib.context", passlib_context_module)
 
 from app.database import dbCRUD
+from app.logic import answer_validation
 from app.logic import game_logic
 from app.schemas.game_state_models import GameSessionState
 from app.websockets import game_handlers, game_lifecycle, game_modes, routes, scheduler
@@ -142,6 +143,57 @@ def test_question_fallback_without_options_does_not_expose_answer():
     assert result["question_options"] == []
     assert result["display_options"] == []
     assert result["correct_index"] is None
+
+
+def test_answer_validation_normalizes_punctuation_and_accents():
+    result = answer_validation.validate_answer("  Beyonce!  ", ["Beyonce"])
+
+    assert result.is_correct is True
+    assert result.method == "exact"
+
+
+def test_answer_validation_accepts_close_spelling():
+    result = answer_validation.validate_answer("James Camaron", ["James Cameron"])
+
+    assert result.is_correct is True
+    assert result.method.startswith("levenshtein:")
+
+
+def test_answer_validation_accepts_aliases_from_question():
+    question = SimpleNamespace(
+        answer="James Cameron",
+        accepted_answers=["Cameron", "Jim Cameron"],
+    )
+
+    result = answer_validation.validate_answer_against_question("cameron", question)
+
+    assert result.is_correct is True
+    assert result.matched_answer == "Cameron"
+
+
+def test_submit_player_answer_returns_answer_match_metadata():
+    question = SimpleNamespace(answer="James Cameron", accepted_answers=["Cameron"])
+    mock_db = MagicMock()
+
+    with patch.object(game_logic, "get_player_response", return_value=None):
+        with patch.object(game_logic, "get_question_by_id", return_value=question):
+            with patch.object(game_logic, "create_player_response"):
+                with patch.object(game_logic, "update_scores"):
+                    with patch.object(
+                        game_logic,
+                        "check_and_advance_game",
+                        return_value={"players_answered": 1},
+                    ):
+                        result = game_logic.submit_player_answer(
+                            mock_db,
+                            "SESSION123",
+                            "P1",
+                            "Q1",
+                            "Camron",
+                        )
+
+    assert result["is_correct"] is True
+    assert result["answer_match"]["matched_answer"] == "Cameron"
 
 
 def test_build_sync_state_recovers_active_game_to_question_not_intro():

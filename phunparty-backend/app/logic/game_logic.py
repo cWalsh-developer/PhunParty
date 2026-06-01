@@ -20,6 +20,7 @@ from app.database.dbCRUD import (
     update_game_state_waiting_status,
     update_scores,
 )
+from app.logic.answer_validation import validate_answer_against_question
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +42,8 @@ def submit_player_answer(
     if not question:
         raise ValueError("Question not found")
 
-    # For simple answer model, compare directly with the answer field
-    is_correct = player_answer.lower().strip() == str(question.answer).lower().strip()
+    validation = validate_answer_against_question(player_answer, question)
+    is_correct = validation.is_correct
 
     # Record the player's response
     create_player_response(
@@ -63,6 +64,11 @@ def submit_player_answer(
     return {
         "player_answer": player_answer,
         "is_correct": is_correct,
+        "answer_match": {
+            "method": validation.method,
+            "matched_answer": validation.matched_answer,
+            "score": validation.score,
+        },
         "game_state": game_progression,
     }
 

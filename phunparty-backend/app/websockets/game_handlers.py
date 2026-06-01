@@ -12,7 +12,9 @@ from sqlalchemy.orm import Session
 from app.database.dbCRUD import (
     get_current_question_details,
     get_player_by_ID,
+    get_question_by_id,
 )
+from app.logic.answer_validation import validate_answer_against_question
 from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.manager import SessionPhase, manager
 from app.websockets.scheduler import (
@@ -338,8 +340,6 @@ class BuzzerGameHandler(GameEventHandler):
         if state["current_buzzer_winner"] != player_id:
             return
 
-        # Check if answer is correct (you'll need to implement this logic)
-        is_correct = await self.check_answer_correctness(answer, question_id, db)
         from app.logic.game_logic import submit_player_answer
 
         submission_result = submit_player_answer(
@@ -351,6 +351,7 @@ class BuzzerGameHandler(GameEventHandler):
             )
             return
         action = submission_result.get("game_state", {}).get("action")
+        is_correct = submission_result.get("is_correct", False)
 
         player = get_player_by_ID(db, player_id)
         player_name = player.player_name if player else "Unknown Player"
@@ -557,13 +558,12 @@ class BuzzerGameHandler(GameEventHandler):
     async def check_answer_correctness(
         self, answer: str, question_id: str, db: Session
     ) -> bool:
-        """Check if the answer is correct - implement your logic here"""
-        # This is a placeholder - implement your answer checking logic
+        """Check if the answer is correct using the shared validation service."""
         try:
-            question_details = get_current_question_details(db, self.session_code)
-            current_question = question_details.get("current_question") or {}
-            correct_answer = str(current_question.get("answer", "")).lower().strip()
-            return answer.lower().strip() == correct_answer
+            question = get_question_by_id(question_id, db)
+            if not question:
+                return False
+            return validate_answer_against_question(answer, question).is_correct
         except Exception as e:
             logger.error(f"Error checking answer: {e}")
             return False
