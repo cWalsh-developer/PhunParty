@@ -17,6 +17,7 @@ from app.schemas.scores_model import Scores
 from app.schemas.session_player_assignment_model import SessionAssignment
 from app.schemas.session_question_assignment import SessionQuestionAssignment
 from app.utils.hash_password import hash_password
+from app.utils.friend_codes import generate_friend_code
 from app.utils.id_generator import (
     generate_assignment_id,
     generate_game_code,
@@ -26,6 +27,15 @@ from app.utils.id_generator import (
     generate_score_id,
     generate_session_code,
 )
+
+
+def generate_unique_friend_code(db: Session) -> str:
+    for _ in range(20):
+        friend_code = generate_friend_code()
+        exists = db.query(Players).filter(Players.friend_code == friend_code).first()
+        if not exists:
+            return friend_code
+    raise ValueError("Unable to generate a unique friend code")
 
 
 def create_game(db: Session, rules: str, genre: str) -> Game:
@@ -316,6 +326,7 @@ def create_player(
         player_mobile=player_mobile,
         hashed_password=hashed_password,
         active_game_code=game_code,
+        friend_code=generate_unique_friend_code(db),
     )
     db.add(new_player)
     db.commit()

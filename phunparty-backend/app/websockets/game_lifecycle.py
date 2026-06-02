@@ -1,6 +1,7 @@
 """Shared WebSocket game lifecycle helpers."""
 
 import asyncio
+import inspect
 import logging
 from datetime import datetime
 
@@ -70,9 +71,11 @@ async def handle_game_end(session_code: str, db: Session) -> bool:
         )
 
         logger.info(f"Game end broadcast complete for session {session_code}")
-        asyncio.create_task(
-            manager.cleanup_session_later(session_code, delay_seconds=60)
+        cleanup_task = manager.cleanup_session_later(
+            session_code, delay_seconds=60
         )
+        if inspect.isawaitable(cleanup_task):
+            asyncio.create_task(cleanup_task)
         return True
 
     except Exception as e:

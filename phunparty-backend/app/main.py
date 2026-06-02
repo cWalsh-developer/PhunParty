@@ -13,10 +13,19 @@ from app.schemas.questions_model import Questions
 from app.schemas.scores_model import Scores
 from app.schemas.session_player_assignment_model import SessionAssignment
 from app.schemas.session_question_assignment import SessionQuestionAssignment
+from app.schemas.social_models import (
+    FriendRequest,
+    Friendship,
+    Notification,
+    UserPushToken,
+)
+from app.database.social_migrations import ensure_social_player_columns
 from app.routes import (
     authentication,
+    friends,
     game,
     game_logic,
+    notifications,
     passwordReset,
     photos,
     players,
@@ -117,6 +126,23 @@ app.include_router(
 )
 
 app.include_router(
+    friends.router,
+    prefix="/friends",
+    tags=[{"name": "Friends", "description": "Friend requests and friendships"}],
+)
+
+app.include_router(
+    notifications.router,
+    prefix="/notifications",
+    tags=[
+        {
+            "name": "Notifications",
+            "description": "In-app notifications and push notification settings",
+        }
+    ],
+)
+
+app.include_router(
     websocket_routes.router,
     tags=[
         {
@@ -132,6 +158,7 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 # Initialize database tables
 try:
     Base.metadata.create_all(bind=engine)
+    ensure_social_player_columns()
 except Exception as e:
     print(f"Warning: Could not create database tables: {e}")
 

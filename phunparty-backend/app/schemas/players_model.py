@@ -19,3 +19,9 @@ class Players(Base):
     deactivated_at = Column(String, nullable=True)
     is_deleted = Column(Boolean, default=False, nullable=False)
     deleted_at = Column(String, nullable=True)
+    friend_code = Column(String, unique=True, index=True, nullable=False)
+    allow_friend_code_search = Column(Boolean, default=True, nullable=False)
+    allow_phone_discovery = Column(Boolean, default=False, nullable=False)
+    friend_request_notifications_enabled = Column(
+        Boolean, default=True, nullable=False
+    )
