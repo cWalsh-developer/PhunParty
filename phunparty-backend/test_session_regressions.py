@@ -266,6 +266,95 @@ def test_reveal_current_question_allows_new_question_while_phase_is_question():
     mock_manager.broadcast_to_session.assert_awaited_once()
 
 
+def test_reveal_easy_question_has_no_question_timer():
+    question = {
+        "question_id": "Q_EASY",
+        "question": "Easy one?",
+        "genre": "Trivia",
+        "difficulty": "easy",
+    }
+
+    with patch.object(
+        scheduler,
+        "get_current_question_details",
+        return_value={"current_question": question},
+    ):
+        with patch.object(scheduler, "manager") as mock_manager:
+            mock_manager.get_session_phase_state.return_value = {
+                "phase": "question",
+                "current_question_id": "Q_PREVIOUS",
+                "question_expires_at": "2026-06-01T12:00:30Z",
+                "question_duration_ms": 30000,
+            }
+            mock_manager.set_session_phase.return_value = {
+                "phase": "question",
+                "server_time_ms": 123,
+            }
+            mock_manager.broadcast_to_session = AsyncMock()
+            with patch.object(scheduler.asyncio, "create_task") as create_task:
+                result = asyncio.run(
+                    scheduler.reveal_current_question(
+                        "SESSION123", MagicMock(), "2026-06-01T12:00:00Z"
+                    )
+                )
+
+    assert result is True
+    queued_question = mock_manager.queue_question.call_args.args[1]
+    assert "expires_at" not in queued_question
+    assert "duration_ms" not in queued_question
+    phase_kwargs = mock_manager.set_session_phase.call_args.kwargs
+    assert phase_kwargs["question_expires_at"] is None
+    assert phase_kwargs["question_duration_ms"] is None
+    assert set(phase_kwargs["clear_fields"]) == {
+        "question_expires_at",
+        "question_duration_ms",
+    }
+    create_task.assert_not_called()
+
+
+def test_reveal_medium_question_keeps_question_timer():
+    question = {
+        "question_id": "Q_MEDIUM",
+        "question": "Medium one?",
+        "genre": "Trivia",
+        "difficulty": "medium",
+    }
+
+    with patch.object(
+        scheduler,
+        "get_current_question_details",
+        return_value={"current_question": question},
+    ):
+        with patch.object(scheduler, "manager") as mock_manager:
+            mock_manager.get_session_phase_state.return_value = {
+                "phase": "question",
+                "current_question_id": "Q_PREVIOUS",
+            }
+            mock_manager.set_session_phase.return_value = {
+                "phase": "question",
+                "server_time_ms": 123,
+            }
+            mock_manager.broadcast_to_session = AsyncMock()
+            timeout = MagicMock(return_value="timeout-task")
+            with patch.object(scheduler, "scheduled_question_timeout", new=timeout):
+                with patch.object(scheduler.asyncio, "create_task") as create_task:
+                    result = asyncio.run(
+                        scheduler.reveal_current_question(
+                            "SESSION123", MagicMock(), "2026-06-01T12:00:00Z"
+                        )
+                    )
+
+    assert result is True
+    queued_question = mock_manager.queue_question.call_args.args[1]
+    assert queued_question["duration_ms"] == scheduler.QUESTION_DURATION_MS
+    assert queued_question["expires_at"] == "2026-06-01T12:00:30Z"
+    phase_kwargs = mock_manager.set_session_phase.call_args.kwargs
+    assert phase_kwargs["question_expires_at"] == "2026-06-01T12:00:30Z"
+    assert phase_kwargs["question_duration_ms"] == scheduler.QUESTION_DURATION_MS
+    assert phase_kwargs["clear_fields"] is None
+    create_task.assert_called_once_with("timeout-task")
+
+
 def test_reveal_current_question_skips_same_question_duplicate():
     question = {"question_id": "Q1", "question": "Same?"}
 

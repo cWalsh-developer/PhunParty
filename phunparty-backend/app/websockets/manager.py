@@ -193,6 +193,7 @@ class ConnectionManager:
     ) -> Dict[str, Any]:
         """Update the authoritative in-memory phase snapshot for a session."""
         phase_value = phase.value if isinstance(phase, SessionPhase) else str(phase)
+        clear_fields = updates.pop("clear_fields", None) or []
         now_iso = self._utc_now_iso()
         now_ms = self._utc_now_ms()
 
@@ -216,6 +217,8 @@ class ConnectionManager:
                 "updated_at": now_iso,
             }
         )
+        for key in clear_fields:
+            state.pop(key, None)
         state.update({key: value for key, value in updates.items() if value is not None})
         logger.info(f"Session {session_code} phase set to {phase_value}")
         return dict(state)

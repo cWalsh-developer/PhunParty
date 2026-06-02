@@ -18,6 +18,7 @@ COUNTDOWN_DURATION_MS = 3000
 NEXT_QUESTION_REVEAL_DELAY_MS = 250
 QUESTION_BROADCAST_LEAD_MS = 500
 QUESTION_DURATION_MS = 30000
+TIMED_QUESTION_DIFFICULTIES = {"medium", "hard"}
 
 
 def iso_utc(dt: datetime) -> str:
@@ -63,6 +64,17 @@ def format_buzzer_question_for_mobile(question_data: dict) -> dict:
         "button_state": "active",
         "message": "Press to buzz in!",
     }
+
+
+def normalize_question_difficulty(question_data: dict) -> str:
+    difficulty = question_data.get("difficulty")
+    if hasattr(difficulty, "value"):
+        difficulty = difficulty.value
+    return str(difficulty or "easy").lower()
+
+
+def question_uses_timer(question_data: dict) -> bool:
+    return normalize_question_difficulty(question_data) in TIMED_QUESTION_DIFFICULTIES
 
 
 async def advance_or_end_current_question(
@@ -131,17 +143,31 @@ async def reveal_current_question(
         )
         question_starts_at = datetime.utcnow()
 
-    expires_at = question_starts_at + timedelta(milliseconds=QUESTION_DURATION_MS)
-    expires_at_iso = iso_utc(expires_at)
+    has_question_timer = question_uses_timer(question_data)
+    expires_at = (
+        question_starts_at + timedelta(milliseconds=QUESTION_DURATION_MS)
+        if has_question_timer
+        else None
+    )
+    expires_at_iso = iso_utc(expires_at) if expires_at else None
     question_data["start_at"] = start_at_iso
-    question_data["expires_at"] = expires_at_iso
-    question_data["duration_ms"] = QUESTION_DURATION_MS
+    if has_question_timer:
+        question_data["expires_at"] = expires_at_iso
+        question_data["duration_ms"] = QUESTION_DURATION_MS
+    else:
+        question_data.pop("expires_at", None)
+        question_data.pop("duration_ms", None)
     phase_state = manager.set_session_phase(
         session_code,
         SessionPhase.QUESTION,
         start_at=start_at_iso,
         question_expires_at=expires_at_iso,
-        question_duration_ms=QUESTION_DURATION_MS,
+        question_duration_ms=QUESTION_DURATION_MS if has_question_timer else None,
+        clear_fields=(
+            ["question_expires_at", "question_duration_ms"]
+            if not has_question_timer
+            else None
+        ),
         current_question_id=question_data.get("question_id"),
         current_question_index=game_status.get("current_question_index"),
         total_questions=game_status.get("total_questions"),
@@ -190,7 +216,7 @@ async def reveal_current_question(
     logger.info(
         f"Question {question_data.get('question_id')} scheduled for session {session_code} at {start_at_iso}"
     )
-    if question_id:
+    if question_id and expires_at:
         asyncio.create_task(
             scheduled_question_timeout(session_code, question_id, expires_at)
         )
