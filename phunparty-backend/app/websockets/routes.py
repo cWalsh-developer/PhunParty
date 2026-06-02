@@ -24,6 +24,11 @@ from app.database.dbCRUD import (
     get_player_by_ID,
     get_session_by_code,
 )
+from app.database.fair_play_crud import (
+    is_player_kicked,
+    record_focus_violation,
+    update_fair_play_settings,
+)
 from app.dependencies import get_db
 from app.websockets.game_handlers import create_game_handler
 from app.websockets.game_lifecycle import handle_game_end
@@ -40,6 +45,20 @@ from app.websockets.scheduler import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 INTRO_RECOVERY_WINDOW_SECONDS = 15
+
+
+def parse_optional_bool(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return bool(value)
 
 
 def open_db_session() -> tuple[Session, Generator[Session, None, None]]:
@@ -68,6 +87,14 @@ def serialize_game_state(game_state_obj, game_type: Optional[str] = None) -> Opt
         "is_active": game_state_obj.is_active,
         "is_waiting_for_players": game_state_obj.is_waiting_for_players,
         "isstarted": game_state_obj.isstarted,
+        "fair_play_enabled": getattr(game_state_obj, "fair_play_enabled", False),
+        "cheat_detection_enabled": getattr(
+            game_state_obj, "fair_play_enabled", False
+        ),
+        "max_fair_play_strikes": getattr(
+            game_state_obj, "max_fair_play_strikes", 3
+        ),
+        "max_cheat_strikes": getattr(game_state_obj, "max_fair_play_strikes", 3),
         "total_questions": game_state_obj.total_questions,
         "ispublic": game_state_obj.ispublic,
         "started_at": (
@@ -243,6 +270,12 @@ async def websocket_endpoint(
                 player = get_player_by_ID(db, player_id)
                 if not player:
                     await websocket.close(code=4004, reason="Player not found")
+                    return
+                if is_player_kicked(db, session_code, player_id):
+                    await websocket.close(
+                        code=4003,
+                        reason="Removed after Fair Play strikes",
+                    )
                     return
 
                 # Use player info from database if not provided in query params
@@ -589,12 +622,35 @@ async def handle_websocket_message(
                 except Exception as e:
                     logger.debug(f"Error closing left player websocket: {e}")
 
+    elif message_type == "focus_violation" and client_type == "mobile":
+        await handle_focus_violation(
+            websocket=websocket,
+            session_code=session_code,
+            player_id=player_id,
+            data=data,
+            db=db,
+        )
+
     elif message_type == "submit_answer" and client_type == "mobile":
         # Player submitting an answer
         answer = data.get("answer")
         question_id = data.get("question_id")
 
         if answer and question_id and player_id:
+            if manager.is_player_frozen_for_question(
+                session_code, player_id, question_id
+            ) or is_player_kicked(db, session_code, player_id):
+                await manager.send_personal_message(
+                    {
+                        "type": "answer_rejected",
+                        "data": {
+                            "reason": "fair_play_restriction",
+                            "question_id": question_id,
+                        },
+                    },
+                    websocket,
+                )
+                return
             await game_handler.handle_player_answer(player_id, answer, question_id, db)
     elif message_type == "player_announce" and client_type == "mobile":
         # Mobile client announcing presence after connection (backup mechanism)
@@ -613,11 +669,33 @@ async def handle_websocket_message(
     elif message_type == "buzzer_press" and client_type == "mobile":
         # Player pressing buzzer (for buzzer games)
         if player_id and hasattr(game_handler, "handle_buzzer_press"):
+            phase_state = manager.get_session_phase_state(session_code)
+            current_question_id = phase_state.get("current_question_id")
+            if (
+                current_question_id
+                and manager.is_player_frozen_for_question(
+                    session_code, player_id, current_question_id
+                )
+            ) or is_player_kicked(db, session_code, player_id):
+                await manager.send_personal_message(
+                    {
+                        "type": "buzzer_rejected",
+                        "data": {
+                            "reason": "fair_play_restriction",
+                            "question_id": current_question_id,
+                        },
+                    },
+                    websocket,
+                )
+                return
             await game_handler.handle_buzzer_press(player_id, db)
 
     elif message_type == "start_game" and client_type == "web":
         # Web client starting the game
         await handle_game_start(session_code, game_handler, db)
+
+    elif message_type == "update_session_settings" and client_type != "mobile":
+        await handle_update_session_settings(session_code, data, db)
 
     elif message_type == "intro_complete" and client_type == "web":
         current_phase = manager.get_session_phase_state(session_code).get("phase")
@@ -732,6 +810,166 @@ async def handle_websocket_message(
 
     else:
         logger.warning(f"Unknown message type: {message_type} from {client_type}")
+
+
+async def handle_update_session_settings(session_code: str, data: dict, db: Session):
+    """Update host-controlled session settings and broadcast them to clients."""
+    try:
+        fair_play_enabled = data.get("fair_play_enabled")
+        if fair_play_enabled is None:
+            fair_play_enabled = data.get("cheat_detection_enabled")
+
+        max_strikes = data.get("max_fair_play_strikes")
+        if max_strikes is None:
+            max_strikes = data.get("max_cheat_strikes")
+
+        game_state = update_fair_play_settings(
+            db,
+            session_code,
+            fair_play_enabled=parse_optional_bool(fair_play_enabled),
+            max_fair_play_strikes=max_strikes,
+        )
+
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "fair_play_settings_updated",
+                "data": {
+                    "session_code": session_code,
+                    "fair_play_enabled": game_state.fair_play_enabled,
+                    "cheat_detection_enabled": game_state.fair_play_enabled,
+                    "max_fair_play_strikes": game_state.max_fair_play_strikes,
+                    "max_cheat_strikes": game_state.max_fair_play_strikes,
+                },
+            },
+            critical=True,
+        )
+    except ValueError as e:
+        logger.warning(f"Could not update Fair Play settings for {session_code}: {e}")
+    except Exception:
+        logger.exception(f"Error updating Fair Play settings for {session_code}")
+
+
+async def handle_focus_violation(
+    websocket: WebSocket,
+    session_code: str,
+    player_id: Optional[str],
+    data: dict,
+    db: Session,
+):
+    """Validate and record a mobile focus-loss violation for Fair Play Mode."""
+    if not player_id:
+        return
+
+    game_state = get_game_session_state(db, session_code)
+    if not game_state or not getattr(game_state, "fair_play_enabled", False):
+        return
+
+    phase_state = manager.get_session_phase_state(session_code)
+    if phase_state.get("phase") != SessionPhase.QUESTION.value:
+        return
+
+    question_id = data.get("question_id")
+    current_question_id = phase_state.get("current_question_id")
+    if not question_id or question_id != current_question_id:
+        logger.info(
+            f"Ignoring focus violation for {session_code}/{player_id}; question {question_id} != {current_question_id}"
+        )
+        return
+
+    max_strikes = getattr(game_state, "max_fair_play_strikes", 3) or 3
+    try:
+        record, _violation, response_voided = record_focus_violation(
+            db,
+            session_code=session_code,
+            player_id=player_id,
+            question_id=question_id,
+            reason=data.get("reason"),
+            occurred_at=data.get("occurred_at"),
+            max_strikes=max_strikes,
+        )
+    except ValueError:
+        return
+
+    manager.freeze_player_for_question(session_code, player_id, question_id)
+    player_name = manager.get_player_name_from_websocket(websocket)
+    status_payload = {
+        "player_id": player_id,
+        "player_name": player_name,
+        "question_id": question_id,
+        "strike_count": record.strike_count,
+        "max_strikes": max_strikes,
+        "is_frozen": True,
+        "frozen_question_id": question_id,
+        "is_kicked": record.is_kicked,
+        "reason": data.get("reason") or "left_question_screen",
+        "response_voided": response_voided,
+    }
+
+    await manager.broadcast_to_session(
+        session_code,
+        {
+            "type": "player_flagged",
+            "data": status_payload,
+        },
+        critical=True,
+    )
+    await manager.broadcast_to_session(
+        session_code,
+        {
+            "type": "fair_play_status_update",
+            "data": status_payload,
+        },
+        critical=True,
+    )
+
+    if record.is_kicked:
+        await kick_player_for_fair_play(session_code, player_id, max_strikes)
+
+
+async def kick_player_for_fair_play(
+    session_code: str, player_id: str, max_strikes: int
+):
+    connections = manager.get_player_connections(session_code, player_id)
+    for connection_info in connections.values():
+        websocket = connection_info.get("websocket")
+        if not websocket:
+            continue
+
+        await manager.send_personal_message(
+            {
+                "type": "kicked_from_session",
+                "data": {
+                    "reason": "fair_play_strikes",
+                    "max_strikes": max_strikes,
+                    "message": f"You were removed after {max_strikes} Fair Play strikes.",
+                },
+            },
+            websocket,
+        )
+        try:
+            await websocket.close(
+                code=4003,
+                reason="Removed after Fair Play strikes",
+            )
+        except Exception as e:
+            logger.debug(f"Error closing kicked player websocket: {e}")
+
+    manager.disconnect_player_by_id(session_code, player_id)
+    await manager.broadcast_to_session(
+        session_code,
+        {
+            "type": "player_kicked",
+            "data": {
+                "player_id": player_id,
+                "reason": "fair_play_strikes",
+                "max_strikes": max_strikes,
+            },
+        },
+        exclude_client_types=["mobile"],
+        critical=True,
+    )
+    await manager.broadcast_player_roster_update(session_code)
 
 
 async def handle_get_question_with_options(
@@ -905,6 +1143,18 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
             "phase_started_at": phase_state["phase_started_at"],
             "phase_started_at_ms": phase_state["phase_started_at_ms"],
             "server_time_ms": phase_state["server_time_ms"],
+            "fair_play_enabled": (
+                game_state.fair_play_enabled if game_state else False
+            ),
+            "cheat_detection_enabled": (
+                game_state.fair_play_enabled if game_state else False
+            ),
+            "max_fair_play_strikes": (
+                game_state.max_fair_play_strikes if game_state else 3
+            ),
+            "max_cheat_strikes": (
+                game_state.max_fair_play_strikes if game_state else 3
+            ),
             "game_state": {
                 "isstarted": True,
                 "is_active": game_state.is_active if game_state else True,
@@ -912,6 +1162,12 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
                     game_state.current_question_index if game_state else 0
                 ),
                 "total_questions": (game_state.total_questions if game_state else 1),
+                "fair_play_enabled": (
+                    game_state.fair_play_enabled if game_state else False
+                ),
+                "max_fair_play_strikes": (
+                    game_state.max_fair_play_strikes if game_state else 3
+                ),
             },
         }
 

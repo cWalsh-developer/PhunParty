@@ -36,3 +36,5 @@ class GameSessionState(Base):
     ended_at = Column(DateTime, nullable=True)
     ispublic = Column(Boolean, default=True)
     isstarted = Column(Boolean, default=False)
+    fair_play_enabled = Column(Boolean, default=False, nullable=False)
+    max_fair_play_strikes = Column(Integer, default=3, nullable=False)

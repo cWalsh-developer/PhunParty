@@ -177,6 +177,8 @@ async def reveal_current_question(
     question_data["game_type"] = game_type
 
     manager.reset_all_players_answered(session_code)
+    if question_id:
+        manager.reset_fair_play_freezes_for_question(session_code, question_id)
     if game_type == BUZZER_GAME_TYPE:
         manager.start_buzzer_question(session_code, question_id)
         mobile_question_data = format_buzzer_question_for_mobile(question_data)

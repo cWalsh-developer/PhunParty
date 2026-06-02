@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import Base, engine
 from app.schemas.game_model import Game
 from app.schemas.game_session_model import GameSession
+from app.schemas.fair_play_models import FairPlayViolation, SessionPlayerFairPlay
 from app.schemas.game_state_models import GameSessionState, PlayerResponse
 from app.schemas.passwordReset import PasswordReset
 from app.schemas.players_model import Players
@@ -20,6 +21,7 @@ from app.schemas.social_models import (
     UserPushToken,
 )
 from app.database.social_migrations import ensure_social_player_columns
+from app.database.fair_play_migrations import ensure_fair_play_columns
 from app.routes import (
     authentication,
     friends,
@@ -158,6 +160,7 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 # Initialize database tables
 try:
     Base.metadata.create_all(bind=engine)
+    ensure_fair_play_columns()
     ensure_social_player_columns()
 except Exception as e:
     print(f"Warning: Could not create database tables: {e}")

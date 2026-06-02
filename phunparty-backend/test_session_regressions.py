@@ -630,6 +630,91 @@ def test_mobile_current_question_payload_does_not_fallback_before_question_phase
     mock_manager.queue_question.assert_not_called()
 
 
+def test_update_session_settings_broadcasts_fair_play_settings():
+    updated_state = SimpleNamespace(
+        fair_play_enabled=False,
+        max_fair_play_strikes=2,
+    )
+
+    with patch.object(
+        routes,
+        "update_fair_play_settings",
+        return_value=updated_state,
+    ) as update_settings:
+        with patch.object(routes, "manager") as mock_manager:
+            mock_manager.broadcast_to_session = AsyncMock()
+
+            asyncio.run(
+                routes.handle_update_session_settings(
+                    "SESSION123",
+                    {
+                        "cheat_detection_enabled": "false",
+                        "max_cheat_strikes": 2,
+                    },
+                    MagicMock(),
+                )
+            )
+
+    update_settings.assert_called_once_with(
+        update_settings.call_args.args[0],
+        "SESSION123",
+        fair_play_enabled=False,
+        max_fair_play_strikes=2,
+    )
+    broadcast_payload = mock_manager.broadcast_to_session.await_args.args[1]
+    assert broadcast_payload["type"] == "fair_play_settings_updated"
+    assert broadcast_payload["data"]["fair_play_enabled"] is False
+    assert broadcast_payload["data"]["max_fair_play_strikes"] == 2
+
+
+def test_focus_violation_records_strike_and_freezes_player():
+    websocket = MagicMock()
+    game_state = SimpleNamespace(
+        fair_play_enabled=True,
+        max_fair_play_strikes=3,
+    )
+    record = SimpleNamespace(strike_count=1, is_kicked=False)
+    violation = SimpleNamespace(id="V1")
+
+    with patch.object(routes, "get_game_session_state", return_value=game_state):
+        with patch.object(
+            routes,
+            "record_focus_violation",
+            return_value=(record, violation, True),
+        ) as record_violation:
+            with patch.object(routes, "manager") as mock_manager:
+                mock_manager.get_session_phase_state.return_value = {
+                    "phase": "question",
+                    "current_question_id": "Q1",
+                }
+                mock_manager.get_player_name_from_websocket.return_value = "Player"
+                mock_manager.broadcast_to_session = AsyncMock()
+
+                asyncio.run(
+                    routes.handle_focus_violation(
+                        websocket=websocket,
+                        session_code="SESSION123",
+                        player_id="P1",
+                        data={
+                            "question_id": "Q1",
+                            "reason": "app_backgrounded",
+                            "occurred_at": "2026-06-01T12:00:00Z",
+                        },
+                        db=MagicMock(),
+                    )
+                )
+
+    record_violation.assert_called_once()
+    mock_manager.freeze_player_for_question.assert_called_once_with(
+        "SESSION123", "P1", "Q1"
+    )
+    broadcast_types = [
+        call.args[1]["type"]
+        for call in mock_manager.broadcast_to_session.await_args_list
+    ]
+    assert broadcast_types == ["player_flagged", "fair_play_status_update"]
+
+
 def test_buzzer_ui_update_sends_answer_data_only_to_winner():
     winner_ws = MagicMock()
     waiting_ws = MagicMock()

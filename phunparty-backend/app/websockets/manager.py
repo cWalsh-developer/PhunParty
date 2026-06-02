@@ -59,6 +59,8 @@ class ConnectionManager:
         self.buzzer_states: Dict[str, Dict[str, Any]] = {}
         # session_code -> resolved game mode, shared across scheduler/handlers.
         self.session_game_types: Dict[str, str] = {}
+        # session_code -> player_id -> frozen question id for Fair Play violations.
+        self.fair_play_frozen_players: Dict[str, Dict[str, str]] = {}
         # event_id -> delivery/ack state for critical phase messages.
         self.pending_acks: Dict[str, Dict[str, Any]] = {}
         # session_code:player_id values for players who explicitly left.
@@ -591,6 +593,7 @@ class ConnectionManager:
         self.session_phase_state.pop(session_code, None)
         self.buzzer_states.pop(session_code, None)
         self.session_game_types.pop(session_code, None)
+        self.fair_play_frozen_players.pop(session_code, None)
 
         session_key_prefix = f"{session_code}:"
         for task_key, task in list(self.pending_player_leave_tasks.items()):
@@ -1179,6 +1182,35 @@ class ConnectionManager:
             if connection_info.get("client_type") == "mobile"
             and connection_info.get("player_answered", False)
         )
+
+    def freeze_player_for_question(
+        self, session_code: str, player_id: str, question_id: str
+    ) -> None:
+        self.fair_play_frozen_players.setdefault(session_code, {})[
+            player_id
+        ] = question_id
+
+    def is_player_frozen_for_question(
+        self, session_code: str, player_id: str, question_id: str
+    ) -> bool:
+        return (
+            self.fair_play_frozen_players.get(session_code, {}).get(player_id)
+            == question_id
+        )
+
+    def reset_fair_play_freezes_for_question(
+        self, session_code: str, question_id: str
+    ) -> None:
+        frozen_players = self.fair_play_frozen_players.get(session_code)
+        if not frozen_players:
+            return
+
+        for player_id, frozen_question_id in list(frozen_players.items()):
+            if frozen_question_id != question_id:
+                frozen_players.pop(player_id, None)
+
+        if not frozen_players:
+            self.fair_play_frozen_players.pop(session_code, None)
 
     def update_heartbeat(self, websocket: WebSocket):
         """Update the last heartbeat time for a websocket"""

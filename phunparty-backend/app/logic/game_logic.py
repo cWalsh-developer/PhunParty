@@ -20,6 +20,10 @@ from app.database.dbCRUD import (
     update_game_state_waiting_status,
     update_scores,
 )
+from app.database.fair_play_crud import (
+    is_player_frozen_for_question,
+    is_player_kicked,
+)
 from app.logic.answer_validation import validate_answer_against_question
 
 logger = logging.getLogger(__name__)
@@ -33,6 +37,19 @@ def submit_player_answer(
     Returns game state information
     """
     # Check if player already answered this question
+    game_state = get_game_session_state(db, session_code)
+    fair_play_enabled = getattr(game_state, "fair_play_enabled", False) is True
+
+    if fair_play_enabled:
+        if is_player_kicked(db, session_code, player_id) is True:
+            return {"error": "Player has been removed from this session"}
+
+        if (
+            is_player_frozen_for_question(db, session_code, player_id, question_id)
+            is True
+        ):
+            return {"error": "Player is frozen for this question"}
+
     existing_response = get_player_response(db, session_code, player_id, question_id)
     if existing_response:
         return {"error": "Player has already answered this question"}
