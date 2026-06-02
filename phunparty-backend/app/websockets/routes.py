@@ -4,7 +4,7 @@ WebSocket routes for real-time game functionality
 
 import asyncio
 from collections.abc import Generator
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import logging
 from typing import Optional
@@ -30,15 +30,18 @@ from app.database.fair_play_crud import (
     update_fair_play_settings,
 )
 from app.dependencies import get_db
+from app.logic.game_logic import check_and_advance_game
 from app.websockets.game_handlers import create_game_handler
 from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.game_modes import BUZZER_GAME_TYPE, resolve_session_game_type
 from app.websockets.manager import SessionPhase, manager
 from app.websockets.scheduler import (
     COUNTDOWN_DURATION_MS,
+    NEXT_QUESTION_REVEAL_DELAY_MS,
     advance_or_end_current_question,
     format_buzzer_question_for_mobile,
     iso_utc,
+    reveal_current_question,
     start_countdown,
 )
 
@@ -646,6 +649,12 @@ async def handle_websocket_message(
                         "data": {
                             "reason": "fair_play_restriction",
                             "question_id": question_id,
+                            "is_frozen": manager.is_player_frozen_for_question(
+                                session_code, player_id, question_id
+                            ),
+                            "is_kicked": is_player_kicked(
+                                db, session_code, player_id
+                            ),
                         },
                     },
                     websocket,
@@ -683,6 +692,15 @@ async def handle_websocket_message(
                         "data": {
                             "reason": "fair_play_restriction",
                             "question_id": current_question_id,
+                            "is_frozen": bool(
+                                current_question_id
+                                and manager.is_player_frozen_for_question(
+                                    session_code, player_id, current_question_id
+                                )
+                            ),
+                            "is_kicked": is_player_kicked(
+                                db, session_code, player_id
+                            ),
                         },
                     },
                     websocket,
@@ -891,7 +909,9 @@ async def handle_focus_violation(
     except ValueError:
         return
 
+    reason = data.get("reason") or "left_question_screen"
     manager.freeze_player_for_question(session_code, player_id, question_id)
+    manager.set_player_answered(session_code, player_id, True)
     player_name = manager.get_player_name_from_websocket(websocket)
     status_payload = {
         "player_id": player_id,
@@ -902,9 +922,32 @@ async def handle_focus_violation(
         "is_frozen": True,
         "frozen_question_id": question_id,
         "is_kicked": record.is_kicked,
-        "reason": data.get("reason") or "left_question_screen",
+        "reason": reason,
+        "fair_play_reason": reason,
+        "answer_status": "frozen",
         "response_voided": response_voided,
     }
+    manager.update_fair_play_status(
+        session_code,
+        player_id,
+        strike_count=record.strike_count,
+        max_strikes=max_strikes,
+        is_frozen=True,
+        frozen_question_id=question_id,
+        is_kicked=record.is_kicked,
+        reason=reason,
+        fair_play_reason=reason,
+        answer_status="frozen",
+    )
+    logger.info(
+        "FAIR PLAY STRIKE session=%s player=%s question=%s strikes=%s/%s kicked=%s",
+        session_code,
+        player_id,
+        question_id,
+        record.strike_count,
+        max_strikes,
+        record.is_kicked,
+    )
 
     await manager.broadcast_to_session(
         session_code,
@@ -922,6 +965,44 @@ async def handle_focus_violation(
         },
         critical=True,
     )
+    await manager.broadcast_to_session(
+        session_code,
+        {
+            "type": "player_answered",
+            "data": {
+                **status_payload,
+                "answered_at": datetime.now().isoformat(),
+                "answered_current": True,
+            },
+        },
+        critical=True,
+    )
+
+    game_progression = check_and_advance_game(db, session_code, question_id)
+    await manager.broadcast_to_session(
+        session_code,
+        {
+            "type": "game_status_update",
+            "data": game_progression,
+        },
+        critical=True,
+    )
+
+    action = game_progression.get("action")
+    if action == "next_question":
+        updated_game_state = get_game_session_state(db, session_code)
+        if updated_game_state and updated_game_state.current_question_id:
+            manager.clear_question_queue(session_code)
+            question_start_at = datetime.utcnow() + timedelta(
+                milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
+            )
+            await reveal_current_question(
+                session_code,
+                db,
+                iso_utc(question_start_at),
+            )
+    elif action == "game_ended":
+        await handle_game_end(session_code, db)
 
     if record.is_kicked:
         await kick_player_for_fair_play(session_code, player_id, max_strikes)
@@ -930,6 +1011,16 @@ async def handle_focus_violation(
 async def kick_player_for_fair_play(
     session_code: str, player_id: str, max_strikes: int
 ):
+    manager.update_fair_play_status(
+        session_code,
+        player_id,
+        is_kicked=True,
+        is_frozen=True,
+        reason="fair_play_strikes",
+        fair_play_reason="fair_play_strikes",
+        max_strikes=max_strikes,
+        answer_status="kicked",
+    )
     connections = manager.get_player_connections(session_code, player_id)
     for connection_info in connections.values():
         websocket = connection_info.get("websocket")
@@ -940,8 +1031,11 @@ async def kick_player_for_fair_play(
             {
                 "type": "kicked_from_session",
                 "data": {
+                    "player_id": player_id,
                     "reason": "fair_play_strikes",
+                    "strike_count": max_strikes,
                     "max_strikes": max_strikes,
+                    "is_kicked": True,
                     "message": f"You were removed after {max_strikes} Fair Play strikes.",
                 },
             },
@@ -963,7 +1057,9 @@ async def kick_player_for_fair_play(
             "data": {
                 "player_id": player_id,
                 "reason": "fair_play_strikes",
+                "strike_count": max_strikes,
                 "max_strikes": max_strikes,
+                "is_kicked": True,
             },
         },
         exclude_client_types=["mobile"],

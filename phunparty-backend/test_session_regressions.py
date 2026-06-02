@@ -196,6 +196,41 @@ def test_submit_player_answer_returns_answer_match_metadata():
     assert result["answer_match"]["matched_answer"] == "Cameron"
 
 
+def test_check_and_advance_game_counts_fair_play_resolved_players():
+    game_state = SimpleNamespace(
+        isstarted=True,
+        current_question_index=0,
+        total_questions=2,
+        is_active=True,
+    )
+
+    with patch.object(game_logic, "get_number_of_players_in_session", return_value=2):
+        with patch.object(game_logic, "count_responses_for_question", return_value=1):
+            with patch.object(
+                game_logic,
+                "count_fair_play_resolved_players_for_question",
+                return_value=1,
+            ):
+                with patch.object(
+                    game_logic, "get_game_session_state", return_value=game_state
+                ):
+                    with patch.object(game_logic, "update_game_state_waiting_status"):
+                        with patch.object(
+                            game_logic,
+                            "advance_to_next_question",
+                            return_value={"action": "next_question"},
+                        ):
+                            result = game_logic.check_and_advance_game(
+                                MagicMock(), "SESSION123", "Q1"
+                            )
+
+    assert result["players_answered"] == 2
+    assert result["submitted_answers"] == 1
+    assert result["fair_play_resolved"] == 1
+    assert result["waiting_for_players"] is False
+    assert result["action"] == "next_question"
+
+
 def test_build_sync_state_recovers_active_game_to_question_not_intro():
     game_state = SimpleNamespace(
         session_code="SESSION123",
@@ -547,6 +582,68 @@ def test_get_mobile_players_includes_connection_without_player_name():
     assert nameless_player["player_name"] == "P2"
 
 
+def test_get_mobile_players_includes_fair_play_status():
+    session_code = "FAIRROSTER"
+    manager.active_connections[session_code] = {
+        "ws1": {
+            "client_type": "mobile",
+            "player_id": "P1",
+            "player_name": "Alice",
+            "player_photo": None,
+            "connected_at": "2026-06-01T12:00:00",
+            "player_answered": True,
+            "connection_state": "connected",
+        },
+    }
+    manager.update_fair_play_status(
+        session_code,
+        "P1",
+        strike_count=2,
+        max_strikes=3,
+        is_frozen=True,
+        frozen_question_id="Q1",
+        is_kicked=False,
+        answer_status="frozen",
+    )
+
+    try:
+        players = manager.get_mobile_players(session_code)
+    finally:
+        manager.active_connections.pop(session_code, None)
+        manager.fair_play_player_status.pop(session_code, None)
+
+    assert players[0]["strike_count"] == 2
+    assert players[0]["max_strikes"] == 3
+    assert players[0]["is_frozen"] is True
+    assert players[0]["frozen_question_id"] == "Q1"
+    assert players[0]["answer_status"] == "frozen"
+
+
+def test_reset_fair_play_freezes_clears_stale_roster_status():
+    session_code = "FREEZERESET"
+    manager.freeze_player_for_question(session_code, "P1", "Q1")
+    manager.update_fair_play_status(
+        session_code,
+        "P1",
+        strike_count=1,
+        max_strikes=3,
+        is_kicked=False,
+    )
+
+    try:
+        manager.reset_fair_play_freezes_for_question(session_code, "Q2")
+        status = manager.get_fair_play_status(session_code, "P1")
+    finally:
+        manager.fair_play_frozen_players.pop(session_code, None)
+        manager.fair_play_player_status.pop(session_code, None)
+
+    assert manager.is_player_frozen_for_question(session_code, "P1", "Q1") is False
+    assert status["strike_count"] == 1
+    assert status["is_frozen"] is False
+    assert status["frozen_question_id"] is None
+    assert status["answer_status"] is None
+
+
 def test_roster_update_broadcasts_to_non_mobile_clients_only():
     session_code = "ROSTERHOST"
     web_socket = SimpleNamespace(send_text=AsyncMock())
@@ -682,37 +779,68 @@ def test_focus_violation_records_strike_and_freezes_player():
             "record_focus_violation",
             return_value=(record, violation, True),
         ) as record_violation:
-            with patch.object(routes, "manager") as mock_manager:
-                mock_manager.get_session_phase_state.return_value = {
-                    "phase": "question",
-                    "current_question_id": "Q1",
-                }
-                mock_manager.get_player_name_from_websocket.return_value = "Player"
-                mock_manager.broadcast_to_session = AsyncMock()
+            with patch.object(
+                routes,
+                "check_and_advance_game",
+                return_value={"playersAnswered": 1, "waiting_for_players": True},
+            ) as check_and_advance:
+                with patch.object(routes, "manager") as mock_manager:
+                    mock_manager.get_session_phase_state.return_value = {
+                        "phase": "question",
+                        "current_question_id": "Q1",
+                    }
+                    mock_manager.get_player_name_from_websocket.return_value = "Player"
+                    mock_manager.broadcast_to_session = AsyncMock()
 
-                asyncio.run(
-                    routes.handle_focus_violation(
-                        websocket=websocket,
-                        session_code="SESSION123",
-                        player_id="P1",
-                        data={
-                            "question_id": "Q1",
-                            "reason": "app_backgrounded",
-                            "occurred_at": "2026-06-01T12:00:00Z",
-                        },
-                        db=MagicMock(),
+                    asyncio.run(
+                        routes.handle_focus_violation(
+                            websocket=websocket,
+                            session_code="SESSION123",
+                            player_id="P1",
+                            data={
+                                "question_id": "Q1",
+                                "reason": "app_backgrounded",
+                                "occurred_at": "2026-06-01T12:00:00Z",
+                            },
+                            db=MagicMock(),
+                        )
                     )
-                )
 
     record_violation.assert_called_once()
+    check_and_advance.assert_called_once()
     mock_manager.freeze_player_for_question.assert_called_once_with(
         "SESSION123", "P1", "Q1"
+    )
+    mock_manager.set_player_answered.assert_called_once_with(
+        "SESSION123", "P1", True
+    )
+    mock_manager.update_fair_play_status.assert_called_once_with(
+        "SESSION123",
+        "P1",
+        strike_count=1,
+        max_strikes=3,
+        is_frozen=True,
+        frozen_question_id="Q1",
+        is_kicked=False,
+        reason="app_backgrounded",
+        fair_play_reason="app_backgrounded",
+        answer_status="frozen",
     )
     broadcast_types = [
         call.args[1]["type"]
         for call in mock_manager.broadcast_to_session.await_args_list
     ]
-    assert broadcast_types == ["player_flagged", "fair_play_status_update"]
+    assert broadcast_types == [
+        "player_flagged",
+        "fair_play_status_update",
+        "player_answered",
+        "game_status_update",
+    ]
+    player_answered_payload = (
+        mock_manager.broadcast_to_session.await_args_list[2].args[1]["data"]
+    )
+    assert player_answered_payload["answer_status"] == "frozen"
+    assert player_answered_payload["answered_current"] is True
 
 
 def test_buzzer_ui_update_sends_answer_data_only_to_winner():

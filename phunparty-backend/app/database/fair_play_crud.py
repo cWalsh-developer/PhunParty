@@ -149,3 +149,22 @@ def is_player_frozen_for_question(
     db: Session, session_code: str, player_id: str, question_id: str
 ) -> bool:
     return has_focus_violation_for_question(db, session_code, player_id, question_id)
+
+
+def count_fair_play_resolved_players_for_question(
+    db: Session, session_code: str, question_id: str
+) -> int:
+    """Count players resolved by Fair Play violations without double-counting answers."""
+    answered_player_ids = (
+        db.query(PlayerResponse.player_id)
+        .filter(PlayerResponse.session_code == session_code)
+        .filter(PlayerResponse.question_id == question_id)
+    )
+    return (
+        db.query(FairPlayViolation.player_id)
+        .filter(FairPlayViolation.session_code == session_code)
+        .filter(FairPlayViolation.question_id == question_id)
+        .filter(FairPlayViolation.player_id.notin_(answered_player_ids))
+        .distinct()
+        .count()
+    )

@@ -21,6 +21,7 @@ from app.database.dbCRUD import (
     update_scores,
 )
 from app.database.fair_play_crud import (
+    count_fair_play_resolved_players_for_question,
     is_player_frozen_for_question,
     is_player_kicked,
 )
@@ -116,6 +117,12 @@ def check_and_advance_game(
         responses_to_question = count_responses_for_question(
             db, session_code, current_question_id
         )
+        fair_play_resolved_players = count_fair_play_resolved_players_for_question(
+            db, session_code, current_question_id
+        )
+        resolved_players = min(
+            players_in_session, responses_to_question + fair_play_resolved_players
+        )
 
         # Get current game state
         game_state = get_game_session_state(db, session_code)
@@ -127,8 +134,10 @@ def check_and_advance_game(
 
         result = {
             "players_total": players_in_session,
-            "players_answered": responses_to_question,
-            "waiting_for_players": responses_to_question < players_in_session,
+            "players_answered": resolved_players,
+            "submitted_answers": responses_to_question,
+            "fair_play_resolved": fair_play_resolved_players,
+            "waiting_for_players": resolved_players < players_in_session,
             "current_question_index": game_state.current_question_index,
             "total_questions": game_state.total_questions,
             "game_state": frontend_game_state,
@@ -137,15 +146,20 @@ def check_and_advance_game(
             + 1,  # Frontend expects 1-based indexing
             "totalQuestions": game_state.total_questions,
             "playersCount": players_in_session,
-            "playersAnswered": responses_to_question,
+            "playersAnswered": resolved_players,
             "isstarted": game_state.isstarted,
             "is_active": game_state.is_active,
         }
 
         # If all players have answered
-        if responses_to_question >= players_in_session:
+        if resolved_players >= players_in_session:
             logger.info(
-                f"All players ({responses_to_question}/{players_in_session}) have answered question {current_question_id}"
+                "All players (%s/%s, submitted=%s, fair_play_resolved=%s) have resolved question %s",
+                resolved_players,
+                players_in_session,
+                responses_to_question,
+                fair_play_resolved_players,
+                current_question_id,
             )
 
             # Update waiting status

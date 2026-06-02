@@ -61,6 +61,8 @@ class ConnectionManager:
         self.session_game_types: Dict[str, str] = {}
         # session_code -> player_id -> frozen question id for Fair Play violations.
         self.fair_play_frozen_players: Dict[str, Dict[str, str]] = {}
+        # session_code -> player_id -> Fair Play UI state included in roster payloads.
+        self.fair_play_player_status: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # event_id -> delivery/ack state for critical phase messages.
         self.pending_acks: Dict[str, Dict[str, Any]] = {}
         # session_code:player_id values for players who explicitly left.
@@ -594,6 +596,7 @@ class ConnectionManager:
         self.buzzer_states.pop(session_code, None)
         self.session_game_types.pop(session_code, None)
         self.fair_play_frozen_players.pop(session_code, None)
+        self.fair_play_player_status.pop(session_code, None)
 
         session_key_prefix = f"{session_code}:"
         for task_key, task in list(self.pending_player_leave_tasks.items()):
@@ -895,6 +898,12 @@ class ConnectionManager:
                     "connection_state", "connected"
                 ),
             }
+            if player_id:
+                player_data.update(
+                    self.fair_play_player_status.get(session_code, {}).get(
+                        player_id, {}
+                    )
+                )
 
             if player_id:
                 existing = latest_by_player.get(player_id)
@@ -1189,6 +1198,12 @@ class ConnectionManager:
         self.fair_play_frozen_players.setdefault(session_code, {})[
             player_id
         ] = question_id
+        self.update_fair_play_status(
+            session_code,
+            player_id,
+            is_frozen=True,
+            frozen_question_id=question_id,
+        )
 
     def is_player_frozen_for_question(
         self, session_code: str, player_id: str, question_id: str
@@ -1196,6 +1211,22 @@ class ConnectionManager:
         return (
             self.fair_play_frozen_players.get(session_code, {}).get(player_id)
             == question_id
+        )
+
+    def update_fair_play_status(
+        self, session_code: str, player_id: str, **status: Any
+    ) -> Dict[str, Any]:
+        """Store host-visible Fair Play state for roster updates."""
+        session_status = self.fair_play_player_status.setdefault(session_code, {})
+        player_status = session_status.setdefault(player_id, {})
+        player_status.update(status)
+        return player_status
+
+    def get_fair_play_status(
+        self, session_code: str, player_id: str
+    ) -> Dict[str, Any]:
+        return dict(
+            self.fair_play_player_status.get(session_code, {}).get(player_id, {})
         )
 
     def reset_fair_play_freezes_for_question(
@@ -1208,6 +1239,13 @@ class ConnectionManager:
         for player_id, frozen_question_id in list(frozen_players.items()):
             if frozen_question_id != question_id:
                 frozen_players.pop(player_id, None)
+                self.update_fair_play_status(
+                    session_code,
+                    player_id,
+                    is_frozen=False,
+                    frozen_question_id=None,
+                    answer_status=None,
+                )
 
         if not frozen_players:
             self.fair_play_frozen_players.pop(session_code, None)
