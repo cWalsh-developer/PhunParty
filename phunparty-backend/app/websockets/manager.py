@@ -390,6 +390,9 @@ class ConnectionManager:
         """Connect a client to a game session"""
         await websocket.accept()
 
+        if client_type == "mobile" and not player_name:
+            player_name = player_id or "Unknown player"
+
         reconnecting_mobile_player = False
         if client_type == "mobile" and player_id:
             self.intentional_leaves.discard(
@@ -430,6 +433,14 @@ class ConnectionManager:
         logger.info(
             f"Client connected: {client_type} to session {session_code} (ws_id: {ws_id}, player: {player_name or 'N/A'})"
         )
+        logger.info(
+            "CONNECT DEBUG session=%s client_type=%s player_id=%s player_name=%s player_photo=%s",
+            session_code,
+            client_type,
+            player_id,
+            player_name,
+            player_photo,
+        )
 
         # Send connection confirmation to the connecting client and wait for ack
         try:
@@ -469,7 +480,7 @@ class ConnectionManager:
 
         # Notify other clients about new connection IMMEDIATELY (if mobile player joining)
         # REMOVED: await asyncio.sleep(0.2) - This delay was causing web UI to miss player joins
-        if client_type == "mobile" and player_name:
+        if client_type == "mobile":
             logger.info(
                 f"📢 Mobile player {player_name} connected - broadcasting IMMEDIATELY to session {session_code}"
             )
@@ -863,10 +874,10 @@ class ConnectionManager:
             if connection_info.get("client_type") != "mobile":
                 continue
 
-            player_name = connection_info.get("player_name")
             player_id = connection_info.get("player_id")
-            if not player_name:
-                continue
+            player_name = (
+                connection_info.get("player_name") or player_id or "Unknown player"
+            )
 
             player_data = {
                 "player_id": player_id,
@@ -892,6 +903,14 @@ class ConnectionManager:
         deduped_players = list(latest_by_player.values()) + unnamed_mobile_players
         deduped_players.sort(
             key=lambda p: (p.get("player_name") or "", p.get("connected_at") or "")
+        )
+        logger.info(
+            "ROSTER DEBUG session=%s players=%s",
+            session_code,
+            [
+                (player.get("player_name"), player.get("player_id"))
+                for player in deduped_players
+            ],
         )
         return deduped_players
 
@@ -1209,7 +1228,7 @@ class ConnectionManager:
         await self.broadcast_to_session(
             session_code,
             roster_message,
-            only_client_types=["web"],
+            exclude_client_types=["mobile"],
             critical=True,
         )
 

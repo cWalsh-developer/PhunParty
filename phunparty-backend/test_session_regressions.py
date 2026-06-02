@@ -425,6 +425,75 @@ def test_mobile_initial_state_sends_queued_question_during_question_phase():
     )
 
 
+def test_get_mobile_players_includes_connection_without_player_name():
+    session_code = "NAMELESS"
+    manager.active_connections[session_code] = {
+        "ws1": {
+            "client_type": "mobile",
+            "player_id": "P2",
+            "player_name": None,
+            "player_photo": None,
+            "connected_at": "2026-06-01T12:00:00",
+            "player_answered": False,
+            "connection_state": "connected",
+        },
+        "ws2": {
+            "client_type": "mobile",
+            "player_id": "P1",
+            "player_name": "Alice",
+            "player_photo": None,
+            "connected_at": "2026-06-01T12:01:00",
+            "player_answered": False,
+            "connection_state": "connected",
+        },
+    }
+
+    try:
+        players = manager.get_mobile_players(session_code)
+    finally:
+        manager.active_connections.pop(session_code, None)
+
+    assert {player["player_id"] for player in players} == {"P1", "P2"}
+    nameless_player = next(player for player in players if player["player_id"] == "P2")
+    assert nameless_player["player_name"] == "P2"
+
+
+def test_roster_update_broadcasts_to_non_mobile_clients_only():
+    session_code = "ROSTERHOST"
+    web_socket = SimpleNamespace(send_text=AsyncMock())
+    host_socket = SimpleNamespace(send_text=AsyncMock())
+    mobile_socket = SimpleNamespace(send_text=AsyncMock())
+    manager.active_connections[session_code] = {
+        "web": {
+            "client_type": "web",
+            "websocket": web_socket,
+            "player_name": None,
+        },
+        "host": {
+            "client_type": "host",
+            "websocket": host_socket,
+            "player_name": None,
+        },
+        "mobile": {
+            "client_type": "mobile",
+            "websocket": mobile_socket,
+            "player_id": "P1",
+            "player_name": "Alice",
+            "connected_at": "2026-06-01T12:00:00",
+            "connection_confirmed": True,
+        },
+    }
+
+    try:
+        asyncio.run(manager.broadcast_player_roster_update(session_code))
+    finally:
+        manager.active_connections.pop(session_code, None)
+
+    web_socket.send_text.assert_awaited_once()
+    host_socket.send_text.assert_awaited_once()
+    mobile_socket.send_text.assert_not_awaited()
+
+
 def test_mobile_current_question_payload_rebuilds_missing_queue_from_db():
     question = {
         "question_id": "Q1",
