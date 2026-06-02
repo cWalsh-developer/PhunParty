@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 COUNTDOWN_DURATION_MS = 3000
 NEXT_QUESTION_REVEAL_DELAY_MS = 250
 QUESTION_BROADCAST_LEAD_MS = 500
-QUESTION_DURATION_MS = 15000
+QUESTION_DURATION_MS = 30000
 
 
 def iso_utc(dt: datetime) -> str:
@@ -85,7 +85,9 @@ async def advance_or_end_current_question(
         question_start_at = datetime.utcnow() + timedelta(
             milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
         )
-        return await reveal_current_question(session_code, db, iso_utc(question_start_at))
+        return await reveal_current_question(
+            session_code, db, iso_utc(question_start_at)
+        )
 
     if action == "game_ended":
         from app.websockets.game_lifecycle import handle_game_end
@@ -236,7 +238,9 @@ async def scheduled_question_timeout(
 
 async def scheduled_question_reveal(session_code: str, question_start_at: datetime):
     """Reveal the current question from a server-owned countdown timer."""
-    broadcast_at = question_start_at - timedelta(milliseconds=QUESTION_BROADCAST_LEAD_MS)
+    broadcast_at = question_start_at - timedelta(
+        milliseconds=QUESTION_BROADCAST_LEAD_MS
+    )
     sleep_seconds = max(0, (broadcast_at - datetime.utcnow()).total_seconds())
     await asyncio.sleep(sleep_seconds)
 
