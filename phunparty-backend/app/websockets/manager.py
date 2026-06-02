@@ -1189,14 +1189,19 @@ class ConnectionManager:
                 break
 
     async def broadcast_player_roster_update(self, session_code: str):
-        """Broadcast current player roster to all clients"""
+        """Broadcast the authoritative mobile player roster to host clients."""
         mobile_players = self.get_mobile_players(session_code)
+        stats = self.get_session_stats(session_code)
 
         roster_message = {
             "type": "roster_update",
             "data": {
+                "session_code": session_code,
+                "connected_players": mobile_players,
                 "players": mobile_players,
                 "total_players": len(mobile_players),
+                "connection_stats": stats,
+                "server_time_ms": self._utc_now_ms(),
                 "timestamp": datetime.now().isoformat(),
             },
         }
@@ -1204,6 +1209,7 @@ class ConnectionManager:
         await self.broadcast_to_session(
             session_code,
             roster_message,
+            only_client_types=["web"],
             critical=True,
         )
 

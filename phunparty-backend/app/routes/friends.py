@@ -118,7 +118,11 @@ async def create_friend_request(
                 tokens,
                 "New friend request",
                 f"{current_player.player_name} wants to add you as a friend",
-                {"friend_request_id": friend_request.id},
+                {
+                    "type": "friend_request_received",
+                    "friend_request_id": friend_request.id,
+                    "sender_player_id": current_player.player_id,
+                },
             )
 
     return request_response(db, current_player.player_id, friend_request)
@@ -167,7 +171,11 @@ async def accept_request(
                 tokens,
                 "Friend request accepted",
                 f"{current_player.player_name} accepted your friend request",
-                {"friend_request_id": friend_request.id},
+                {
+                    "type": "friend_request_accepted",
+                    "friend_request_id": friend_request.id,
+                    "accepted_by_player_id": current_player.player_id,
+                },
             )
 
     return request_response(db, current_player.player_id, friend_request)
