@@ -34,13 +34,11 @@ class ConnectionManager:
     HEARTBEAT_UNSTABLE_SECONDS = 20
     HEARTBEAT_DISCONNECTED_SECONDS = 60
     PING_INTERVAL_SECONDS = 10
-    MOBILE_DISCONNECT_GRACE_SECONDS = 180
+    MOBILE_DISCONNECT_GRACE_SECONDS = 30
     ACK_RETRY_DELAY_SECONDS = 1.5
     ACK_MAX_RESENDS = 2
     ACK_EVENT_TYPES = {
         "game_started",
-        "intro_started",
-        "intro_skipped",
         "countdown_started",
         "question_started",
         "game_ended",
@@ -273,10 +271,10 @@ class ConnectionManager:
 
         target_state["acked"] = True
         target_state["acked_at"] = self._utc_now_iso()
-        logger.info(f"ACK received for {event_id} from {ws_id}")
+        logger.debug(f"ACK received for {event_id} from {ws_id}")
 
         if all(target.get("acked") for target in event_state["targets"].values()):
-            logger.info(f"All targets acknowledged {event_id}")
+            logger.debug(f"All targets acknowledged {event_id}")
             self.pending_acks.pop(event_id, None)
 
         return True
@@ -565,6 +563,46 @@ class ConnectionManager:
             ):
                 self._schedule_mobile_leave(session_code, client_info)
 
+    def cleanup_session(self, session_code: str) -> None:
+        """Drop in-memory state for a completed session once clients have left."""
+        active_connections = self.active_connections.get(session_code, {})
+        if active_connections:
+            logger.debug(
+                f"Skipping active connection cleanup for session {session_code}; {len(active_connections)} connection(s) remain"
+            )
+        else:
+            self.active_connections.pop(session_code, None)
+
+        self.question_queue.pop(session_code, None)
+        self.session_phase_state.pop(session_code, None)
+        self.buzzer_states.pop(session_code, None)
+        self.session_game_types.pop(session_code, None)
+
+        session_key_prefix = f"{session_code}:"
+        for task_key, task in list(self.pending_player_leave_tasks.items()):
+            if task_key.startswith(session_key_prefix):
+                if task and not task.done():
+                    task.cancel()
+                self.pending_player_leave_tasks.pop(task_key, None)
+
+        self.intentional_leaves = {
+            key
+            for key in self.intentional_leaves
+            if not key.startswith(session_key_prefix)
+        }
+
+        for event_id, event_state in list(self.pending_acks.items()):
+            if event_state.get("session_code") == session_code:
+                self.pending_acks.pop(event_id, None)
+
+        logger.info(f"Cleaned in-memory websocket state for session {session_code}")
+
+    async def cleanup_session_later(
+        self, session_code: str, delay_seconds: int = 60
+    ) -> None:
+        await asyncio.sleep(delay_seconds)
+        self.cleanup_session(session_code)
+
     async def send_personal_message(
         self, message: dict, websocket: WebSocket, retries: int = 2
     ):
@@ -687,11 +725,13 @@ class ConnectionManager:
         elif exclude_client_types:
             filter_info = f" (exclude: {', '.join(exclude_client_types)})"
 
-        logger.info(
+        logger.debug(
             f"📡 Broadcasting '{message.get('type')}' to session {session_code}{filter_info}"
         )
 
-        for ws_id, connection_info in self.active_connections[session_code].items():
+        for ws_id, connection_info in list(
+            self.active_connections[session_code].items()
+        ):
             websocket = connection_info["websocket"]
             client_type = connection_info["client_type"]
             player_name = connection_info.get("player_name", "N/A")
@@ -757,7 +797,7 @@ class ConnectionManager:
                         )
                         disconnected_websockets.append(websocket)
 
-        logger.info(
+        logger.debug(
             f"✅ Broadcast complete: {success_count}/{total_targets} clients received '{message.get('type')}' (📱mobile: {mobile_sent}, 💻web: {web_sent})"
         )
 
@@ -778,7 +818,7 @@ class ConnectionManager:
         ]
         mobile_count = len(mobile_connections)
 
-        logger.info(
+        logger.debug(
             f"📱 Broadcasting to {mobile_count} mobile client(s) in session {session_code}: type={message.get('type')}"
         )
 
@@ -787,7 +827,7 @@ class ConnectionManager:
         else:
             # Log details about connected mobile clients
             for conn in mobile_connections:
-                logger.info(
+                logger.debug(
                     f"📱 Mobile client: player_id={conn.get('player_id')}, ws_id={conn.get('ws_id')}"
                 )
 
@@ -802,7 +842,7 @@ class ConnectionManager:
             for conn in self.active_connections.get(session_code, {}).values()
             if conn["client_type"] == "web"
         )
-        logger.info(
+        logger.debug(
             f"💻 Broadcasting to {web_count} web client(s) in session {session_code}: type={message.get('type')}"
         )
         await self.broadcast_to_session(
@@ -1064,7 +1104,7 @@ class ConnectionManager:
                 and connection_info.get("client_type") == "mobile"
             ):
                 connection_info["player_answered"] = answered
-                logger.info(
+                logger.debug(
                     f"Set player_answered={answered} for player {player_id} in session {session_code}"
                 )
                 return True
@@ -1088,7 +1128,7 @@ class ConnectionManager:
                 connection_info["player_answered"] = False
                 count += 1
 
-        logger.info(
+        logger.debug(
             f"Reset player_answered for {count} players in session {session_code}"
         )
 
@@ -1167,7 +1207,7 @@ class ConnectionManager:
             critical=True,
         )
 
-        logger.info(
+        logger.debug(
             f"📋 Broadcasted roster update to session {session_code}: {len(mobile_players)} players - {[p['player_name'] for p in mobile_players]}"
         )
 

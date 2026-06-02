@@ -3,6 +3,7 @@ WebSocket routes for real-time game functionality
 """
 
 import asyncio
+from collections.abc import Generator
 from datetime import datetime
 import json
 import logging
@@ -39,6 +40,20 @@ from app.websockets.scheduler import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 INTRO_RECOVERY_WINDOW_SECONDS = 15
+
+
+def open_db_session() -> tuple[Session, Generator[Session, None, None]]:
+    """Open a short-lived DB session from the FastAPI dependency generator."""
+    db_generator = get_db()
+    db = next(db_generator)
+    return db, db_generator
+
+
+def close_db_session(db_generator: Generator[Session, None, None]) -> None:
+    try:
+        db_generator.close()
+    except Exception:
+        logger.exception("Error closing websocket DB session")
 
 
 def serialize_game_state(game_state_obj, game_type: Optional[str] = None) -> Optional[dict]:
@@ -205,70 +220,79 @@ async def websocket_endpoint(
     - player_name: Display name for mobile clients
     - player_photo: Photo URL for mobile clients
     """
-    db: Session = next(get_db())
+    game_handler = None
+    resolved_game_type = None
 
     try:
-        # Verify session exists
-        session = get_session_by_code(db, session_code)
-        if not session:
-            await websocket.close(code=4004, reason="Session not found")
-            return
-
-        # For mobile clients, verify player exists
-        if client_type == "mobile":
-            if not player_id:
-                await websocket.close(
-                    code=4001, reason="Player ID required for mobile clients"
-                )
+        db, db_generator = open_db_session()
+        try:
+            # Verify session exists
+            session = get_session_by_code(db, session_code)
+            if not session:
+                await websocket.close(code=4004, reason="Session not found")
                 return
 
-            player = get_player_by_ID(db, player_id)
-            if not player:
-                await websocket.close(code=4004, reason="Player not found")
-                return
+            # For mobile clients, verify player exists
+            if client_type == "mobile":
+                if not player_id:
+                    await websocket.close(
+                        code=4001, reason="Player ID required for mobile clients"
+                    )
+                    return
 
-            # Use player info from database if not provided in query params
-            player_name = player_name or player.player_name
-            player_photo = player_photo or player.profile_photo_url
+                player = get_player_by_ID(db, player_id)
+                if not player:
+                    await websocket.close(code=4004, reason="Player not found")
+                    return
 
-            # CRITICAL: Check for existing connections from this player
-            # Prevent duplicate registrations that cause the 7x join bug
-            existing_connections = manager.get_player_connections(
-                session_code, player_id
-            )
+                # Use player info from database if not provided in query params
+                player_name = player_name or player.player_name
+                player_photo = player_photo or player.profile_photo_url
 
-            if existing_connections:
-                logger.warning(
-                    f"âš ï¸ Player {player_id} ({player_name}) already has {len(existing_connections)} connection(s) to session {session_code}"
+                # CRITICAL: Check for existing connections from this player
+                # Prevent duplicate registrations that cause the 7x join bug
+                existing_connections = manager.get_player_connections(
+                    session_code, player_id
                 )
-                logger.info(
-                    f"ðŸ”Œ Closing {len(existing_connections)} old connection(s) before establishing new one"
-                )
 
-                # Remove old connections from manager state immediately so roster is stable.
-                manager.disconnect_player_by_id(session_code, player_id)
+                if existing_connections:
+                    logger.warning(
+                        f"Player {player_id} ({player_name}) already has {len(existing_connections)} connection(s) to session {session_code}"
+                    )
+                    logger.info(
+                        f"Closing {len(existing_connections)} old connection(s) before establishing new one"
+                    )
 
-                # Close old sockets in background to avoid blocking new connection setup.
-                for old_ws_id, old_conn_info in existing_connections.items():
-                    try:
-                        old_ws = old_conn_info.get("websocket")
-                        if old_ws:
-                            asyncio.create_task(
-                                old_ws.close(
-                                    code=1000, reason="New connection established"
+                    # Remove old connections from manager state immediately so roster is stable.
+                    manager.disconnect_player_by_id(session_code, player_id)
+
+                    # Close old sockets in background to avoid blocking new connection setup.
+                    for old_ws_id, old_conn_info in existing_connections.items():
+                        try:
+                            old_ws = old_conn_info.get("websocket")
+                            if old_ws:
+                                asyncio.create_task(
+                                    old_ws.close(
+                                        code=1000, reason="New connection established"
+                                    )
                                 )
-                            )
-                            logger.info(
-                                f"âœ… Closed old connection {old_ws_id} for player {player_id}"
-                            )
-                    except Exception as e:
-                        logger.error(f"Error closing old connection: {e}")
+                                logger.info(
+                                    f"Closed old connection {old_ws_id} for player {player_id}"
+                                )
+                        except Exception as e:
+                            logger.error(f"Error closing old connection: {e}")
 
-                logger.info(
-                    f"âœ… Cleanup complete - ready for new connection from {player_name}"
-                )
+                    logger.info(
+                        f"Cleanup complete - ready for new connection from {player_name}"
+                    )
 
-        # Connect to session
+            resolved_game_type = resolve_session_game_type(
+                db, session_code, session=session, requested_game_type=game_type
+            )
+        finally:
+            close_db_session(db_generator)
+
+        # Connect to session after DB validation has completed.
         await manager.connect(
             websocket=websocket,
             session_code=session_code,
@@ -282,21 +306,21 @@ async def websocket_endpoint(
         total_connections = manager.get_total_connection_count()
         session_connections = len(manager.active_connections.get(session_code, {}))
         logger.info(
-            f"ðŸ“Š Connection stats - Session: {session_connections}, Total: {total_connections}"
+            f"Connection stats - Session: {session_connections}, Total: {total_connections}"
         )
 
-        resolved_game_type = resolve_session_game_type(
-            db, session_code, session=session, requested_game_type=game_type
-        )
-
-        # Send initial session state to the connecting client
-        await send_initial_session_state(
-            websocket,
-            session_code,
-            client_type,
-            db,
-            game_type=resolved_game_type,
-        )
+        # Send initial session state with its own short-lived DB session.
+        initial_db, initial_db_generator = open_db_session()
+        try:
+            await send_initial_session_state(
+                websocket,
+                session_code,
+                client_type,
+                initial_db,
+                game_type=resolved_game_type,
+            )
+        finally:
+            close_db_session(initial_db_generator)
 
         game_handler = create_game_handler(session_code, resolved_game_type)
         logger.info(
@@ -310,15 +334,19 @@ async def websocket_endpoint(
                 data = await websocket.receive_text()
                 message = json.loads(data)
 
-                await handle_websocket_message(
-                    message,
-                    websocket,
-                    session_code,
-                    client_type,
-                    player_id,
-                    game_handler,
-                    db,
-                )
+                message_db, message_db_generator = open_db_session()
+                try:
+                    await handle_websocket_message(
+                        message,
+                        websocket,
+                        session_code,
+                        client_type,
+                        player_id,
+                        game_handler,
+                        message_db,
+                    )
+                finally:
+                    close_db_session(message_db_generator)
 
             except WebSocketDisconnect:
                 break
@@ -337,7 +365,6 @@ async def websocket_endpoint(
         await websocket.close(code=4000, reason="Connection error")
     finally:
         manager.disconnect(websocket)
-
 
 async def send_initial_session_state(
     websocket: WebSocket,
@@ -441,7 +468,10 @@ async def handle_websocket_message(
     message_type = message.get("type")
     data = message.get("data", {})
 
-    logger.info(
+    log_message = (
+        logger.debug if message_type in {"ping", "pong", "ack"} else logger.info
+    )
+    log_message(
         f"Received {message_type} from {client_type} client in session {session_code}"
     )
 
@@ -473,7 +503,7 @@ async def handle_websocket_message(
         # Client acknowledging successful connection - mark as ready
         manager.mark_client_ready(websocket)
         manager.update_heartbeat(websocket)
-        logger.info(f"Client acknowledged connection for session {session_code}")
+        logger.debug(f"Client acknowledged connection for session {session_code}")
 
     elif message_type == "ack":
         event_id = (
@@ -639,7 +669,6 @@ async def handle_websocket_message(
                 },
             },
             critical=True,
-            require_ack=True,
         )
         countdown_duration_ms = (
             data.get("duration_ms", COUNTDOWN_DURATION_MS)
@@ -910,7 +939,6 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
                 },
             },
             critical=True,
-            require_ack=True,
         )
 
         # Re-emit roster right after game_started to keep leaderboard in sync
