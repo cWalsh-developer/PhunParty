@@ -11,6 +11,7 @@ from typing import Optional
 
 from fastapi import (
     APIRouter,
+    Depends,
     HTTPException,
     Query,
     WebSocket,
@@ -25,7 +26,9 @@ from app.database.dbCRUD import (
     get_session_by_code,
 )
 from app.database.fair_play_crud import (
+    get_fair_play_record,
     get_eligible_player_ids_for_session,
+    has_focus_violation_for_question,
     is_player_kicked,
     record_focus_violation,
     update_fair_play_settings,
@@ -78,6 +81,56 @@ def close_db_session(db_generator: Generator[Session, None, None]) -> None:
         db_generator.close()
     except Exception:
         logger.exception("Error closing websocket DB session")
+
+
+def build_player_fair_play_status(
+    db: Session, session_code: str, player_id: str
+) -> dict:
+    game_state = get_game_session_state(db, session_code)
+    if not game_state:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    record = get_fair_play_record(db, session_code, player_id)
+    max_strikes = getattr(game_state, "max_fair_play_strikes", 3) or 3
+    current_question_id = getattr(game_state, "current_question_id", None)
+    is_frozen = bool(
+        current_question_id
+        and has_focus_violation_for_question(
+            db, session_code, player_id, current_question_id
+        )
+    )
+    is_kicked = bool(record and record.is_kicked)
+    strike_count = record.strike_count if record else 0
+    answer_status = "kicked" if is_kicked else ("frozen" if is_frozen else None)
+    reason = "fair_play_strikes" if is_kicked else None
+    message = (
+        f"You were removed after {max_strikes} Fair Play strikes."
+        if is_kicked
+        else None
+    )
+
+    return {
+        "player_id": player_id,
+        "session_code": session_code,
+        "strike_count": strike_count,
+        "max_strikes": max_strikes,
+        "is_kicked": is_kicked,
+        "is_frozen": is_frozen or is_kicked,
+        "frozen_question_id": current_question_id if is_frozen else None,
+        "reason": reason,
+        "fair_play_reason": reason,
+        "answer_status": answer_status,
+        "message": message,
+    }
+
+
+@router.get("/fair-play/session/{session_code}/player/{player_id}/status")
+def get_player_fair_play_status(
+    session_code: str,
+    player_id: str,
+    db: Session = Depends(get_db),
+):
+    return build_player_fair_play_status(db, session_code, player_id)
 
 
 def serialize_game_state(game_state_obj, game_type: Optional[str] = None) -> Optional[dict]:
@@ -403,6 +456,17 @@ async def websocket_endpoint(
         logger.error(f"WebSocket connection error: {e}")
         await websocket.close(code=4000, reason="Connection error")
     finally:
+        if client_type == "mobile" and player_id:
+            disconnect_db, disconnect_db_generator = open_db_session()
+            try:
+                await handle_mobile_disconnect_during_fair_play(
+                    session_code=session_code,
+                    player_id=player_id,
+                    db=disconnect_db,
+                )
+            finally:
+                close_db_session(disconnect_db_generator)
+
         manager.disconnect(websocket)
 
 async def send_initial_session_state(
@@ -892,6 +956,57 @@ async def handle_update_session_settings(session_code: str, data: dict, db: Sess
         logger.exception(f"Error updating Fair Play settings for {session_code}")
 
 
+async def handle_mobile_disconnect_during_fair_play(
+    session_code: str,
+    player_id: str,
+    db: Session,
+):
+    """Treat an ungraceful mobile disconnect during a Fair Play question as focus loss."""
+    if manager._player_task_key(session_code, player_id) in manager.intentional_leaves:
+        return
+
+    game_state = get_game_session_state(db, session_code)
+    if not game_state or not getattr(game_state, "fair_play_enabled", False):
+        return
+    if is_player_kicked(db, session_code, player_id):
+        return
+
+    phase_state = manager.get_session_phase_state(session_code)
+    if phase_state.get("phase") != SessionPhase.QUESTION.value:
+        return
+
+    question_id = phase_state.get("current_question_id")
+    if not question_id:
+        return
+
+    if manager.get_pending_focus_loss(session_code, player_id):
+        return
+
+    lost_at = iso_utc(datetime.utcnow())
+    manager.record_pending_focus_loss(
+        session_code=session_code,
+        player_id=player_id,
+        question_id=question_id,
+        reason="mobile_disconnected_during_question",
+        lost_at=lost_at,
+    )
+    logger.info(
+        "FAIR PLAY DISCONNECT LOSS session=%s player=%s question=%s lost_at=%s",
+        session_code,
+        player_id,
+        question_id,
+        lost_at,
+    )
+    asyncio.create_task(
+        finalize_focus_loss_after_grace(
+            session_code=session_code,
+            player_id=player_id,
+            question_id=question_id,
+            lost_at=lost_at,
+        )
+    )
+
+
 async def handle_fair_play_focus_lost(
     websocket: WebSocket,
     session_code: str,
@@ -980,6 +1095,13 @@ async def handle_fair_play_focus_returned(
 
     cleared = manager.clear_pending_focus_loss(session_code, player_id)
     if cleared:
+        manager.update_fair_play_status(
+            session_code,
+            player_id,
+            connection_state="connected",
+            answer_status=None,
+        )
+        await manager.broadcast_player_roster_update(session_code)
         await manager.send_personal_message(
             {
                 "type": "fair_play_focus_grace_cleared",

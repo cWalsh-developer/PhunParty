@@ -556,6 +556,28 @@ class ConnectionManager:
                 break
 
         if ws_id and session_code:
+            if (
+                client_info
+                and client_info.get("client_type") == "mobile"
+                and client_info.get("player_id")
+            ):
+                player_id = client_info.get("player_id")
+                if self.should_suppress_leave_for_fair_play(session_code, player_id):
+                    logger.info(
+                        "Suppressing mobile disconnect removal for Fair Play focus loss: session=%s player=%s",
+                        session_code,
+                        player_id,
+                    )
+                    client_info["connection_state"] = "fair_play_focus_lost"
+                    client_info["last_heartbeat"] = datetime.now()
+                    self.update_fair_play_status(
+                        session_code,
+                        player_id,
+                        connection_state="fair_play_focus_lost",
+                        answer_status="pending_fair_play_grace",
+                    )
+                    return
+
             # Remove from connections
             if session_code in self.active_connections:
                 if ws_id in self.active_connections[session_code]:

@@ -782,6 +782,7 @@ def test_disconnect_suppresses_player_left_during_pending_fair_play_focus_loss()
     with patch.object(manager, "_schedule_mobile_leave") as schedule_leave:
         try:
             manager.disconnect(websocket)
+            still_present = "ws1" in manager.active_connections.get(session_code, {})
         finally:
             manager.active_connections.pop(session_code, None)
             manager.websocket_registry.pop("ws1", None)
@@ -789,6 +790,7 @@ def test_disconnect_suppresses_player_left_during_pending_fair_play_focus_loss()
             manager.pending_focus_losses.pop(session_code, None)
 
     schedule_leave.assert_not_called()
+    assert still_present is True
 
 
 def test_roster_update_broadcasts_to_non_mobile_clients_only():
@@ -909,6 +911,79 @@ def test_update_session_settings_broadcasts_fair_play_settings():
     assert broadcast_payload["type"] == "fair_play_settings_updated"
     assert broadcast_payload["data"]["fair_play_enabled"] is False
     assert broadcast_payload["data"]["max_fair_play_strikes"] == 2
+
+
+def test_mobile_disconnect_during_fair_play_starts_focus_loss_grace():
+    game_state = SimpleNamespace(
+        fair_play_enabled=True,
+        max_fair_play_strikes=3,
+    )
+
+    with patch.object(routes, "get_game_session_state", return_value=game_state):
+        with patch.object(routes, "is_player_kicked", return_value=False):
+            with patch.object(routes, "manager") as mock_manager:
+                mock_manager._player_task_key.return_value = "SESSION123:P1"
+                mock_manager.intentional_leaves = set()
+                mock_manager.get_session_phase_state.return_value = {
+                    "phase": "question",
+                    "current_question_id": "Q1",
+                }
+                mock_manager.get_pending_focus_loss.return_value = None
+                mock_manager.record_pending_focus_loss.return_value = {
+                    "session_code": "SESSION123",
+                    "player_id": "P1",
+                    "question_id": "Q1",
+                }
+                with patch.object(
+                    routes,
+                    "finalize_focus_loss_after_grace",
+                    new=MagicMock(return_value="task"),
+                ) as finalize:
+                    with patch.object(routes.asyncio, "create_task") as create_task:
+                        asyncio.run(
+                            routes.handle_mobile_disconnect_during_fair_play(
+                                "SESSION123",
+                                "P1",
+                                MagicMock(),
+                            )
+                        )
+
+    mock_manager.record_pending_focus_loss.assert_called_once()
+    kwargs = mock_manager.record_pending_focus_loss.call_args.kwargs
+    assert kwargs["reason"] == "mobile_disconnected_during_question"
+    assert kwargs["question_id"] == "Q1"
+    finalize.assert_called_once_with(
+        session_code="SESSION123",
+        player_id="P1",
+        question_id="Q1",
+        lost_at=kwargs["lost_at"],
+    )
+    create_task.assert_called_once_with("task")
+
+
+def test_fair_play_status_payload_uses_database_record():
+    game_state = SimpleNamespace(
+        current_question_id="Q1",
+        max_fair_play_strikes=3,
+    )
+    record = SimpleNamespace(strike_count=3, is_kicked=True)
+
+    with patch.object(routes, "get_game_session_state", return_value=game_state):
+        with patch.object(routes, "get_fair_play_record", return_value=record):
+            with patch.object(
+                routes, "has_focus_violation_for_question", return_value=True
+            ):
+                status = routes.build_player_fair_play_status(
+                    MagicMock(), "SESSION123", "P1"
+                )
+
+    assert status["player_id"] == "P1"
+    assert status["strike_count"] == 3
+    assert status["max_strikes"] == 3
+    assert status["is_kicked"] is True
+    assert status["is_frozen"] is True
+    assert status["answer_status"] == "kicked"
+    assert status["reason"] == "fair_play_strikes"
 
 
 def test_focus_violation_records_strike_and_freezes_player():
