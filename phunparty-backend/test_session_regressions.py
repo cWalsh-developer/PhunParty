@@ -335,7 +335,15 @@ def test_reveal_current_question_allows_new_question_while_phase_is_question():
 
     assert result is True
     mock_manager.queue_question.assert_called_once()
-    mock_manager.broadcast_to_session.assert_awaited_once()
+    broadcast_types = [
+        call.args[1]["type"]
+        for call in mock_manager.broadcast_to_session.await_args_list
+    ]
+    assert broadcast_types == ["fair_play_question_reset", "question_started"]
+    reset_call = mock_manager.broadcast_to_session.await_args_list[0]
+    assert reset_call.kwargs["only_client_types"] == ["mobile"]
+    assert reset_call.args[1]["data"]["question_id"] == "Q2"
+    assert reset_call.args[1]["data"]["is_frozen"] is False
 
 
 def test_reveal_easy_question_has_no_question_timer():
@@ -605,6 +613,46 @@ def test_mobile_initial_state_sends_queued_question_during_question_phase():
         "SESSION123",
         {"type": "question_started", "data": queued_question},
         websocket,
+    )
+
+
+def test_mobile_initial_state_includes_player_fair_play_status():
+    websocket = MagicMock()
+
+    with patch.object(routes, "get_game_session_state", return_value=None):
+        with patch.object(routes, "resolve_session_game_type", return_value="trivia"):
+            with patch.object(
+                routes,
+                "build_sync_state",
+                return_value={"phase": "lobby"},
+            ):
+                with patch.object(routes, "manager") as mock_manager:
+                    mock_manager.get_session_stats.return_value = {}
+                    mock_manager.get_mobile_players.return_value = []
+                    mock_manager.get_current_question.return_value = None
+                    mock_manager.get_fair_play_status.return_value = {
+                        "strike_count": 2,
+                        "max_strikes": 3,
+                    }
+                    mock_manager.send_personal_message = AsyncMock(return_value=True)
+
+                    asyncio.run(
+                        routes.send_initial_session_state(
+                            websocket,
+                            "SESSION123",
+                            "mobile",
+                            MagicMock(),
+                            player_id="P1",
+                        )
+                    )
+
+    initial_state = mock_manager.send_personal_message.await_args.args[0]
+    fair_play_status = initial_state["data"]["player_fair_play_status"]
+    assert fair_play_status["player_id"] == "P1"
+    assert fair_play_status["strike_count"] == 2
+    assert (
+        initial_state["data"]["authoritative_state"]["player_fair_play_status"]
+        == fair_play_status
     )
 
 
@@ -957,6 +1005,49 @@ def test_fair_play_focus_lost_starts_backend_grace_period():
     sent_message = mock_manager.send_personal_message.await_args.args[0]
     assert sent_message["type"] == "fair_play_focus_grace_started"
     assert sent_message["data"]["grace_period_ms"] == routes.FAIR_PLAY_GRACE_PERIOD_MS
+
+
+def test_kick_player_for_fair_play_sends_status_before_closing_socket():
+    websocket = MagicMock()
+    websocket.close = AsyncMock()
+
+    with patch.object(routes, "manager") as mock_manager:
+        mock_manager.get_player_connections.return_value = {
+            "ws1": {"websocket": websocket}
+        }
+        mock_manager.send_personal_message = AsyncMock(return_value=True)
+        mock_manager.broadcast_to_session = AsyncMock()
+        mock_manager.broadcast_player_roster_update = AsyncMock()
+        with patch.object(routes.asyncio, "sleep", new_callable=AsyncMock) as sleep:
+            asyncio.run(
+                routes.kick_player_for_fair_play(
+                    "SESSION123",
+                    "P1",
+                    3,
+                )
+            )
+
+    personal_messages = [
+        call.args[0]["type"]
+        for call in mock_manager.send_personal_message.await_args_list
+    ]
+    assert personal_messages == ["fair_play_status_update", "kicked_from_session"]
+    fair_play_payload = mock_manager.send_personal_message.await_args_list[0].args[0][
+        "data"
+    ]
+    kicked_payload = mock_manager.send_personal_message.await_args_list[1].args[0][
+        "data"
+    ]
+    assert fair_play_payload["is_kicked"] is True
+    assert fair_play_payload["strike_count"] == 3
+    assert kicked_payload["is_kicked"] is True
+    sleep.assert_awaited_once_with(0.25)
+    websocket.close.assert_awaited_once_with(
+        code=4003,
+        reason="Removed after Fair Play strikes",
+    )
+    broadcast_kwargs = mock_manager.broadcast_to_session.await_args.kwargs
+    assert "exclude_client_types" not in broadcast_kwargs
 
 
 def test_buzzer_ui_update_sends_answer_data_only_to_winner():

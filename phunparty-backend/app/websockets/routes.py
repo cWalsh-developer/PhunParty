@@ -356,6 +356,7 @@ async def websocket_endpoint(
                 client_type,
                 initial_db,
                 game_type=resolved_game_type,
+                player_id=player_id,
             )
         finally:
             close_db_session(initial_db_generator)
@@ -410,6 +411,7 @@ async def send_initial_session_state(
     client_type: str,
     db: Session,
     game_type: Optional[str] = None,
+    player_id: Optional[str] = None,
 ):
     """Send initial state when client connects"""
     try:
@@ -434,6 +436,15 @@ async def send_initial_session_state(
                 "authoritative_state": authoritative_state,
             },
         }
+        if client_type == "mobile" and player_id:
+            fair_play_status = {
+                **manager.get_fair_play_status(session_code, player_id),
+                "player_id": player_id,
+            }
+            initial_state["data"]["player_fair_play_status"] = fair_play_status
+            initial_state["data"]["authoritative_state"][
+                "player_fair_play_status"
+            ] = fair_play_status
 
         # Include current question for web clients only.
         # Mobile clients must stay synchronized with scheduled question_started.
@@ -1219,6 +1230,23 @@ async def kick_player_for_fair_play(
 
         await manager.send_personal_message(
             {
+                "type": "fair_play_status_update",
+                "data": {
+                    "player_id": player_id,
+                    "strike_count": max_strikes,
+                    "max_strikes": max_strikes,
+                    "is_kicked": True,
+                    "is_frozen": True,
+                    "reason": "fair_play_strikes",
+                    "fair_play_reason": "fair_play_strikes",
+                    "answer_status": "kicked",
+                    "message": f"You were removed after {max_strikes} Fair Play strikes.",
+                },
+            },
+            websocket,
+        )
+        await manager.send_personal_message(
+            {
                 "type": "kicked_from_session",
                 "data": {
                     "player_id": player_id,
@@ -1231,6 +1259,7 @@ async def kick_player_for_fair_play(
             },
             websocket,
         )
+        await asyncio.sleep(0.25)
         try:
             await websocket.close(
                 code=4003,
@@ -1252,7 +1281,6 @@ async def kick_player_for_fair_play(
                 "is_kicked": True,
             },
         },
-        exclude_client_types=["mobile"],
         critical=True,
     )
     await manager.broadcast_player_roster_update(session_code)

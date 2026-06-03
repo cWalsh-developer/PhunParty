@@ -183,6 +183,20 @@ async def reveal_current_question(
     manager.reset_all_players_answered(session_code)
     if question_id:
         manager.reset_fair_play_freezes_for_question(session_code, question_id)
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "fair_play_question_reset",
+                "data": {
+                    "question_id": question_id,
+                    "is_frozen": False,
+                    "frozen_question_id": None,
+                    "answer_status": None,
+                },
+            },
+            only_client_types=["mobile"],
+            critical=True,
+        )
     if game_type == BUZZER_GAME_TYPE:
         manager.start_buzzer_question(session_code, question_id)
         mobile_question_data = format_buzzer_question_for_mobile(question_data)
