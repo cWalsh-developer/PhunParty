@@ -63,6 +63,8 @@ class ConnectionManager:
         self.fair_play_frozen_players: Dict[str, Dict[str, str]] = {}
         # session_code -> player_id -> Fair Play UI state included in roster payloads.
         self.fair_play_player_status: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # session_code -> player_id -> pending focus-loss report under grace period.
+        self.pending_focus_losses: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # event_id -> delivery/ack state for critical phase messages.
         self.pending_acks: Dict[str, Dict[str, Any]] = {}
         # session_code:player_id values for players who explicitly left.
@@ -597,6 +599,7 @@ class ConnectionManager:
         self.session_game_types.pop(session_code, None)
         self.fair_play_frozen_players.pop(session_code, None)
         self.fair_play_player_status.pop(session_code, None)
+        self.pending_focus_losses.pop(session_code, None)
 
         session_key_prefix = f"{session_code}:"
         for task_key, task in list(self.pending_player_leave_tasks.items()):
@@ -1250,6 +1253,42 @@ class ConnectionManager:
         if not frozen_players:
             self.fair_play_frozen_players.pop(session_code, None)
 
+    def record_pending_focus_loss(
+        self,
+        session_code: str,
+        player_id: str,
+        question_id: str,
+        reason: str,
+        lost_at: str,
+    ) -> Dict[str, Any]:
+        pending = {
+            "session_code": session_code,
+            "player_id": player_id,
+            "question_id": question_id,
+            "reason": reason,
+            "lost_at": lost_at,
+        }
+        self.pending_focus_losses.setdefault(session_code, {})[player_id] = pending
+        return pending
+
+    def get_pending_focus_loss(
+        self, session_code: str, player_id: str
+    ) -> Optional[Dict[str, Any]]:
+        pending = self.pending_focus_losses.get(session_code, {}).get(player_id)
+        return dict(pending) if pending else None
+
+    def clear_pending_focus_loss(
+        self, session_code: str, player_id: str
+    ) -> Optional[Dict[str, Any]]:
+        session_pending = self.pending_focus_losses.get(session_code)
+        if not session_pending:
+            return None
+
+        pending = session_pending.pop(player_id, None)
+        if not session_pending:
+            self.pending_focus_losses.pop(session_code, None)
+        return pending
+
     def update_heartbeat(self, websocket: WebSocket):
         """Update the last heartbeat time for a websocket"""
         for ws_id, info in self.websocket_registry.items():
@@ -1530,6 +1569,28 @@ class ConnectionManager:
             "attempts": [],
         }
         logger.info(f"Reset buzzer state for session {session_code}")
+
+    def format_buzzer_state_update(self, session_code: str) -> Dict[str, Any]:
+        state = self.get_buzzer_state(session_code)
+        return {
+            "question_id": state.get("current_question_id"),
+            "current_buzzer_winner": state.get("current_buzzer_winner"),
+            "frozen_players": list(state.get("frozen_players", set())),
+            "question_active": state.get("question_active", False),
+            "server_time_ms": self._utc_now_ms(),
+        }
+
+    async def broadcast_buzzer_state_update(self, session_code: str) -> None:
+        await self.broadcast_to_session(
+            session_code,
+            {
+                "type": "buzzer_state_update",
+                "data": self.format_buzzer_state_update(session_code),
+            },
+            only_client_types=["mobile"],
+            critical=True,
+            require_ack=True,
+        )
 
     def set_session_game_type(self, session_code: str, game_type: str):
         """Store the resolved game type for scheduler and reconnect paths."""

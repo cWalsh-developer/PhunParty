@@ -22,6 +22,7 @@ from app.database.dbCRUD import (
 )
 from app.database.fair_play_crud import (
     count_fair_play_resolved_players_for_question,
+    count_kicked_players,
     is_player_frozen_for_question,
     is_player_kicked,
 )
@@ -113,7 +114,9 @@ def check_and_advance_game(
     """
     try:
         # Get counts from database
-        players_in_session = get_number_of_players_in_session(db, session_code)
+        total_players = get_number_of_players_in_session(db, session_code)
+        kicked_players = count_kicked_players(db, session_code)
+        players_in_session = max(0, total_players - kicked_players)
         responses_to_question = count_responses_for_question(
             db, session_code, current_question_id
         )
@@ -134,6 +137,9 @@ def check_and_advance_game(
 
         result = {
             "players_total": players_in_session,
+            "total_joined_players": total_players,
+            "kicked_players": kicked_players,
+            "eligible_players": players_in_session,
             "players_answered": resolved_players,
             "submitted_answers": responses_to_question,
             "fair_play_resolved": fair_play_resolved_players,
@@ -150,9 +156,20 @@ def check_and_advance_game(
             "isstarted": game_state.isstarted,
             "is_active": game_state.is_active,
         }
+        logger.info(
+            "PROGRESSION CHECK session=%s question=%s total=%s kicked=%s eligible=%s responses=%s fair_play_resolved=%s resolved=%s",
+            session_code,
+            current_question_id,
+            total_players,
+            kicked_players,
+            players_in_session,
+            responses_to_question,
+            fair_play_resolved_players,
+            resolved_players,
+        )
 
         # If all players have answered
-        if resolved_players >= players_in_session:
+        if total_players > 0 and resolved_players >= players_in_session:
             logger.info(
                 "All players (%s/%s, submitted=%s, fair_play_resolved=%s) have resolved question %s",
                 resolved_players,

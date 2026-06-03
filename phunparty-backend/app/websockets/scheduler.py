@@ -7,7 +7,11 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.database.dbCRUD import advance_to_next_question, get_current_question_details
+from app.database.dbCRUD import (
+    advance_to_next_question,
+    get_current_question_details,
+    get_game_session_state,
+)
 from app.dependencies import get_db
 from app.websockets.game_modes import BUZZER_GAME_TYPE, resolve_session_game_type
 from app.websockets.manager import SessionPhase, manager
@@ -15,8 +19,8 @@ from app.websockets.manager import SessionPhase, manager
 logger = logging.getLogger(__name__)
 
 COUNTDOWN_DURATION_MS = 3000
-NEXT_QUESTION_REVEAL_DELAY_MS = 250
-QUESTION_BROADCAST_LEAD_MS = 500
+NEXT_QUESTION_REVEAL_DELAY_MS = 2000
+QUESTION_BROADCAST_LEAD_MS = 2000
 QUESTION_DURATION_MS = 30000
 TIMED_QUESTION_DIFFICULTIES = {"medium", "hard"}
 
@@ -203,6 +207,7 @@ async def reveal_current_question(
             critical=True,
             require_ack=True,
         )
+        await manager.broadcast_buzzer_state_update(session_code)
     else:
         manager.reset_buzzer_state(session_code)
         manager.queue_question(session_code, question_data)
@@ -222,6 +227,24 @@ async def reveal_current_question(
         asyncio.create_task(
             scheduled_question_timeout(session_code, question_id, expires_at)
         )
+    if question_id:
+        try:
+            game_state = get_game_session_state(db, session_code)
+            if game_state and getattr(game_state, "fair_play_enabled", False) is True:
+                from app.websockets.routes import (
+                    schedule_absent_player_fair_play_checks,
+                )
+
+                asyncio.create_task(
+                    schedule_absent_player_fair_play_checks(
+                        session_code=session_code,
+                        question_id=question_id,
+                    )
+                )
+        except Exception:
+            logger.exception(
+                f"Could not schedule absent Fair Play checks for {session_code}"
+            )
     return True
 
 

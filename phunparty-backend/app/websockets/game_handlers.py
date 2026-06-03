@@ -329,6 +329,7 @@ class BuzzerGameHandler(GameEventHandler):
         )
 
         # Update mobile UI - winner can now answer, others wait
+        await manager.broadcast_buzzer_state_update(self.session_code)
         await self.update_mobile_buzzer_ui(db)
 
     async def handle_player_answer(
@@ -418,6 +419,8 @@ class BuzzerGameHandler(GameEventHandler):
                 },
             )
 
+            await manager.broadcast_buzzer_state_update(self.session_code)
+
             # Check if all players are frozen
             active_players = len(manager.get_mobile_players(self.session_code))
             if active_players and len(state["frozen_players"]) >= active_players:
@@ -447,6 +450,7 @@ class BuzzerGameHandler(GameEventHandler):
         )
 
         await self.broadcast_question(question_data)
+        await manager.broadcast_buzzer_state_update(self.session_code)
         await self.update_mobile_buzzer_ui()
 
     async def update_mobile_buzzer_ui(self, db: Session = None):
@@ -554,6 +558,7 @@ class BuzzerGameHandler(GameEventHandler):
     async def reset_buzzer_state(self):
         """Reset buzzer state for next question"""
         manager.reset_buzzer_state(self.session_code)
+        await manager.broadcast_buzzer_state_update(self.session_code)
 
     async def check_answer_correctness(
         self, answer: str, question_id: str, db: Session

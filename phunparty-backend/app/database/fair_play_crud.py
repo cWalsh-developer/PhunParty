@@ -7,6 +7,7 @@ from app.database.dbCRUD import get_game_session_state
 from app.schemas.fair_play_models import FairPlayViolation, SessionPlayerFairPlay
 from app.schemas.game_state_models import PlayerResponse
 from app.schemas.scores_model import Scores
+from app.schemas.session_player_assignment_model import SessionAssignment
 
 DEFAULT_MAX_FAIR_PLAY_STRIKES = 3
 
@@ -160,11 +161,45 @@ def count_fair_play_resolved_players_for_question(
         .filter(PlayerResponse.session_code == session_code)
         .filter(PlayerResponse.question_id == question_id)
     )
+    kicked_player_ids = (
+        db.query(SessionPlayerFairPlay.player_id)
+        .filter(SessionPlayerFairPlay.session_code == session_code)
+        .filter(SessionPlayerFairPlay.is_kicked.is_(True))
+    )
     return (
         db.query(FairPlayViolation.player_id)
         .filter(FairPlayViolation.session_code == session_code)
         .filter(FairPlayViolation.question_id == question_id)
         .filter(FairPlayViolation.player_id.notin_(answered_player_ids))
+        .filter(FairPlayViolation.player_id.notin_(kicked_player_ids))
         .distinct()
         .count()
     )
+
+
+def count_kicked_players(db: Session, session_code: str) -> int:
+    return (
+        db.query(SessionPlayerFairPlay.player_id)
+        .filter(SessionPlayerFairPlay.session_code == session_code)
+        .filter(SessionPlayerFairPlay.is_kicked.is_(True))
+        .distinct()
+        .count()
+    )
+
+
+def get_eligible_player_ids_for_session(db: Session, session_code: str) -> list[str]:
+    kicked_player_ids = (
+        db.query(SessionPlayerFairPlay.player_id)
+        .filter(SessionPlayerFairPlay.session_code == session_code)
+        .filter(SessionPlayerFairPlay.is_kicked.is_(True))
+    )
+    return [
+        row[0]
+        for row in (
+            db.query(SessionAssignment.player_id)
+            .filter(SessionAssignment.session_code == session_code)
+            .filter(SessionAssignment.player_id.notin_(kicked_player_ids))
+            .distinct()
+            .all()
+        )
+    ]

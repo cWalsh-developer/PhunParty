@@ -25,6 +25,7 @@ from app.database.dbCRUD import (
     get_session_by_code,
 )
 from app.database.fair_play_crud import (
+    get_eligible_player_ids_for_session,
     is_player_kicked,
     record_focus_violation,
     update_fair_play_settings,
@@ -48,6 +49,7 @@ from app.websockets.scheduler import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 INTRO_RECOVERY_WINDOW_SECONDS = 15
+FAIR_PLAY_GRACE_PERIOD_MS = 5000
 
 
 def parse_optional_bool(value):
@@ -625,13 +627,24 @@ async def handle_websocket_message(
                 except Exception as e:
                     logger.debug(f"Error closing left player websocket: {e}")
 
-    elif message_type == "focus_violation" and client_type == "mobile":
-        await handle_focus_violation(
+    elif (
+        message_type in {"focus_violation", "fair_play_focus_lost"}
+        and client_type == "mobile"
+    ):
+        await handle_fair_play_focus_lost(
             websocket=websocket,
             session_code=session_code,
             player_id=player_id,
             data=data,
             db=db,
+        )
+
+    elif message_type == "fair_play_focus_returned" and client_type == "mobile":
+        await handle_fair_play_focus_returned(
+            websocket=websocket,
+            session_code=session_code,
+            player_id=player_id,
+            data=data,
         )
 
     elif message_type == "submit_answer" and client_type == "mobile":
@@ -868,8 +881,204 @@ async def handle_update_session_settings(session_code: str, data: dict, db: Sess
         logger.exception(f"Error updating Fair Play settings for {session_code}")
 
 
-async def handle_focus_violation(
+async def handle_fair_play_focus_lost(
     websocket: WebSocket,
+    session_code: str,
+    player_id: Optional[str],
+    data: dict,
+    db: Session,
+):
+    """Start a backend-owned Fair Play grace window for focus loss."""
+    if not player_id:
+        return
+
+    game_state = get_game_session_state(db, session_code)
+    if not game_state or not getattr(game_state, "fair_play_enabled", False):
+        return
+
+    phase_state = manager.get_session_phase_state(session_code)
+    if phase_state.get("phase") != SessionPhase.QUESTION.value:
+        return
+
+    question_id = data.get("question_id")
+    current_question_id = phase_state.get("current_question_id")
+    if not question_id or question_id != current_question_id:
+        logger.info(
+            f"Ignoring focus loss for {session_code}/{player_id}; question {question_id} != {current_question_id}"
+        )
+        return
+
+    reason = data.get("reason") or "left_question_screen"
+    lost_at = data.get("occurred_at") or iso_utc(datetime.utcnow())
+    pending = manager.record_pending_focus_loss(
+        session_code=session_code,
+        player_id=player_id,
+        question_id=question_id,
+        reason=reason,
+        lost_at=lost_at,
+    )
+    asyncio.create_task(
+        finalize_focus_loss_after_grace(
+            session_code=session_code,
+            player_id=player_id,
+            question_id=question_id,
+            lost_at=lost_at,
+        )
+    )
+    await manager.send_personal_message(
+        {
+            "type": "fair_play_focus_grace_started",
+            "data": {
+                **pending,
+                "grace_period_ms": FAIR_PLAY_GRACE_PERIOD_MS,
+            },
+        },
+        websocket,
+    )
+
+
+async def handle_fair_play_focus_returned(
+    websocket: WebSocket,
+    session_code: str,
+    player_id: Optional[str],
+    data: dict,
+):
+    """Clear a pending Fair Play focus loss if the player returns in time."""
+    if not player_id:
+        return
+
+    pending = manager.get_pending_focus_loss(session_code, player_id)
+    if data.get("question_id") and pending:
+        if pending.get("question_id") != data.get("question_id"):
+            return
+
+    cleared = manager.clear_pending_focus_loss(session_code, player_id)
+    if cleared:
+        await manager.send_personal_message(
+            {
+                "type": "fair_play_focus_grace_cleared",
+                "data": {
+                    **cleared,
+                    "returned_at": data.get("returned_at")
+                    or iso_utc(datetime.utcnow()),
+                },
+            },
+            websocket,
+        )
+
+
+async def finalize_focus_loss_after_grace(
+    session_code: str,
+    player_id: str,
+    question_id: str,
+    lost_at: str,
+):
+    await asyncio.sleep(FAIR_PLAY_GRACE_PERIOD_MS / 1000)
+
+    pending = manager.get_pending_focus_loss(session_code, player_id)
+    if not pending:
+        return
+
+    if pending.get("question_id") != question_id or pending.get("lost_at") != lost_at:
+        return
+
+    manager.clear_pending_focus_loss(session_code, player_id)
+    db, db_generator = open_db_session()
+    try:
+        await handle_focus_violation(
+            websocket=None,
+            session_code=session_code,
+            player_id=player_id,
+            data={
+                "question_id": question_id,
+                "reason": pending.get("reason") or "left_question_screen",
+                "occurred_at": lost_at,
+            },
+            db=db,
+        )
+    finally:
+        db_generator.close()
+
+
+async def schedule_absent_player_fair_play_checks(
+    session_code: str,
+    question_id: str,
+    grace_ms: int = FAIR_PLAY_GRACE_PERIOD_MS,
+):
+    """Strike eligible players who are still absent shortly after a question starts."""
+    await asyncio.sleep(grace_ms / 1000)
+    phase_state = manager.get_session_phase_state(session_code)
+    if (
+        phase_state.get("phase") != SessionPhase.QUESTION.value
+        or phase_state.get("current_question_id") != question_id
+    ):
+        return
+
+    db, db_generator = open_db_session()
+    try:
+        game_state = get_game_session_state(db, session_code)
+        if not game_state or not getattr(game_state, "fair_play_enabled", False):
+            return
+
+        active_player_ids = {
+            player.get("player_id")
+            for player in manager.get_mobile_players(session_code)
+            if player.get("player_id")
+        }
+        eligible_player_ids = get_eligible_player_ids_for_session(db, session_code)
+        for player_id in eligible_player_ids:
+            if player_id in active_player_ids:
+                continue
+
+            await handle_focus_violation(
+                websocket=None,
+                session_code=session_code,
+                player_id=player_id,
+                data={
+                    "question_id": question_id,
+                    "reason": "not_present_when_question_started",
+                    "occurred_at": iso_utc(datetime.utcnow()),
+                },
+                db=db,
+            )
+    finally:
+        db_generator.close()
+
+
+async def advance_after_fair_play_if_ready(
+    session_code: str, question_id: str, db: Session
+):
+    game_progression = check_and_advance_game(db, session_code, question_id)
+    await manager.broadcast_to_session(
+        session_code,
+        {
+            "type": "game_status_update",
+            "data": game_progression,
+        },
+        critical=True,
+    )
+
+    action = game_progression.get("action")
+    if action == "next_question":
+        updated_game_state = get_game_session_state(db, session_code)
+        if updated_game_state and updated_game_state.current_question_id:
+            manager.clear_question_queue(session_code)
+            question_start_at = datetime.utcnow() + timedelta(
+                milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
+            )
+            await reveal_current_question(
+                session_code,
+                db,
+                iso_utc(question_start_at),
+            )
+    elif action == "game_ended":
+        await handle_game_end(session_code, db)
+
+    return game_progression
+
+
+async def handle_focus_violation(
+    websocket: Optional[WebSocket],
     session_code: str,
     player_id: Optional[str],
     data: dict,
@@ -912,7 +1121,12 @@ async def handle_focus_violation(
     reason = data.get("reason") or "left_question_screen"
     manager.freeze_player_for_question(session_code, player_id, question_id)
     manager.set_player_answered(session_code, player_id, True)
-    player_name = manager.get_player_name_from_websocket(websocket)
+    player = get_player_by_ID(db, player_id)
+    player_name = (
+        manager.get_player_name_from_websocket(websocket)
+        if websocket
+        else (player.player_name if player else "Unknown")
+    )
     status_payload = {
         "player_id": player_id,
         "player_name": player_name,
@@ -978,34 +1192,10 @@ async def handle_focus_violation(
         critical=True,
     )
 
-    game_progression = check_and_advance_game(db, session_code, question_id)
-    await manager.broadcast_to_session(
-        session_code,
-        {
-            "type": "game_status_update",
-            "data": game_progression,
-        },
-        critical=True,
-    )
-
-    action = game_progression.get("action")
-    if action == "next_question":
-        updated_game_state = get_game_session_state(db, session_code)
-        if updated_game_state and updated_game_state.current_question_id:
-            manager.clear_question_queue(session_code)
-            question_start_at = datetime.utcnow() + timedelta(
-                milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
-            )
-            await reveal_current_question(
-                session_code,
-                db,
-                iso_utc(question_start_at),
-            )
-    elif action == "game_ended":
-        await handle_game_end(session_code, db)
-
     if record.is_kicked:
         await kick_player_for_fair_play(session_code, player_id, max_strikes)
+
+    await advance_after_fair_play_if_ready(session_code, question_id, db)
 
 
 async def kick_player_for_fair_play(
