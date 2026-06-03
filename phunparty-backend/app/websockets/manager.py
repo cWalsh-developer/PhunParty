@@ -1583,6 +1583,8 @@ class ConnectionManager:
                 "current_buzzer_winner": None,
                 "frozen_players": set(),
                 "question_active": False,
+                "transitioning": False,
+                "accepting_buzzes": False,
                 "current_question_id": None,
                 "attempts": [],
             },
@@ -1596,6 +1598,8 @@ class ConnectionManager:
                 "current_buzzer_winner": None,
                 "frozen_players": set(),
                 "question_active": True,
+                "transitioning": False,
+                "accepting_buzzes": True,
                 "current_question_id": question_id,
                 "attempts": [],
             }
@@ -1609,10 +1613,26 @@ class ConnectionManager:
             "current_buzzer_winner": None,
             "frozen_players": set(),
             "question_active": False,
+            "transitioning": False,
+            "accepting_buzzes": False,
             "current_question_id": None,
             "attempts": [],
         }
         logger.info(f"Reset buzzer state for session {session_code}")
+
+    def lock_buzzer_until_next_question(self, session_code: str):
+        """Lock buzzers while the old question is ending and the next is pending."""
+        state = self.get_buzzer_state(session_code)
+        state.update(
+            {
+                "current_buzzer_winner": None,
+                "question_active": False,
+                "transitioning": True,
+                "accepting_buzzes": False,
+            }
+        )
+        logger.info(f"Locked buzzer state during transition for session {session_code}")
+        return state
 
     def format_buzzer_state_update(self, session_code: str) -> Dict[str, Any]:
         state = self.get_buzzer_state(session_code)
@@ -1621,6 +1641,15 @@ class ConnectionManager:
             "current_buzzer_winner": state.get("current_buzzer_winner"),
             "frozen_players": list(state.get("frozen_players", set())),
             "question_active": state.get("question_active", False),
+            "transitioning": state.get("transitioning", False),
+            "accepting_buzzes": state.get("accepting_buzzes", False),
+            "button_state": (
+                "active"
+                if state.get("question_active")
+                and state.get("accepting_buzzes")
+                and not state.get("transitioning")
+                else "waiting"
+            ),
             "server_time_ms": self._utc_now_ms(),
         }
 

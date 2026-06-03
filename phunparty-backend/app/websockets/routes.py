@@ -133,7 +133,9 @@ def get_player_fair_play_status(
     return build_player_fair_play_status(db, session_code, player_id)
 
 
-def serialize_game_state(game_state_obj, game_type: Optional[str] = None) -> Optional[dict]:
+def serialize_game_state(
+    game_state_obj, game_type: Optional[str] = None
+) -> Optional[dict]:
     """Convert DB game state to a WebSocket-safe dict."""
     if not game_state_obj:
         return None
@@ -146,19 +148,13 @@ def serialize_game_state(game_state_obj, game_type: Optional[str] = None) -> Opt
         "is_waiting_for_players": game_state_obj.is_waiting_for_players,
         "isstarted": game_state_obj.isstarted,
         "fair_play_enabled": getattr(game_state_obj, "fair_play_enabled", False),
-        "cheat_detection_enabled": getattr(
-            game_state_obj, "fair_play_enabled", False
-        ),
-        "max_fair_play_strikes": getattr(
-            game_state_obj, "max_fair_play_strikes", 3
-        ),
+        "cheat_detection_enabled": getattr(game_state_obj, "fair_play_enabled", False),
+        "max_fair_play_strikes": getattr(game_state_obj, "max_fair_play_strikes", 3),
         "max_cheat_strikes": getattr(game_state_obj, "max_fair_play_strikes", 3),
         "total_questions": game_state_obj.total_questions,
         "ispublic": game_state_obj.ispublic,
         "started_at": (
-            game_state_obj.started_at.isoformat()
-            if game_state_obj.started_at
-            else None
+            game_state_obj.started_at.isoformat() if game_state_obj.started_at else None
         ),
         "ended_at": (
             game_state_obj.ended_at.isoformat() if game_state_obj.ended_at else None
@@ -196,17 +192,12 @@ def build_sync_state(
                     datetime.utcnow() - started_at.replace(tzinfo=None)
                 ).total_seconds()
 
-            is_fresh_intro = (
-                game_state.get("current_question_index", 0) == 0
-                and (
-                    seconds_since_start is not None
-                    and seconds_since_start <= INTRO_RECOVERY_WINDOW_SECONDS
-                )
+            is_fresh_intro = game_state.get("current_question_index", 0) == 0 and (
+                seconds_since_start is not None
+                and seconds_since_start <= INTRO_RECOVERY_WINDOW_SECONDS
             )
             recovery_phase = (
-                SessionPhase.INTRO_AUDIO
-                if is_fresh_intro
-                else SessionPhase.QUESTION
+                SessionPhase.INTRO_AUDIO if is_fresh_intro else SessionPhase.QUESTION
             )
             phase_updates = {
                 "current_question_id": game_state.get("current_question_id"),
@@ -469,6 +460,7 @@ async def websocket_endpoint(
 
         manager.disconnect(websocket)
 
+
 async def send_initial_session_state(
     websocket: WebSocket,
     session_code: str,
@@ -703,9 +695,12 @@ async def handle_websocket_message(
                     logger.debug(f"Error closing left player websocket: {e}")
 
     elif (
-        message_type in {"focus_violation", "fair_play_focus_lost"}
+        message_type
+        in {"focus_violation", "fair_play_focus_lost", "fair_play_window_violation"}
         and client_type == "mobile"
     ):
+        if message_type == "fair_play_window_violation" and not data.get("reason"):
+            data = {**data, "reason": "multi_window_mode"}
         await handle_fair_play_focus_lost(
             websocket=websocket,
             session_code=session_code,
@@ -740,9 +735,7 @@ async def handle_websocket_message(
                             "is_frozen": manager.is_player_frozen_for_question(
                                 session_code, player_id, question_id
                             ),
-                            "is_kicked": is_player_kicked(
-                                db, session_code, player_id
-                            ),
+                            "is_kicked": is_player_kicked(db, session_code, player_id),
                         },
                     },
                     websocket,
@@ -768,6 +761,16 @@ async def handle_websocket_message(
         if player_id and hasattr(game_handler, "handle_buzzer_press"):
             phase_state = manager.get_session_phase_state(session_code)
             current_question_id = phase_state.get("current_question_id")
+            incoming_question_id = data.get("question_id")
+            if not incoming_question_id or incoming_question_id != current_question_id:
+                logger.info(
+                    "Ignoring stale buzzer press session=%s player=%s incoming=%s current=%s",
+                    session_code,
+                    player_id,
+                    incoming_question_id,
+                    current_question_id,
+                )
+                return
             if (
                 current_question_id
                 and manager.is_player_frozen_for_question(
@@ -786,15 +789,13 @@ async def handle_websocket_message(
                                     session_code, player_id, current_question_id
                                 )
                             ),
-                            "is_kicked": is_player_kicked(
-                                db, session_code, player_id
-                            ),
+                            "is_kicked": is_player_kicked(db, session_code, player_id),
                         },
                     },
                     websocket,
                 )
                 return
-            await game_handler.handle_buzzer_press(player_id, db)
+            await game_handler.handle_buzzer_press(player_id, db, incoming_question_id)
 
     elif message_type == "start_game" and client_type == "web":
         # Web client starting the game
@@ -882,7 +883,6 @@ async def handle_websocket_message(
         )
         manager.update_heartbeat(websocket)
         return
-
 
     elif message_type == "next_question" and client_type == "web":
         # Web client moving to next question
@@ -1036,6 +1036,26 @@ async def handle_fair_play_focus_lost(
 
     reason = data.get("reason") or "left_question_screen"
     lost_at = data.get("occurred_at") or iso_utc(datetime.utcnow())
+    if reason == "multi_window_mode":
+        logger.info(
+            "FAIR PLAY IMMEDIATE MULTI-WINDOW STRIKE session=%s player=%s question=%s",
+            session_code,
+            player_id,
+            question_id,
+        )
+
+        await handle_focus_violation(
+            websocket=websocket,
+            session_code=session_code,
+            player_id=player_id,
+            data={
+                "question_id": question_id,
+                "reason": reason,
+                "occurred_at": lost_at,
+            },
+            db=db,
+        )
+        return
     logger.info(
         "FAIR PLAY LOST session=%s player=%s question=%s reason=%s lost_at=%s",
         session_code,
@@ -1362,7 +1382,7 @@ async def handle_focus_violation(
 
     if record.is_kicked:
         await kick_player_for_fair_play(session_code, player_id, max_strikes, db)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.75)
 
     await advance_after_fair_play_if_ready(session_code, question_id, db)
 
@@ -1609,7 +1629,9 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
 
         # Step 1: Broadcast game_started event WITHOUT question data
         # This prevents mobiles from rendering early before intro completes
-        logger.info(f"ðŸ“¡ Broadcasting game_started message for session {session_code}")
+        logger.info(
+            f"ðŸ“¡ Broadcasting game_started message for session {session_code}"
+        )
 
         phase_state = manager.set_session_phase(
             session_code,

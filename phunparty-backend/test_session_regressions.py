@@ -517,9 +517,32 @@ def test_start_buzzer_question_resets_session_buzzer_state():
     state = manager.start_buzzer_question("SESSION123", "Q2")
 
     assert state["question_active"] is True
+    assert state["transitioning"] is False
+    assert state["accepting_buzzes"] is True
     assert state["current_question_id"] == "Q2"
     assert state["current_buzzer_winner"] is None
     assert state["frozen_players"] == set()
+
+
+def test_lock_buzzer_until_next_question_keeps_old_question_closed():
+    session_code = "SESSION_LOCK"
+    state = manager.start_buzzer_question(session_code, "Q1")
+    state["current_buzzer_winner"] = "P1"
+
+    locked_state = manager.lock_buzzer_until_next_question(session_code)
+    payload = manager.format_buzzer_state_update(session_code)
+
+    try:
+        assert locked_state["question_active"] is False
+        assert locked_state["transitioning"] is True
+        assert locked_state["accepting_buzzes"] is False
+        assert locked_state["current_question_id"] == "Q1"
+        assert locked_state["current_buzzer_winner"] is None
+        assert payload["question_id"] == "Q1"
+        assert payload["button_state"] == "waiting"
+        assert payload["accepting_buzzes"] is False
+    finally:
+        manager.reset_buzzer_state(session_code)
 
 
 def test_buzzer_state_update_broadcast_uses_authoritative_state():
@@ -540,6 +563,10 @@ def test_buzzer_state_update_broadcast_uses_authoritative_state():
     assert message["data"]["question_id"] == "Q1"
     assert message["data"]["current_buzzer_winner"] == "P1"
     assert message["data"]["frozen_players"] == ["P2"]
+    assert message["data"]["question_active"] is True
+    assert message["data"]["transitioning"] is False
+    assert message["data"]["accepting_buzzes"] is True
+    assert message["data"]["button_state"] == "active"
     assert broadcast.await_args.kwargs["only_client_types"] == ["mobile"]
     assert broadcast.await_args.kwargs["require_ack"] is True
 
@@ -1188,6 +1215,33 @@ def test_fair_play_focus_lost_starts_backend_grace_period():
     sent_message = mock_manager.send_personal_message.await_args.args[0]
     assert sent_message["type"] == "fair_play_focus_grace_started"
     assert sent_message["data"]["grace_period_ms"] == routes.FAIR_PLAY_GRACE_PERIOD_MS
+
+
+def test_fair_play_window_violation_defaults_to_multi_window_reason():
+    websocket = MagicMock()
+    game_handler = MagicMock()
+
+    with patch.object(routes, "handle_fair_play_focus_lost", new_callable=AsyncMock) as focus_lost:
+        asyncio.run(
+            routes.handle_websocket_message(
+                {
+                    "type": "fair_play_window_violation",
+                    "data": {
+                        "question_id": "Q1",
+                    },
+                },
+                websocket,
+                "SESSION123",
+                "mobile",
+                "P1",
+                game_handler,
+                MagicMock(),
+            )
+        )
+
+    focus_lost.assert_awaited_once()
+    assert focus_lost.await_args.kwargs["data"]["question_id"] == "Q1"
+    assert focus_lost.await_args.kwargs["data"]["reason"] == "multi_window_mode"
 
 
 def test_kick_player_for_fair_play_sends_status_before_closing_socket():

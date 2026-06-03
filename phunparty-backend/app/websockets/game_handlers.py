@@ -295,9 +295,33 @@ class BuzzerGameHandler(GameEventHandler):
     def buzzer_state(self) -> Dict[str, Any]:
         return manager.get_buzzer_state(self.session_code)
 
-    async def handle_buzzer_press(self, player_id: str, db: Session):
+    async def handle_buzzer_press(
+        self, player_id: str, db: Session, incoming_question_id: str = None
+    ):
         """Handle player pressing buzzer"""
         state = self.buzzer_state
+        phase_state = manager.get_session_phase_state(self.session_code)
+        current_question_id = phase_state.get("current_question_id")
+
+        if phase_state.get("phase") != SessionPhase.QUESTION.value:
+            return
+
+        if incoming_question_id and incoming_question_id != current_question_id:
+            logger.info(
+                "Ignoring stale buzzer press session=%s player=%s incoming=%s current=%s",
+                self.session_code,
+                player_id,
+                incoming_question_id,
+                current_question_id,
+            )
+            return
+
+        if state.get("current_question_id") != current_question_id:
+            return
+
+        if state.get("transitioning") or not state.get("accepting_buzzes", False):
+            return
+
         if not state["question_active"]:
             return
 
@@ -372,8 +396,9 @@ class BuzzerGameHandler(GameEventHandler):
                 },
             )
 
-            # Reset buzzer state for next question
-            await self.reset_buzzer_state()
+            await self.lock_buzzer_until_next_question(
+                "Moving to the next question..."
+            )
             if action == "next_question":
                 await self.reveal_current_db_question(db, "buzzer_correct_answer")
             elif action == "game_ended":
@@ -385,11 +410,15 @@ class BuzzerGameHandler(GameEventHandler):
 
         else:
             if action == "next_question":
-                await self.reset_buzzer_state()
+                await self.lock_buzzer_until_next_question(
+                    "Waiting for the next question..."
+                )
                 await self.reveal_current_db_question(db, "buzzer_all_answered")
                 return
             if action == "game_ended":
-                await self.reset_buzzer_state()
+                await self.lock_buzzer_until_next_question(
+                    "Waiting for final scores..."
+                )
                 await handle_game_end(self.session_code, db)
                 return
 
@@ -435,7 +464,9 @@ class BuzzerGameHandler(GameEventHandler):
                     },
                     critical=True,
                 )
-                await self.reset_buzzer_state()
+                await self.lock_buzzer_until_next_question(
+                    "Waiting for the next question..."
+                )
                 await advance_or_end_current_question(
                     self.session_code, db, reason="buzzer_all_wrong"
                 )
@@ -453,7 +484,9 @@ class BuzzerGameHandler(GameEventHandler):
         await manager.broadcast_buzzer_state_update(self.session_code)
         await self.update_mobile_buzzer_ui()
 
-    async def update_mobile_buzzer_ui(self, db: Session = None):
+    async def update_mobile_buzzer_ui(
+        self, db: Session = None, message_override: str = None
+    ):
         """Update mobile UI based on current buzzer state"""
         mobile_connections = manager.get_session_connections(self.session_code)
         state = self.buzzer_state
@@ -478,10 +511,21 @@ class BuzzerGameHandler(GameEventHandler):
             ui_state = {
                 "game_type": "buzzer",
                 "ui_mode": "buzzer",
+                "question_id": state.get("current_question_id"),
+                "transitioning": state.get("transitioning", False),
+                "accepting_buzzes": state.get("accepting_buzzes", False),
                 "is_current_player": False,
             }
 
-            if player_id in state["frozen_players"]:
+            if state.get("transitioning") or not state.get("accepting_buzzes", False):
+                ui_state["button_state"] = "waiting"
+                ui_state["is_current_player"] = False
+                ui_state["transitioning"] = True
+                ui_state["accepting_buzzes"] = False
+                ui_state["message"] = (
+                    message_override or "Waiting for the next question..."
+                )
+            elif player_id in state["frozen_players"]:
                 ui_state["button_state"] = "frozen"
                 ui_state["is_current_player"] = False
                 ui_state["message"] = "You're frozen out this round!"
@@ -507,6 +551,8 @@ class BuzzerGameHandler(GameEventHandler):
             else:
                 ui_state["button_state"] = "active"
                 ui_state["is_current_player"] = False
+                ui_state["transitioning"] = False
+                ui_state["accepting_buzzes"] = True
                 ui_state["message"] = "Press to buzz in!"
 
             await manager.send_personal_message(
@@ -559,6 +605,14 @@ class BuzzerGameHandler(GameEventHandler):
         """Reset buzzer state for next question"""
         manager.reset_buzzer_state(self.session_code)
         await manager.broadcast_buzzer_state_update(self.session_code)
+
+    async def lock_buzzer_until_next_question(
+        self, message: str = "Waiting for the next question..."
+    ):
+        """Lock buzzers without reopening the old question."""
+        manager.lock_buzzer_until_next_question(self.session_code)
+        await manager.broadcast_buzzer_state_update(self.session_code)
+        await self.update_mobile_buzzer_ui(message_override=message)
 
     async def check_answer_correctness(
         self, answer: str, question_id: str, db: Session
