@@ -52,7 +52,7 @@ from app.websockets.scheduler import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 INTRO_RECOVERY_WINDOW_SECONDS = 15
-FAIR_PLAY_GRACE_PERIOD_MS = 5000
+FAIR_PLAY_GRACE_PERIOD_MS = 1500
 
 
 def parse_optional_bool(value):
@@ -1361,23 +1361,37 @@ async def handle_focus_violation(
     )
 
     if record.is_kicked:
-        await kick_player_for_fair_play(session_code, player_id, max_strikes)
+        await kick_player_for_fair_play(session_code, player_id, max_strikes, db)
+        await asyncio.sleep(0.5)
 
     await advance_after_fair_play_if_ready(session_code, question_id, db)
 
 
 async def kick_player_for_fair_play(
-    session_code: str, player_id: str, max_strikes: int
+    session_code: str,
+    player_id: str,
+    max_strikes: int,
+    db: Optional[Session] = None,
 ):
+    player_name = player_id
+    if db:
+        player = get_player_by_ID(db, player_id)
+        if player and player.player_name:
+            player_name = player.player_name
+
+    message = f"You were removed after {max_strikes} Fair Play strikes."
     manager.update_fair_play_status(
         session_code,
         player_id,
+        player_name=player_name,
         is_kicked=True,
         is_frozen=True,
         reason="fair_play_strikes",
         fair_play_reason="fair_play_strikes",
+        strike_count=max_strikes,
         max_strikes=max_strikes,
         answer_status="kicked",
+        message=message,
     )
     connections = manager.get_player_connections(session_code, player_id)
     for connection_info in connections.values():
@@ -1390,6 +1404,7 @@ async def kick_player_for_fair_play(
                 "type": "fair_play_status_update",
                 "data": {
                     "player_id": player_id,
+                    "player_name": player_name,
                     "strike_count": max_strikes,
                     "max_strikes": max_strikes,
                     "is_kicked": True,
@@ -1397,7 +1412,7 @@ async def kick_player_for_fair_play(
                     "reason": "fair_play_strikes",
                     "fair_play_reason": "fair_play_strikes",
                     "answer_status": "kicked",
-                    "message": f"You were removed after {max_strikes} Fair Play strikes.",
+                    "message": message,
                 },
             },
             websocket,
@@ -1407,11 +1422,12 @@ async def kick_player_for_fair_play(
                 "type": "kicked_from_session",
                 "data": {
                     "player_id": player_id,
+                    "player_name": player_name,
                     "reason": "fair_play_strikes",
                     "strike_count": max_strikes,
                     "max_strikes": max_strikes,
                     "is_kicked": True,
-                    "message": f"You were removed after {max_strikes} Fair Play strikes.",
+                    "message": message,
                 },
             },
             websocket,
@@ -1432,6 +1448,7 @@ async def kick_player_for_fair_play(
             "type": "player_kicked",
             "data": {
                 "player_id": player_id,
+                "player_name": player_name,
                 "reason": "fair_play_strikes",
                 "strike_count": max_strikes,
                 "max_strikes": max_strikes,

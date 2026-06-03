@@ -1080,6 +1080,59 @@ def test_focus_violation_records_strike_and_freezes_player():
     )
 
 
+def test_focus_violation_delays_progression_after_fair_play_kick():
+    websocket = MagicMock()
+    db = MagicMock()
+    game_state = SimpleNamespace(
+        fair_play_enabled=True,
+        max_fair_play_strikes=3,
+    )
+    record = SimpleNamespace(strike_count=3, is_kicked=True)
+    violation = SimpleNamespace(id="V1")
+
+    with patch.object(routes, "get_game_session_state", return_value=game_state):
+        with patch.object(
+            routes,
+            "record_focus_violation",
+            return_value=(record, violation, False),
+        ):
+            with patch.object(routes, "manager") as mock_manager:
+                mock_manager.get_session_phase_state.return_value = {
+                    "phase": "question",
+                    "current_question_id": "Q1",
+                }
+                mock_manager.get_player_name_from_websocket.return_value = "Player"
+                mock_manager.get_player_connections.return_value = {}
+                mock_manager.broadcast_to_session = AsyncMock()
+                with patch.object(
+                    routes, "kick_player_for_fair_play", new_callable=AsyncMock
+                ) as kick_player:
+                    with patch.object(
+                        routes,
+                        "advance_after_fair_play_if_ready",
+                        new_callable=AsyncMock,
+                    ) as advance:
+                        with patch.object(
+                            routes.asyncio, "sleep", new_callable=AsyncMock
+                        ) as sleep:
+                            asyncio.run(
+                                routes.handle_focus_violation(
+                                    websocket=websocket,
+                                    session_code="SESSION123",
+                                    player_id="P1",
+                                    data={
+                                        "question_id": "Q1",
+                                        "reason": "app_backgrounded",
+                                    },
+                                    db=db,
+                                )
+                            )
+
+    kick_player.assert_awaited_once_with("SESSION123", "P1", 3, db)
+    sleep.assert_awaited_once_with(0.5)
+    advance.assert_awaited_once_with("SESSION123", "Q1", db)
+
+
 def test_fair_play_focus_lost_starts_backend_grace_period():
     websocket = MagicMock()
     game_state = SimpleNamespace(fair_play_enabled=True)
@@ -1140,22 +1193,25 @@ def test_fair_play_focus_lost_starts_backend_grace_period():
 def test_kick_player_for_fair_play_sends_status_before_closing_socket():
     websocket = MagicMock()
     websocket.close = AsyncMock()
+    db = MagicMock()
 
-    with patch.object(routes, "manager") as mock_manager:
-        mock_manager.get_player_connections.return_value = {
-            "ws1": {"websocket": websocket}
-        }
-        mock_manager.send_personal_message = AsyncMock(return_value=True)
-        mock_manager.broadcast_to_session = AsyncMock()
-        mock_manager.broadcast_player_roster_update = AsyncMock()
-        with patch.object(routes.asyncio, "sleep", new_callable=AsyncMock) as sleep:
-            asyncio.run(
-                routes.kick_player_for_fair_play(
-                    "SESSION123",
-                    "P1",
-                    3,
+    with patch.object(routes, "get_player_by_ID", return_value=SimpleNamespace(player_name="Alice")):
+        with patch.object(routes, "manager") as mock_manager:
+            mock_manager.get_player_connections.return_value = {
+                "ws1": {"websocket": websocket}
+            }
+            mock_manager.send_personal_message = AsyncMock(return_value=True)
+            mock_manager.broadcast_to_session = AsyncMock()
+            mock_manager.broadcast_player_roster_update = AsyncMock()
+            with patch.object(routes.asyncio, "sleep", new_callable=AsyncMock) as sleep:
+                asyncio.run(
+                    routes.kick_player_for_fair_play(
+                        "SESSION123",
+                        "P1",
+                        3,
+                        db,
+                    )
                 )
-            )
 
     personal_messages = [
         call.args[0]["type"]
@@ -1170,7 +1226,9 @@ def test_kick_player_for_fair_play_sends_status_before_closing_socket():
     ]
     assert fair_play_payload["is_kicked"] is True
     assert fair_play_payload["strike_count"] == 3
+    assert fair_play_payload["player_name"] == "Alice"
     assert kicked_payload["is_kicked"] is True
+    assert kicked_payload["player_name"] == "Alice"
     sleep.assert_awaited_once_with(0.25)
     websocket.close.assert_awaited_once_with(
         code=4003,
@@ -1178,6 +1236,8 @@ def test_kick_player_for_fair_play_sends_status_before_closing_socket():
     )
     broadcast_kwargs = mock_manager.broadcast_to_session.await_args.kwargs
     assert "exclude_client_types" not in broadcast_kwargs
+    kicked_broadcast = mock_manager.broadcast_to_session.await_args.args[1]["data"]
+    assert kicked_broadcast["player_name"] == "Alice"
 
 
 def test_buzzer_ui_update_sends_answer_data_only_to_winner():
