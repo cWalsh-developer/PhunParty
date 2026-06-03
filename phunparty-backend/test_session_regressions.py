@@ -751,6 +751,46 @@ def test_reset_fair_play_freezes_clears_stale_roster_status():
     assert status["answer_status"] is None
 
 
+def test_disconnect_suppresses_player_left_during_pending_fair_play_focus_loss():
+    session_code = "FOCUSLEAVE"
+    websocket = SimpleNamespace()
+    manager.active_connections[session_code] = {
+        "ws1": {
+            "client_type": "mobile",
+            "websocket": websocket,
+            "player_id": "P1",
+            "player_name": "Alice",
+        }
+    }
+    manager.websocket_registry["ws1"] = {
+        "session_code": session_code,
+        "websocket": websocket,
+    }
+    manager.set_session_phase(
+        session_code,
+        SessionPhase.QUESTION,
+        current_question_id="Q1",
+    )
+    manager.record_pending_focus_loss(
+        session_code,
+        "P1",
+        "Q1",
+        "app_backgrounded",
+        "2026-06-01T12:00:00Z",
+    )
+
+    with patch.object(manager, "_schedule_mobile_leave") as schedule_leave:
+        try:
+            manager.disconnect(websocket)
+        finally:
+            manager.active_connections.pop(session_code, None)
+            manager.websocket_registry.pop("ws1", None)
+            manager.session_phase_state.pop(session_code, None)
+            manager.pending_focus_losses.pop(session_code, None)
+
+    schedule_leave.assert_not_called()
+
+
 def test_roster_update_broadcasts_to_non_mobile_clients_only():
     session_code = "ROSTERHOST"
     web_socket = SimpleNamespace(send_text=AsyncMock())
@@ -892,12 +932,17 @@ def test_focus_violation_records_strike_and_freezes_player():
                 return_value={"playersAnswered": 1, "waiting_for_players": True},
             ) as check_and_advance:
                 with patch.object(routes, "manager") as mock_manager:
+                    player_socket = MagicMock()
                     mock_manager.get_session_phase_state.return_value = {
                         "phase": "question",
                         "current_question_id": "Q1",
                     }
                     mock_manager.get_player_name_from_websocket.return_value = "Player"
+                    mock_manager.get_player_connections.return_value = {
+                        "ws1": {"websocket": player_socket}
+                    }
                     mock_manager.broadcast_to_session = AsyncMock()
+                    mock_manager.send_personal_critical_message = AsyncMock()
 
                     asyncio.run(
                         routes.handle_focus_violation(
@@ -948,6 +993,16 @@ def test_focus_violation_records_strike_and_freezes_player():
     )
     assert player_answered_payload["answer_status"] == "frozen"
     assert player_answered_payload["answered_current"] is True
+    mock_manager.send_personal_critical_message.assert_awaited_once_with(
+        "SESSION123",
+        {
+            "type": "fair_play_status_update",
+            "data": mock_manager.broadcast_to_session.await_args_list[1].args[1][
+                "data"
+            ],
+        },
+        player_socket,
+    )
 
 
 def test_fair_play_focus_lost_starts_backend_grace_period():

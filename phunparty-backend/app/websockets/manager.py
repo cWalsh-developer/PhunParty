@@ -581,7 +581,29 @@ class ConnectionManager:
                 )
                 not in self.intentional_leaves
             ):
+                player_id = client_info.get("player_id")
+                if self.should_suppress_leave_for_fair_play(session_code, player_id):
+                    logger.info(
+                        "Suppressing player_left for Fair Play focus loss: session=%s player=%s",
+                        session_code,
+                        player_id,
+                    )
+                    return
+
                 self._schedule_mobile_leave(session_code, client_info)
+
+    def should_suppress_leave_for_fair_play(
+        self, session_code: str, player_id: Optional[str]
+    ) -> bool:
+        """Keep roster membership stable during a Fair Play focus-loss grace window."""
+        if not player_id:
+            return False
+
+        phase_state = self.get_session_phase_state(session_code)
+        if phase_state.get("phase") != SessionPhase.QUESTION.value:
+            return False
+
+        return bool(self.get_pending_focus_loss(session_code, player_id))
 
     def cleanup_session(self, session_code: str) -> None:
         """Drop in-memory state for a completed session once clients have left."""

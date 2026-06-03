@@ -921,6 +921,14 @@ async def handle_fair_play_focus_lost(
 
     reason = data.get("reason") or "left_question_screen"
     lost_at = data.get("occurred_at") or iso_utc(datetime.utcnow())
+    logger.info(
+        "FAIR PLAY LOST session=%s player=%s question=%s reason=%s lost_at=%s",
+        session_code,
+        player_id,
+        question_id,
+        reason,
+        lost_at,
+    )
     pending = manager.record_pending_focus_loss(
         session_code=session_code,
         player_id=player_id,
@@ -959,6 +967,13 @@ async def handle_fair_play_focus_returned(
         return
 
     pending = manager.get_pending_focus_loss(session_code, player_id)
+    logger.info(
+        "FAIR PLAY RETURNED session=%s player=%s question=%s pending=%s",
+        session_code,
+        player_id,
+        data.get("question_id"),
+        bool(pending),
+    )
     if data.get("question_id") and pending:
         if pending.get("question_id") != data.get("question_id"):
             return
@@ -987,6 +1002,13 @@ async def finalize_focus_loss_after_grace(
     await asyncio.sleep(FAIR_PLAY_GRACE_PERIOD_MS / 1000)
 
     pending = manager.get_pending_focus_loss(session_code, player_id)
+    logger.info(
+        "FAIR PLAY GRACE FINALIZE session=%s player=%s question=%s pending=%s",
+        session_code,
+        player_id,
+        question_id,
+        bool(pending),
+    )
     if not pending:
         return
 
@@ -1190,6 +1212,19 @@ async def handle_focus_violation(
         },
         critical=True,
     )
+    for connection_info in manager.get_player_connections(
+        session_code, player_id
+    ).values():
+        player_websocket = connection_info.get("websocket")
+        if player_websocket:
+            await manager.send_personal_critical_message(
+                session_code,
+                {
+                    "type": "fair_play_status_update",
+                    "data": status_payload,
+                },
+                player_websocket,
+            )
     await manager.broadcast_to_session(
         session_code,
         {
