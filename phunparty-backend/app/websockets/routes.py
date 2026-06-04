@@ -1036,12 +1036,20 @@ async def handle_fair_play_focus_lost(
 
     reason = data.get("reason") or "left_question_screen"
     lost_at = data.get("occurred_at") or iso_utc(datetime.utcnow())
-    if reason == "multi_window_mode":
+
+    immediate_violation_reasons = {
+        "multi_window_mode",
+        "picture_in_picture_mode",
+        "window_focus_lost",
+    }
+
+    if reason in immediate_violation_reasons:
         logger.info(
-            "FAIR PLAY IMMEDIATE MULTI-WINDOW STRIKE session=%s player=%s question=%s",
+            "FAIR PLAY IMMEDIATE STRIKE session=%s player=%s question=%s reason=%s",
             session_code,
             player_id,
             question_id,
+            reason,
         )
 
         await handle_focus_violation(
@@ -1056,6 +1064,7 @@ async def handle_fair_play_focus_lost(
             db=db,
         )
         return
+
     logger.info(
         "FAIR PLAY LOST session=%s player=%s question=%s reason=%s lost_at=%s",
         session_code,
