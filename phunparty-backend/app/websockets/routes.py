@@ -52,7 +52,7 @@ from app.websockets.scheduler import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 INTRO_RECOVERY_WINDOW_SECONDS = 15
-FAIR_PLAY_GRACE_PERIOD_MS = 1500
+FAIR_PLAY_GRACE_PERIOD_MS = 1200
 
 
 def parse_optional_bool(value):
