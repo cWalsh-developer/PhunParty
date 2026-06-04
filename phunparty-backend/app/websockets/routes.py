@@ -1311,17 +1311,6 @@ async def handle_fair_play_focus_returned(
     pending_question_id = pending.get("question_id")
     lost_at_raw = pending.get("lost_at")
 
-    # Notification shade / overlay handling.
-    # Do not let noisy focus-return events clear this pending loss.
-    if pending_reason == "window_focus_lost":
-        logger.info(
-            "Ignoring focus_returned for window_focus_lost pending event: session=%s player=%s question=%s",
-            session_code,
-            player_id,
-            pending_question_id,
-        )
-        return
-
     # If the player returns after the grace period has already expired,
     # do not clear the pending loss. Let the grace finalizer award the strike.
     try:
