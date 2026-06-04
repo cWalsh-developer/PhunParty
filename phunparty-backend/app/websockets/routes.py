@@ -1304,6 +1304,17 @@ async def handle_fair_play_focus_returned(
         if pending.get("question_id") != data.get("question_id"):
             return
 
+    pending = manager.get_pending_focus_loss(session_code, player_id)
+
+    if pending and pending.get("reason") == "window_focus_lost":
+        logger.info(
+            "Ignoring focus_returned for window_focus_lost pending event: session=%s player=%s question=%s",
+            session_code,
+            player_id,
+            pending.get("question_id"),
+        )
+        return
+
     cleared = manager.clear_pending_focus_loss(session_code, player_id)
     if cleared:
         manager.update_fair_play_status(
@@ -1343,15 +1354,23 @@ async def finalize_focus_loss_after_grace(
     question_id: str,
     lost_at: str,
 ):
-    await asyncio.sleep(FAIR_PLAY_GRACE_PERIOD_MS / 1000)
-
-    pending = manager.get_pending_focus_loss(session_code, player_id)
-    logger.info(
-        "FAIR PLAY GRACE FINALIZE session=%s player=%s question=%s pending=%s",
+    logger.warning(
+        "FAIR PLAY GRACE FINALIZER START session=%s player=%s question=%s lost_at=%s",
         session_code,
         player_id,
         question_id,
-        bool(pending),
+        lost_at,
+    )
+    await asyncio.sleep(FAIR_PLAY_GRACE_PERIOD_MS / 1000)
+
+    pending = manager.get_pending_focus_loss(session_code, player_id)
+    logger.warning(
+        "FAIR PLAY GRACE FINALIZER CHECK session=%s player=%s question=%s expected_lost_at=%s pending=%s",
+        session_code,
+        player_id,
+        question_id,
+        lost_at,
+        pending,
     )
     if not pending:
         return
