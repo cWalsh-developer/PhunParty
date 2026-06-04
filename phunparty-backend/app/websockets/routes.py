@@ -1037,11 +1037,7 @@ async def handle_fair_play_focus_lost(
     reason = data.get("reason") or "left_question_screen"
     lost_at = data.get("occurred_at") or iso_utc(datetime.utcnow())
 
-    immediate_violation_reasons = {
-        "multi_window_mode",
-        "picture_in_picture_mode",
-        "window_focus_lost",
-    }
+    immediate_violation_reasons = {"multi_window_mode", "picture_in_picture_mode"}
 
     if reason in immediate_violation_reasons:
         logger.info(
