@@ -6,7 +6,7 @@ Handles real-time communication between web UI and mobile app
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Union
 
@@ -66,6 +66,8 @@ class ConnectionManager:
         # session_code -> player_id -> pending focus-loss report under grace period.
         self.pending_focus_losses: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # event_id -> delivery/ack state for critical phase messages.
+        # session_code -> terminal/final session snapshot kept after game end
+        self.terminal_sessions: Dict[str, Dict[str, Any]] = {}
         self.pending_acks: Dict[str, Dict[str, Any]] = {}
         # session_code:player_id values for players who explicitly left.
         self.intentional_leaves: Set[str] = set()
@@ -225,7 +227,9 @@ class ConnectionManager:
         )
         for key in clear_fields:
             state.pop(key, None)
-        state.update({key: value for key, value in updates.items() if value is not None})
+        state.update(
+            {key: value for key, value in updates.items() if value is not None}
+        )
         logger.info(f"Session {session_code} phase set to {phase_value}")
         return dict(state)
 
@@ -275,7 +279,9 @@ class ConnectionManager:
 
         target_state = event_state["targets"].get(ws_id)
         if not target_state:
-            logger.debug(f"ACK received for {event_id} from non-target websocket {ws_id}")
+            logger.debug(
+                f"ACK received for {event_id} from non-target websocket {ws_id}"
+            )
             return False
 
         target_state["acked"] = True
@@ -288,7 +294,9 @@ class ConnectionManager:
 
         return True
 
-    def get_pending_ack_summary(self, session_code: Optional[str] = None) -> Dict[str, Any]:
+    def get_pending_ack_summary(
+        self, session_code: Optional[str] = None
+    ) -> Dict[str, Any]:
         events = [
             event
             for event in self.pending_acks.values()
@@ -372,7 +380,9 @@ class ConnectionManager:
                 if target.get("acked"):
                     continue
 
-                connection_info = self.active_connections.get(session_code, {}).get(ws_id)
+                connection_info = self.active_connections.get(session_code, {}).get(
+                    ws_id
+                )
                 if not connection_info:
                     event_state["targets"].pop(ws_id, None)
                     continue
@@ -598,9 +608,7 @@ class ConnectionManager:
                 client_info
                 and client_info.get("client_type") == "mobile"
                 and client_info.get("player_id")
-                and self._player_task_key(
-                    session_code, client_info.get("player_id")
-                )
+                and self._player_task_key(session_code, client_info.get("player_id"))
                 not in self.intentional_leaves
             ):
                 player_id = client_info.get("player_id")
@@ -626,6 +634,63 @@ class ConnectionManager:
             return False
 
         return bool(self.get_pending_focus_loss(session_code, player_id))
+
+    def remember_terminal_session(
+        self,
+        session_code: str,
+        snapshot: Dict[str, Any],
+        ttl_seconds: int = 900,
+    ) -> Dict[str, Any]:
+        """Keep final session/Fair Play state briefly after the live session ends."""
+        expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds)
+
+        terminal_snapshot = {
+            **snapshot,
+            "session_code": session_code,
+            "terminal": True,
+            "cached_at": datetime.utcnow().isoformat() + "Z",
+            "expires_at": expires_at.isoformat() + "Z",
+        }
+
+        self.terminal_sessions[session_code] = terminal_snapshot
+
+        logger.info(
+            "Cached terminal session snapshot for %s until %s",
+            session_code,
+            terminal_snapshot["expires_at"],
+        )
+
+        return terminal_snapshot
+
+    def get_terminal_session(self, session_code: str) -> Optional[Dict[str, Any]]:
+        """Return a terminal session snapshot if it has not expired."""
+        snapshot = self.terminal_sessions.get(session_code)
+
+        if not snapshot:
+            return None
+
+        expires_at_raw = snapshot.get("expires_at")
+
+        try:
+            expires_at = datetime.fromisoformat(str(expires_at_raw).replace("Z", ""))
+        except Exception:
+            self.terminal_sessions.pop(session_code, None)
+            return None
+
+        if datetime.utcnow() > expires_at:
+            self.terminal_sessions.pop(session_code, None)
+            return None
+
+        return dict(snapshot)
+
+    async def cleanup_terminal_session_later(
+        self,
+        session_code: str,
+        delay_seconds: int = 900,
+    ) -> None:
+        await asyncio.sleep(delay_seconds)
+        self.terminal_sessions.pop(session_code, None)
+        logger.info("Cleaned terminal session snapshot for %s", session_code)
 
     def cleanup_session(self, session_code: str) -> None:
         """Drop in-memory state for a completed session once clients have left."""
@@ -1269,9 +1334,7 @@ class ConnectionManager:
         player_status.update(status)
         return player_status
 
-    def get_fair_play_status(
-        self, session_code: str, player_id: str
-    ) -> Dict[str, Any]:
+    def get_fair_play_status(self, session_code: str, player_id: str) -> Dict[str, Any]:
         return dict(
             self.fair_play_player_status.get(session_code, {}).get(player_id, {})
         )

@@ -36,10 +36,39 @@ async def handle_game_end(session_code: str, db: Session) -> bool:
             )
 
         final_scores = get_final_scores(db, session_code)
+        fair_play_statuses = manager.fair_play_player_status.get(session_code, {})
+        removed_players = [
+            {
+                "player_id": player_id,
+                **status,
+            }
+            for player_id, status in fair_play_statuses.items()
+            if status.get("is_kicked") is True
+        ]
+        terminal_snapshot = {
+            "phase": SessionPhase.ENDED.value,
+            "ended_at": None,  # filled below once ended_at is calculated
+            "final_scores": final_scores,
+            "fair_play_player_status": {
+                player_id: {
+                    "player_id": player_id,
+                    **status,
+                }
+                for player_id, status in fair_play_statuses.items()
+            },
+            "removed_players": removed_players,
+            "kicked_players": removed_players,
+        }
         ended_at = (
             game_state.ended_at.isoformat()
             if game_state and game_state.ended_at
             else datetime.now().isoformat()
+        )
+        terminal_snapshot["ended_at"] = ended_at
+        manager.remember_terminal_session(
+            session_code,
+            terminal_snapshot,
+            ttl_seconds=900,
         )
         phase_state = manager.set_session_phase(
             session_code,
@@ -71,11 +100,15 @@ async def handle_game_end(session_code: str, db: Session) -> bool:
         )
 
         logger.info(f"Game end broadcast complete for session {session_code}")
-        cleanup_task = manager.cleanup_session_later(
-            session_code, delay_seconds=60
-        )
+        cleanup_task = manager.cleanup_session_later(session_code, delay_seconds=60)
         if inspect.isawaitable(cleanup_task):
             asyncio.create_task(cleanup_task)
+            terminal_cleanup_task = manager.cleanup_terminal_session_later(
+                session_code,
+                delay_seconds=900,
+            )
+            if inspect.isawaitable(terminal_cleanup_task):
+                asyncio.create_task(terminal_cleanup_task)
         return True
 
     except Exception as e:

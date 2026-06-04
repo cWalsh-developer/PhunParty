@@ -87,10 +87,119 @@ def build_player_fair_play_status(
     db: Session, session_code: str, player_id: str
 ) -> dict:
     game_state = get_game_session_state(db, session_code)
+    record = get_fair_play_record(db, session_code, player_id)
+
+    # If the live game state has already been cleaned/deleted, fall back to the
+    # terminal snapshot kept by the websocket manager.
     if not game_state:
+        terminal_session = manager.get_terminal_session(session_code)
+
+        if terminal_session:
+            terminal_statuses = terminal_session.get("fair_play_player_status", {})
+            player_status = terminal_statuses.get(player_id)
+
+            removed_players = terminal_session.get("removed_players", []) or []
+            removed_match = next(
+                (
+                    removed
+                    for removed in removed_players
+                    if str(removed.get("player_id")) == str(player_id)
+                ),
+                None,
+            )
+
+            if player_status or removed_match:
+                status_source = {
+                    **(player_status or {}),
+                    **(removed_match or {}),
+                }
+
+                is_kicked = bool(
+                    status_source.get("is_kicked")
+                    or status_source.get("answer_status") == "kicked"
+                    or removed_match
+                )
+
+                max_strikes = int(status_source.get("max_strikes") or 3)
+                strike_count = int(
+                    status_source.get("strike_count")
+                    or (max_strikes if is_kicked else 0)
+                )
+
+                return {
+                    "player_id": player_id,
+                    "session_code": session_code,
+                    "phase": terminal_session.get("phase", "ended"),
+                    "ended_at": terminal_session.get("ended_at"),
+                    "strike_count": strike_count,
+                    "max_strikes": max_strikes,
+                    "is_kicked": is_kicked,
+                    "is_frozen": is_kicked or bool(status_source.get("is_frozen")),
+                    "frozen_question_id": status_source.get("frozen_question_id"),
+                    "reason": status_source.get("reason")
+                    or ("fair_play_strikes" if is_kicked else None),
+                    "fair_play_reason": status_source.get("fair_play_reason")
+                    or status_source.get("reason")
+                    or ("fair_play_strikes" if is_kicked else None),
+                    "answer_status": status_source.get("answer_status")
+                    or ("kicked" if is_kicked else None),
+                    "message": status_source.get("message")
+                    or (
+                        f"You were removed after {max_strikes} Fair Play strikes."
+                        if is_kicked
+                        else None
+                    ),
+                    "terminal": True,
+                }
+
+            # The session ended and we have a terminal snapshot, but this player
+            # was not removed.
+            return {
+                "player_id": player_id,
+                "session_code": session_code,
+                "phase": terminal_session.get("phase", "ended"),
+                "ended_at": terminal_session.get("ended_at"),
+                "strike_count": 0,
+                "max_strikes": 3,
+                "is_kicked": False,
+                "is_frozen": False,
+                "frozen_question_id": None,
+                "reason": None,
+                "fair_play_reason": None,
+                "answer_status": None,
+                "message": None,
+                "terminal": True,
+            }
+
+        # If the DB fair-play record survived but the game state did not, still
+        # return useful information instead of 404.
+        if record:
+            max_strikes = 3
+            is_kicked = bool(record.is_kicked)
+            strike_count = record.strike_count if record else 0
+
+            return {
+                "player_id": player_id,
+                "session_code": session_code,
+                "phase": "ended",
+                "strike_count": strike_count,
+                "max_strikes": max_strikes,
+                "is_kicked": is_kicked,
+                "is_frozen": is_kicked,
+                "frozen_question_id": None,
+                "reason": "fair_play_strikes" if is_kicked else None,
+                "fair_play_reason": "fair_play_strikes" if is_kicked else None,
+                "answer_status": "kicked" if is_kicked else None,
+                "message": (
+                    f"You were removed after {max_strikes} Fair Play strikes."
+                    if is_kicked
+                    else None
+                ),
+                "terminal": True,
+            }
+
         raise HTTPException(status_code=404, detail="Session not found")
 
-    record = get_fair_play_record(db, session_code, player_id)
     max_strikes = getattr(game_state, "max_fair_play_strikes", 3) or 3
     current_question_id = getattr(game_state, "current_question_id", None)
     is_frozen = bool(
