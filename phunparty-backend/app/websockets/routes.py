@@ -1123,6 +1123,12 @@ async def handle_fair_play_focus_lost(
     data: dict,
     db: Session,
 ):
+    logger.warning(
+        "FAIR PLAY FOCUS LOST HANDLER HIT session=%s player=%s data=%s",
+        session_code,
+        player_id,
+        data,
+    )
     """Start a backend-owned Fair Play grace window for focus loss."""
     if not player_id:
         return
