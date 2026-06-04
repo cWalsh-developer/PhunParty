@@ -1366,6 +1366,99 @@ async def advance_after_fair_play_if_ready(
     return game_progression
 
 
+async def apply_buzzer_fair_play_freeze(
+    session_code: str,
+    player_id: str,
+    question_id: str,
+    db: Session,
+) -> None:
+    """
+    Keep buzzer mode moving when a Fair Play violation freezes a player.
+
+    If the frozen player was the current buzzer winner, clear the winner and
+    reopen buzzing so the remaining players can attempt the question.
+    """
+    try:
+        game_type = resolve_session_game_type(db, session_code)
+
+        if game_type != BUZZER_GAME_TYPE:
+            return
+
+        state = manager.get_buzzer_state(session_code)
+
+        if state.get("current_question_id") != question_id:
+            logger.info(
+                "Skipping buzzer Fair Play freeze for stale question: session=%s player=%s incoming=%s current=%s",
+                session_code,
+                player_id,
+                question_id,
+                state.get("current_question_id"),
+            )
+            return
+
+        frozen_players = state.setdefault("frozen_players", set())
+        frozen_players.add(player_id)
+
+        was_current_winner = state.get("current_buzzer_winner") == player_id
+        has_current_winner = bool(state.get("current_buzzer_winner"))
+
+        if was_current_winner:
+            logger.info(
+                "Fair Play froze current buzzer winner; reopening buzzes: session=%s player=%s question=%s",
+                session_code,
+                player_id,
+                question_id,
+            )
+
+            state["current_buzzer_winner"] = None
+            state["question_active"] = True
+            state["transitioning"] = False
+            state["accepting_buzzes"] = True
+
+        elif not has_current_winner:
+            logger.info(
+                "Fair Play froze non-winner while buzzer open; keeping buzzes active: session=%s player=%s question=%s",
+                session_code,
+                player_id,
+                question_id,
+            )
+
+            state["question_active"] = True
+            state["transitioning"] = False
+            state["accepting_buzzes"] = True
+
+        else:
+            logger.info(
+                "Fair Play froze non-winner while another player is answering; keeping current buzzer winner: session=%s player=%s winner=%s question=%s",
+                session_code,
+                player_id,
+                state.get("current_buzzer_winner"),
+                question_id,
+            )
+
+        await manager.broadcast_buzzer_state_update(session_code)
+
+        buzzer_handler = create_game_handler(session_code, BUZZER_GAME_TYPE)
+
+        if hasattr(buzzer_handler, "update_mobile_buzzer_ui"):
+            await buzzer_handler.update_mobile_buzzer_ui(
+                db,
+                message_override=(
+                    "Another player was frozen by Fair Play. Buzzing is open again!"
+                    if was_current_winner
+                    else None
+                ),
+            )
+
+    except Exception:
+        logger.exception(
+            "Failed to apply buzzer Fair Play freeze: session=%s player=%s question=%s",
+            session_code,
+            player_id,
+            question_id,
+        )
+
+
 async def handle_focus_violation(
     websocket: Optional[WebSocket],
     session_code: str,
@@ -1493,11 +1586,16 @@ async def handle_focus_violation(
         },
         critical=True,
     )
+    await apply_buzzer_fair_play_freeze(
+        session_code=session_code,
+        player_id=player_id,
+        question_id=question_id,
+        db=db,
+    )
 
     if record.is_kicked:
         await kick_player_for_fair_play(session_code, player_id, max_strikes, db)
         await asyncio.sleep(0.75)
-
     await advance_after_fair_play_if_ready(session_code, question_id, db)
 
 
