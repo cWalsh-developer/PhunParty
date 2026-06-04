@@ -23,6 +23,10 @@ from app.websockets.scheduler import (
     iso_utc,
     reveal_current_question,
 )
+from app.database.fair_play_crud import (
+    is_player_frozen_for_question,
+    is_player_kicked,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -191,9 +195,7 @@ class TriviaGameHandler(GameEventHandler):
             logger.info(f"Full answer submission result: {result}")
 
             if action == "next_question":
-                logger.info(
-                    f"Revealing next question for session {self.session_code}"
-                )
+                logger.info(f"Revealing next question for session {self.session_code}")
                 from app.logic.game_logic import get_game_session_state
 
                 game_state = get_game_session_state(db, self.session_code)
@@ -208,9 +210,7 @@ class TriviaGameHandler(GameEventHandler):
                         iso_utc(question_start_at),
                     )
                 else:
-                    logger.warning(
-                        "No current question ID found after auto-advance"
-                    )
+                    logger.warning("No current question ID found after auto-advance")
 
             # If game ended, broadcast game end
             elif action == "game_ended":
@@ -295,6 +295,70 @@ class BuzzerGameHandler(GameEventHandler):
     def buzzer_state(self) -> Dict[str, Any]:
         return manager.get_buzzer_state(self.session_code)
 
+    async def reject_fair_play_locked_buzzer(
+        self,
+        player_id: str,
+        question_id: str,
+        db: Session,
+    ) -> bool:
+        """
+        Prevent a Fair Play frozen/kicked player from buzz-locking the round.
+
+        This protects against stale mobile UI where the player returns to the app and
+        taps the buzzer before their freeze update has rendered.
+        """
+        is_locked_by_fair_play = is_player_kicked(
+            db, self.session_code, player_id
+        ) or is_player_frozen_for_question(
+            db,
+            self.session_code,
+            player_id,
+            question_id,
+        )
+        if not is_locked_by_fair_play:
+            return False
+        state = self.buzzer_state
+        frozen_players = state.setdefault("frozen_players", set())
+        frozen_players.add(player_id)
+
+        if state.get("current_buzzer_winner") == player_id:
+            state["current_buzzer_winner"] = None
+
+        if not state.get("current_buzzer_winner"):
+            state["question_active"] = True
+            state["transitioning"] = False
+            state["accepting_buzzes"] = True
+
+        logger.info(
+            "Rejected Fair Play locked buzzer press: session=%s player=%s question=%s",
+            self.session_code,
+            player_id,
+            question_id,
+        )
+        for connection_info in manager.get_player_connections(
+            self.session_code,
+            player_id,
+        ).values():
+            websocket = connection_info.get("websocket")
+            if websocket:
+                await manager.send_personal_message(
+                    {
+                        "type": "buzzer_rejected",
+                        "data": {
+                            "reason": "fair_play_restriction",
+                            "question_id": question_id,
+                            "message": "You are frozen for this question because of Fair Play Mode.",
+                        },
+                    },
+                    websocket,
+                )
+            await manager.broadcast_buzzer_state_update(self.session_code)
+            await self.update_mobile_buzzer_ui(
+                db,
+                message_override="Another player was frozen by Fair Play. Buzzing is open again!",
+            )
+            return True
+
     async def handle_buzzer_press(
         self, player_id: str, db: Session, incoming_question_id: str = None
     ):
@@ -317,6 +381,13 @@ class BuzzerGameHandler(GameEventHandler):
             return
 
         if state.get("current_question_id") != current_question_id:
+            return
+
+        if await self.reject_fair_play_locked_buzzer(
+            player_id=player_id,
+            question_id=current_question_id,
+            db=db,
+        ):
             return
 
         if state.get("transitioning") or not state.get("accepting_buzzes", False):
@@ -396,9 +467,7 @@ class BuzzerGameHandler(GameEventHandler):
                 },
             )
 
-            await self.lock_buzzer_until_next_question(
-                "Moving to the next question..."
-            )
+            await self.lock_buzzer_until_next_question("Moving to the next question...")
             if action == "next_question":
                 await self.reveal_current_db_question(db, "buzzer_correct_answer")
             elif action == "game_ended":
@@ -559,10 +628,14 @@ class BuzzerGameHandler(GameEventHandler):
                 {"type": "ui_update", "data": ui_state}, connection_info["websocket"]
             )
 
-    def format_buzzer_answer_payload(self, question_data: Dict[str, Any]) -> Dict[str, Any]:
+    def format_buzzer_answer_payload(
+        self, question_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """Build answer-mode data for the buzzer winner only."""
         question_data = question_data or {}
-        options = question_data.get("display_options") or question_data.get("options") or []
+        options = (
+            question_data.get("display_options") or question_data.get("options") or []
+        )
         ui_mode = "multiple_choice" if options else "text_input"
 
         return {
