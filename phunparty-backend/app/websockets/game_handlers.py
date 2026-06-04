@@ -402,6 +402,17 @@ class BuzzerGameHandler(GameEventHandler):
 
         # Check if someone already buzzed in
         if state["current_buzzer_winner"]:
+            # If the same player taps a stale active buzzer, do not let the UI deadlock.
+            # Resend the authoritative buzzer UI so they return to answer mode.
+            if state["current_buzzer_winner"] == player_id:
+                logger.info(
+                    "Current buzzer winner pressed stale buzzer again; resyncing UI: session=%s player=%s question=%s",
+                    self.session_code,
+                    player_id,
+                    current_question_id,
+                )
+                await manager.broadcast_buzzer_state_update(self.session_code)
+                await self.update_mobile_buzzer_ui(db)
             return
 
         # This player wins the buzzer!

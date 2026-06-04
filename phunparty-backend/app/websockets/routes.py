@@ -1205,6 +1205,59 @@ async def handle_fair_play_focus_lost(
     )
 
 
+async def resync_buzzer_ui_after_fair_play_return(
+    session_code: str,
+    player_id: str,
+    question_id: str | None,
+    db: Session,
+) -> None:
+    """
+    When a player returns within the Fair Play grace period, resend the current
+    authoritative buzzer UI. This prevents the mobile from showing stale active
+    buzzer state when the player should still be answering/waiting.
+    """
+    try:
+        game_type = resolve_session_game_type(db, session_code)
+
+        if game_type != BUZZER_GAME_TYPE:
+            return
+
+        phase_state = manager.get_session_phase_state(session_code)
+        current_question_id = phase_state.get("current_question_id")
+
+        if question_id and current_question_id and question_id != current_question_id:
+            logger.info(
+                "Skipping buzzer UI resync after Fair Play return for stale question: session=%s player=%s incoming=%s current=%s",
+                session_code,
+                player_id,
+                question_id,
+                current_question_id,
+            )
+            return
+
+        buzzer_handler = create_game_handler(session_code, BUZZER_GAME_TYPE)
+
+        await manager.broadcast_buzzer_state_update(session_code)
+
+        if hasattr(buzzer_handler, "update_mobile_buzzer_ui"):
+            await buzzer_handler.update_mobile_buzzer_ui(db)
+
+        logger.info(
+            "Resynced buzzer UI after Fair Play return: session=%s player=%s question=%s",
+            session_code,
+            player_id,
+            current_question_id,
+        )
+
+    except Exception:
+        logger.exception(
+            "Failed to resync buzzer UI after Fair Play return: session=%s player=%s question=%s",
+            session_code,
+            player_id,
+            question_id,
+        )
+
+
 async def handle_fair_play_focus_returned(
     websocket: WebSocket,
     session_code: str,
@@ -1236,6 +1289,17 @@ async def handle_fair_play_focus_returned(
             answer_status=None,
         )
         await manager.broadcast_player_roster_update(session_code)
+        db, db_generator = open_db_session()
+        try:
+            await resync_buzzer_ui_after_fair_play_return(
+                session_code=session_code,
+                player_id=player_id,
+                question_id=cleared.get("question_id"),
+                db=db,
+            )
+        finally:
+            db_generator.close()
+
         await manager.send_personal_message(
             {
                 "type": "fair_play_focus_grace_cleared",
