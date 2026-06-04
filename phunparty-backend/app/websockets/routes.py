@@ -1293,6 +1293,7 @@ async def handle_fair_play_focus_returned(
         return
 
     pending = manager.get_pending_focus_loss(session_code, player_id)
+
     logger.info(
         "FAIR PLAY RETURNED session=%s player=%s question=%s pending=%s",
         session_code,
@@ -1300,22 +1301,60 @@ async def handle_fair_play_focus_returned(
         data.get("question_id"),
         bool(pending),
     )
-    if data.get("question_id") and pending:
-        if pending.get("question_id") != data.get("question_id"):
-            return
 
-    pending = manager.get_pending_focus_loss(session_code, player_id)
+    if not pending:
+        return
 
-    if pending and pending.get("reason") == "window_focus_lost":
+    returned_question_id = data.get("question_id")
+
+    if returned_question_id and pending.get("question_id") != returned_question_id:
+        return
+
+    pending_reason = pending.get("reason")
+    pending_question_id = pending.get("question_id")
+    lost_at_raw = pending.get("lost_at")
+
+    # Notification shade / overlay handling.
+    # Do not let noisy focus-return events clear this pending loss.
+    if pending_reason == "window_focus_lost":
         logger.info(
             "Ignoring focus_returned for window_focus_lost pending event: session=%s player=%s question=%s",
             session_code,
             player_id,
-            pending.get("question_id"),
+            pending_question_id,
         )
         return
 
+    # If the player returns after the grace period has already expired,
+    # do not clear the pending loss. Let the grace finalizer award the strike.
+    try:
+        lost_at_dt = datetime.fromisoformat(str(lost_at_raw).replace("Z", "+00:00"))
+
+        now_dt = datetime.now(lost_at_dt.tzinfo)
+        elapsed_ms = (now_dt - lost_at_dt).total_seconds() * 1000
+
+        if elapsed_ms >= FAIR_PLAY_GRACE_PERIOD_MS:
+            logger.warning(
+                "Ignoring late focus_returned because grace already expired: session=%s player=%s question=%s reason=%s elapsed_ms=%s grace_ms=%s",
+                session_code,
+                player_id,
+                pending_question_id,
+                pending_reason,
+                round(elapsed_ms),
+                FAIR_PLAY_GRACE_PERIOD_MS,
+            )
+            return
+
+    except Exception:
+        logger.exception(
+            "Could not calculate Fair Play grace elapsed time: session=%s player=%s pending=%s",
+            session_code,
+            player_id,
+            pending,
+        )
+
     cleared = manager.clear_pending_focus_loss(session_code, player_id)
+
     if cleared:
         manager.update_fair_play_status(
             session_code,
@@ -1323,7 +1362,9 @@ async def handle_fair_play_focus_returned(
             connection_state="connected",
             answer_status=None,
         )
+
         await manager.broadcast_player_roster_update(session_code)
+
         db, db_generator = open_db_session()
         try:
             await resync_buzzer_ui_after_fair_play_return(
