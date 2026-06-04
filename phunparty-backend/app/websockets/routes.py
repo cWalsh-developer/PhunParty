@@ -1184,6 +1184,24 @@ async def handle_fair_play_focus_lost(
         reason,
         lost_at,
     )
+    existing_pending = manager.get_pending_focus_loss(session_code, player_id)
+
+    if (
+        existing_pending
+        and existing_pending.get("question_id") == question_id
+        and existing_pending.get("reason") == reason
+    ):
+        logger.info(
+            "Ignoring duplicate pending Fair Play focus loss: session=%s player=%s question=%s reason=%s original_lost_at=%s duplicate_lost_at=%s",
+            session_code,
+            player_id,
+            question_id,
+            reason,
+            existing_pending.get("lost_at"),
+            lost_at,
+        )
+        return
+
     pending = manager.record_pending_focus_loss(
         session_code=session_code,
         player_id=player_id,
