@@ -1186,16 +1186,13 @@ async def handle_fair_play_focus_lost(
     )
     existing_pending = manager.get_pending_focus_loss(session_code, player_id)
 
-    if (
-        existing_pending
-        and existing_pending.get("question_id") == question_id
-        and existing_pending.get("reason") == reason
-    ):
+    if existing_pending and existing_pending.get("question_id") == question_id:
         logger.info(
-            "Ignoring duplicate pending Fair Play focus loss: session=%s player=%s question=%s reason=%s original_lost_at=%s duplicate_lost_at=%s",
+            "Ignoring additional Fair Play focus loss while pending exists: session=%s player=%s question=%s existing_reason=%s new_reason=%s original_lost_at=%s new_lost_at=%s",
             session_code,
             player_id,
             question_id,
+            existing_pending.get("reason"),
             reason,
             existing_pending.get("lost_at"),
             lost_at,
@@ -1335,7 +1332,7 @@ async def handle_fair_play_focus_returned(
 
         if elapsed_ms >= FAIR_PLAY_GRACE_PERIOD_MS:
             logger.warning(
-                "Ignoring late focus_returned because grace already expired: session=%s player=%s question=%s reason=%s elapsed_ms=%s grace_ms=%s",
+                "Late focus_returned after grace expired; applying strike now: session=%s player=%s question=%s reason=%s elapsed_ms=%s grace_ms=%s",
                 session_code,
                 player_id,
                 pending_question_id,
@@ -1343,6 +1340,25 @@ async def handle_fair_play_focus_returned(
                 round(elapsed_ms),
                 FAIR_PLAY_GRACE_PERIOD_MS,
             )
+
+            manager.clear_pending_focus_loss(session_code, player_id)
+
+            db, db_generator = open_db_session()
+            try:
+                await handle_focus_violation(
+                    websocket=websocket,
+                    session_code=session_code,
+                    player_id=player_id,
+                    data={
+                        "question_id": pending_question_id,
+                        "reason": pending_reason or "left_question_screen",
+                        "occurred_at": lost_at_raw,
+                    },
+                    db=db,
+                )
+            finally:
+                db_generator.close()
+
             return
 
     except Exception:
