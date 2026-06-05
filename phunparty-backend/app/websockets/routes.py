@@ -1311,15 +1311,6 @@ async def handle_fair_play_focus_returned(
     pending_question_id = pending.get("question_id")
     lost_at_raw = pending.get("lost_at")
 
-    if pending_reason == "window_focus_lost":
-        logger.info(
-            "Ignoring focus_returned for window_focus_lost pending event: session=%s player=%s question=%s",
-            session_code,
-            player_id,
-            pending_question_id,
-        )
-        return
-
     # If the player returns after the grace period has already expired,
     # do not clear the pending loss. Let the grace finalizer award the strike.
     try:
@@ -1431,7 +1422,25 @@ async def finalize_focus_loss_after_grace(
         return
 
     if pending.get("question_id") != question_id or pending.get("lost_at") != lost_at:
+        logger.info(
+            "FAIR PLAY GRACE FINALIZER STALE session=%s player=%s question=%s expected_lost_at=%s pending=%s",
+            session_code,
+            player_id,
+            question_id,
+            lost_at,
+            pending,
+        )
         return
+
+    logger.warning(
+        "FAIR PLAY GRACE FINALIZER AWARDING STRIKE session=%s player=%s question=%s reason=%s lost_at=%s pending=%s",
+        session_code,
+        player_id,
+        question_id,
+        pending.get("reason"),
+        lost_at,
+        pending,
+    )
 
     manager.clear_pending_focus_loss(session_code, player_id)
     db, db_generator = open_db_session()
