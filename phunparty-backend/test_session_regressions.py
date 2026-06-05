@@ -159,6 +159,36 @@ def test_answer_validation_accepts_close_spelling():
     assert result.method.startswith("levenshtein:")
 
 
+def test_answer_validation_rejects_wrong_short_numeric_answer():
+    result = answer_validation.validate_answer("5", ["7"])
+
+    assert result.is_correct is False
+
+
+def test_answer_validation_rejects_wrong_short_text_answer():
+    result = answer_validation.validate_answer("uk", ["us"])
+
+    assert result.is_correct is False
+
+
+def test_answer_validation_exact_mode_rejects_close_multiple_choice_answer():
+    result = answer_validation.validate_answer("5", ["7"], allow_fuzzy=False)
+    decimal_result = answer_validation.validate_answer(
+        "7.0", ["7"], allow_fuzzy=False
+    )
+
+    assert result.is_correct is False
+    assert result.method == "no_match"
+    assert decimal_result.is_correct is False
+
+
+def test_answer_validation_accepts_equivalent_numeric_text_answer():
+    result = answer_validation.validate_answer("7.0", ["7"])
+
+    assert result.is_correct is True
+    assert result.method == "numeric"
+
+
 def test_answer_validation_accepts_aliases_from_question():
     question = SimpleNamespace(
         answer="James Cameron",
@@ -194,6 +224,64 @@ def test_submit_player_answer_returns_answer_match_metadata():
 
     assert result["is_correct"] is True
     assert result["answer_match"]["matched_answer"] == "Cameron"
+
+
+def test_submit_player_answer_uses_exact_validation_for_multiple_choice():
+    question = SimpleNamespace(
+        answer="7",
+        accepted_answers=[],
+        difficulty="easy",
+        question_options=["5", "6", "8"],
+    )
+    mock_db = MagicMock()
+
+    with patch.object(game_logic, "get_player_response", return_value=None):
+        with patch.object(game_logic, "get_question_by_id", return_value=question):
+            with patch.object(game_logic, "create_player_response"):
+                with patch.object(game_logic, "update_scores"):
+                    with patch.object(
+                        game_logic,
+                        "check_and_advance_game",
+                        return_value={"players_answered": 1},
+                    ):
+                        result = game_logic.submit_player_answer(
+                            mock_db,
+                            "SESSION123",
+                            "P1",
+                            "Q1",
+                            "8",
+                        )
+
+    assert result["is_correct"] is False
+
+
+def test_submit_player_answer_uses_fuzzy_validation_for_hard_text_input():
+    question = SimpleNamespace(
+        answer="James Cameron",
+        accepted_answers=[],
+        difficulty="hard",
+        question_options=["Wrong", "Options", "Can", "Exist"],
+    )
+    mock_db = MagicMock()
+
+    with patch.object(game_logic, "get_player_response", return_value=None):
+        with patch.object(game_logic, "get_question_by_id", return_value=question):
+            with patch.object(game_logic, "create_player_response"):
+                with patch.object(game_logic, "update_scores"):
+                    with patch.object(
+                        game_logic,
+                        "check_and_advance_game",
+                        return_value={"players_answered": 1},
+                    ):
+                        result = game_logic.submit_player_answer(
+                            mock_db,
+                            "SESSION123",
+                            "P1",
+                            "Q1",
+                            "James Camaron",
+                        )
+
+    assert result["is_correct"] is True
 
 
 def test_check_and_advance_game_counts_fair_play_resolved_players():

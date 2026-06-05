@@ -4,6 +4,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
 from typing import Any, Iterable, List, Optional
 
@@ -60,6 +61,20 @@ def _similarity_ratio(left: str, right: str) -> float:
     return SequenceMatcher(None, left, right).ratio() * 100
 
 
+def _coerce_decimal(value: Any) -> Optional[Decimal]:
+    if value is None:
+        return None
+
+    text = str(value).strip().replace(",", "")
+    if not re.fullmatch(r"[+-]?\d+(?:\.\d+)?", text):
+        return None
+
+    try:
+        return Decimal(text).normalize()
+    except InvalidOperation:
+        return None
+
+
 def _coerce_answer_list(value: Any) -> List[str]:
     if value is None:
         return []
@@ -97,7 +112,12 @@ def accepted_answers_for_question(question: Any) -> List[str]:
     return deduped
 
 
-def validate_answer(user_answer: Any, accepted_answers: Iterable[Any]) -> AnswerValidationResult:
+def validate_answer(
+    user_answer: Any,
+    accepted_answers: Iterable[Any],
+    *,
+    allow_fuzzy: bool = True,
+) -> AnswerValidationResult:
     """Validate a free-text answer with exact, alias, and fuzzy matching."""
     user = normalize_answer(user_answer)
     if not user:
@@ -105,6 +125,8 @@ def validate_answer(user_answer: Any, accepted_answers: Iterable[Any]) -> Answer
 
     best_result = AnswerValidationResult(False, "no_match")
     for accepted_answer in accepted_answers:
+        user_decimal = _coerce_decimal(user_answer)
+        accepted_decimal = _coerce_decimal(accepted_answer)
         accepted = normalize_answer(accepted_answer)
         if not accepted:
             continue
@@ -112,8 +134,32 @@ def validate_answer(user_answer: Any, accepted_answers: Iterable[Any]) -> Answer
         if user == accepted:
             return AnswerValidationResult(True, "exact", str(accepted_answer), 100)
 
+        if not allow_fuzzy:
+            continue
+
+        if (
+            user_decimal is not None
+            and accepted_decimal is not None
+            and user_decimal == accepted_decimal
+        ):
+            return AnswerValidationResult(
+                True, "numeric", str(accepted_answer), 100
+            )
+
         distance = _levenshtein_distance(user, accepted)
         accepted_length = len(accepted)
+        user_length = len(user)
+        is_short_answer = accepted_length <= 3 or user_length <= 3
+        is_numeric_answer = accepted.isdigit() or user.isdigit()
+
+        if is_short_answer or is_numeric_answer:
+            ratio = _similarity_ratio(user, accepted)
+            if best_result.score is None or ratio > best_result.score:
+                best_result = AnswerValidationResult(
+                    False, f"ratio:{ratio:.1f}", str(accepted_answer), ratio
+                )
+            continue
+
         if accepted_length <= 6 and distance <= 1:
             return AnswerValidationResult(
                 True, f"levenshtein:{distance}", str(accepted_answer)
@@ -137,5 +183,14 @@ def validate_answer(user_answer: Any, accepted_answers: Iterable[Any]) -> Answer
     return best_result
 
 
-def validate_answer_against_question(user_answer: Any, question: Any) -> AnswerValidationResult:
-    return validate_answer(user_answer, accepted_answers_for_question(question))
+def validate_answer_against_question(
+    user_answer: Any,
+    question: Any,
+    *,
+    allow_fuzzy: bool = True,
+) -> AnswerValidationResult:
+    return validate_answer(
+        user_answer,
+        accepted_answers_for_question(question),
+        allow_fuzzy=allow_fuzzy,
+    )

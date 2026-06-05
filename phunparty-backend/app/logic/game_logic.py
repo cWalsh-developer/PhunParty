@@ -31,6 +31,17 @@ from app.logic.answer_validation import validate_answer_against_question
 logger = logging.getLogger(__name__)
 
 
+def question_allows_fuzzy_validation(question) -> bool:
+    """Fuzzy validation is only for free-text answers, not multiple choice."""
+    difficulty = getattr(question, "difficulty", None)
+    difficulty_value = getattr(difficulty, "value", difficulty)
+    if isinstance(difficulty_value, str) and difficulty_value.lower() == "hard":
+        return True
+
+    question_options = getattr(question, "question_options", None)
+    return not bool(question_options)
+
+
 def submit_player_answer(
     db: Session, session_code: str, player_id: str, question_id: str, player_answer: str
 ) -> dict:
@@ -61,7 +72,11 @@ def submit_player_answer(
     if not question:
         raise ValueError("Question not found")
 
-    validation = validate_answer_against_question(player_answer, question)
+    validation = validate_answer_against_question(
+        player_answer,
+        question,
+        allow_fuzzy=question_allows_fuzzy_validation(question),
+    )
     is_correct = validation.is_correct
 
     # Record the player's response
