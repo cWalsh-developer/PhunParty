@@ -53,6 +53,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 INTRO_RECOVERY_WINDOW_SECONDS = 15
 FAIR_PLAY_GRACE_PERIOD_MS = 2000
+IMMEDIATE_FAIR_PLAY_VIOLATION_REASONS = {
+    "multi_window_mode",
+    "picture_in_picture_mode",
+    "window_focus_lost",
+}
 
 
 def parse_optional_bool(value):
@@ -1152,9 +1157,7 @@ async def handle_fair_play_focus_lost(
     reason = data.get("reason") or "left_question_screen"
     lost_at = data.get("occurred_at") or iso_utc(datetime.utcnow())
 
-    immediate_violation_reasons = {"multi_window_mode", "picture_in_picture_mode"}
-
-    if reason in immediate_violation_reasons:
+    if reason in IMMEDIATE_FAIR_PLAY_VIOLATION_REASONS:
         logger.info(
             "FAIR PLAY IMMEDIATE STRIKE session=%s player=%s question=%s reason=%s",
             session_code,

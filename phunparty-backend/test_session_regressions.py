@@ -1217,6 +1217,43 @@ def test_fair_play_focus_lost_starts_backend_grace_period():
     assert sent_message["data"]["grace_period_ms"] == routes.FAIR_PLAY_GRACE_PERIOD_MS
 
 
+def test_fair_play_immediate_reasons_bypass_grace_period():
+    game_state = SimpleNamespace(fair_play_enabled=True)
+
+    for reason in routes.IMMEDIATE_FAIR_PLAY_VIOLATION_REASONS:
+        websocket = MagicMock()
+
+        with patch.object(routes, "get_game_session_state", return_value=game_state):
+            with patch.object(routes, "manager") as mock_manager:
+                mock_manager.get_session_phase_state.return_value = {
+                    "phase": "question",
+                    "current_question_id": "Q1",
+                }
+                mock_manager.record_pending_focus_loss = MagicMock()
+                mock_manager.send_personal_message = AsyncMock()
+                with patch.object(
+                    routes, "handle_focus_violation", new_callable=AsyncMock
+                ) as focus_violation:
+                    asyncio.run(
+                        routes.handle_fair_play_focus_lost(
+                            websocket=websocket,
+                            session_code="SESSION123",
+                            player_id="P1",
+                            data={
+                                "question_id": "Q1",
+                                "reason": reason,
+                                "occurred_at": "2026-06-01T12:00:00Z",
+                            },
+                            db=MagicMock(),
+                        )
+                    )
+
+        focus_violation.assert_awaited_once()
+        mock_manager.record_pending_focus_loss.assert_not_called()
+        mock_manager.send_personal_message.assert_not_awaited()
+        assert focus_violation.await_args.kwargs["data"]["reason"] == reason
+
+
 def test_fair_play_window_violation_defaults_to_multi_window_reason():
     websocket = MagicMock()
     game_handler = MagicMock()
