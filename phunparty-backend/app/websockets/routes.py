@@ -1320,17 +1320,35 @@ async def handle_fair_play_focus_returned(
         lost_at_dt = datetime.fromisoformat(str(lost_at_raw).replace("Z", "+00:00"))
 
         now_dt = datetime.now(lost_at_dt.tzinfo)
-        elapsed_ms = (now_dt - lost_at_dt).total_seconds() * 1000
+        returned_at_raw = data.get("returned_at")
+        returned_at_dt = None
+        if returned_at_raw:
+            returned_at_dt = datetime.fromisoformat(
+                str(returned_at_raw).replace("Z", "+00:00")
+            )
+
+            if returned_at_dt.tzinfo is None and lost_at_dt.tzinfo is not None:
+                returned_at_dt = returned_at_dt.replace(tzinfo=lost_at_dt.tzinfo)
+
+        effective_returned_at = returned_at_dt or now_dt
+
+        # Never let a future client clock extend the grace window.
+        if effective_returned_at > now_dt:
+            effective_returned_at = now_dt
+
+        elapsed_ms = (effective_returned_at - lost_at_dt).total_seconds() * 1000
 
         if elapsed_ms >= FAIR_PLAY_GRACE_PERIOD_MS:
             logger.warning(
-                "Late focus_returned after grace expired; applying strike now: session=%s player=%s question=%s reason=%s elapsed_ms=%s grace_ms=%s",
+                "Late focus_returned after grace expired; applying strike now: session=%s player=%s question=%s reason=%s elapsed_ms=%s grace_ms=%s returned_at=%s received_at=%s",
                 session_code,
                 player_id,
                 pending_question_id,
                 pending_reason,
                 round(elapsed_ms),
                 FAIR_PLAY_GRACE_PERIOD_MS,
+                returned_at_raw,
+                now_dt.isoformat(),
             )
 
             manager.clear_pending_focus_loss(session_code, player_id)

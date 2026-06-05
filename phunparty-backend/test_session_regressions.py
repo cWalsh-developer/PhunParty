@@ -1217,6 +1217,59 @@ def test_fair_play_focus_lost_starts_backend_grace_period():
     assert sent_message["data"]["grace_period_ms"] == routes.FAIR_PLAY_GRACE_PERIOD_MS
 
 
+def test_fair_play_return_uses_client_returned_at_for_reconnect_delay():
+    websocket = MagicMock()
+    pending = {
+        "session_code": "SESSION123",
+        "player_id": "P1",
+        "question_id": "Q1",
+        "reason": "app_backgrounded",
+        "lost_at": "2026-06-01T12:00:00Z",
+    }
+
+    class FakeDateTime:
+        @staticmethod
+        def fromisoformat(value):
+            return datetime.fromisoformat(value)
+
+        @staticmethod
+        def now(tz=None):
+            now = datetime.fromisoformat("2026-06-01T12:00:03+00:00")
+            return now if tz else now.replace(tzinfo=None)
+
+        @staticmethod
+        def utcnow():
+            return datetime.fromisoformat("2026-06-01T12:00:03")
+
+    with patch.object(routes, "datetime", FakeDateTime):
+        with patch.object(routes, "manager") as mock_manager:
+            mock_manager.get_pending_focus_loss.return_value = pending
+            mock_manager.clear_pending_focus_loss.return_value = pending
+            mock_manager.broadcast_player_roster_update = AsyncMock()
+            mock_manager.send_personal_message = AsyncMock()
+            with patch.object(
+                routes, "resync_buzzer_ui_after_fair_play_return", new_callable=AsyncMock
+            ):
+                with patch.object(
+                    routes, "handle_focus_violation", new_callable=AsyncMock
+                ) as focus_violation:
+                    asyncio.run(
+                        routes.handle_fair_play_focus_returned(
+                            websocket=websocket,
+                            session_code="SESSION123",
+                            player_id="P1",
+                            data={
+                                "question_id": "Q1",
+                                "returned_at": "2026-06-01T12:00:01Z",
+                            },
+                        )
+                    )
+
+    focus_violation.assert_not_awaited()
+    mock_manager.clear_pending_focus_loss.assert_called_once_with("SESSION123", "P1")
+    mock_manager.send_personal_message.assert_awaited_once()
+
+
 def test_fair_play_immediate_reasons_bypass_grace_period():
     game_state = SimpleNamespace(fair_play_enabled=True)
 
