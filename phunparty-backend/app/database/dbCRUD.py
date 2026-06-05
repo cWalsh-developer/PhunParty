@@ -1180,11 +1180,11 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
 
         # Get full question details with randomized options using the same logic as broadcast_question_with_options
         if current_question:
-            from app.logic.game_logic import get_question_with_randomized_options
+            from app.logic.game_logic import build_question_with_randomized_options
 
             try:
-                question_details = get_question_with_randomized_options(
-                    db, game_state.current_question_id
+                question_details = build_question_with_randomized_options(
+                    current_question
                 )
             except Exception as e:
                 logger.warning(

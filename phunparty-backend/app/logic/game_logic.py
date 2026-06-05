@@ -253,16 +253,13 @@ def get_current_question_for_session(db: Session, session_code: str) -> dict:
     }
 
 
-def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
-    """
-    Get a question with randomized multiple choice options
-    Returns the same format as the questions route for consistency
-    """
+def build_question_with_randomized_options(question) -> dict:
+    """Build randomized display options from an already-loaded question."""
     try:
-        question = get_question_by_id(question_id, db)
         if not question:
             raise ValueError("Question not found")
 
+        question_id = question.question_id
         raw_options = getattr(question, "question_options", None)
 
         # Handle questions that might not have options yet
@@ -284,7 +281,7 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
             }
 
         # Parse and randomize the options with robust error handling
-        logger.info(
+        logger.debug(
             f"Question {question_id} question_options raw value: {repr(raw_options)}"
         )
 
@@ -295,7 +292,7 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
             if isinstance(raw_options, list):
                 # Already parsed by SQLAlchemy
                 incorrect_options = raw_options
-                logger.info(
+                logger.debug(
                     f"Question {question_id} options already parsed as list: {incorrect_options}"
                 )
             elif isinstance(raw_options, str):
@@ -312,7 +309,7 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
                     try:
                         cleaned_options = clean_func(raw_options)
                         incorrect_options = json.loads(cleaned_options)
-                        logger.info(
+                        logger.debug(
                             f"Question {question_id} parsed options (attempt {attempt}): {incorrect_options}"
                         )
                         break
@@ -375,7 +372,7 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
             "correct_index": correct_index,
         }
 
-        logger.info(
+        logger.debug(
             f"Question {question_id} final randomized result: display_options={result['display_options']}, correct_index={result['correct_index']}"
         )
         return result
@@ -393,6 +390,15 @@ def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
             "display_options": [],
             "correct_index": None,
         }
+
+
+def get_question_with_randomized_options(db: Session, question_id: str) -> dict:
+    """
+    Get a question with randomized multiple choice options
+    Returns the same format as the questions route for consistency
+    """
+    question = get_question_by_id(question_id, db)
+    return build_question_with_randomized_options(question)
 
 
 async def broadcast_question_with_options(
