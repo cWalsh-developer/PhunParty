@@ -171,6 +171,19 @@ def test_answer_validation_rejects_wrong_short_text_answer():
     assert result.is_correct is False
 
 
+def test_answer_validation_rejects_wrong_chemical_formula():
+    result = answer_validation.validate_answer("CaCl2", ["NaCl"])
+
+    assert result.is_correct is False
+
+
+def test_answer_validation_accepts_compact_formula_spacing():
+    result = answer_validation.validate_answer("Na Cl", ["NaCl"])
+
+    assert result.is_correct is True
+    assert result.method == "exact_compact"
+
+
 def test_answer_validation_exact_mode_rejects_close_multiple_choice_answer():
     result = answer_validation.validate_answer("5", ["7"], allow_fuzzy=False)
     decimal_result = answer_validation.validate_answer(
@@ -282,6 +295,23 @@ def test_submit_player_answer_uses_fuzzy_validation_for_hard_text_input():
                         )
 
     assert result["is_correct"] is True
+
+
+def test_buzzer_hard_answer_payload_uses_text_input_without_options():
+    handler = game_handlers.BuzzerGameHandler("SESSION123")
+
+    result = handler.format_buzzer_answer_payload(
+        {
+            "question_id": "Q1",
+            "question": "What is the chemical formula for table salt?",
+            "difficulty": "hard",
+            "display_options": ["NaCl", "CaCl2", "KBr", "H2O"],
+        }
+    )
+
+    assert result["ui_mode"] == "text_input"
+    assert result["display_options"] == []
+    assert result["options"] == []
 
 
 def test_check_and_advance_game_counts_fair_play_resolved_players():

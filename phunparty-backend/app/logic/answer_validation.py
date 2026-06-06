@@ -61,6 +61,10 @@ def _similarity_ratio(left: str, right: str) -> float:
     return SequenceMatcher(None, left, right).ratio() * 100
 
 
+def _compact_normalized(value: str) -> str:
+    return re.sub(r"\s+", "", value)
+
+
 def _coerce_decimal(value: Any) -> Optional[Decimal]:
     if value is None:
         return None
@@ -134,6 +138,11 @@ def validate_answer(
         if user == accepted:
             return AnswerValidationResult(True, "exact", str(accepted_answer), 100)
 
+        if _compact_normalized(user) == _compact_normalized(accepted):
+            return AnswerValidationResult(
+                True, "exact_compact", str(accepted_answer), 100
+            )
+
         if not allow_fuzzy:
             continue
 
@@ -149,7 +158,7 @@ def validate_answer(
         distance = _levenshtein_distance(user, accepted)
         accepted_length = len(accepted)
         user_length = len(user)
-        is_short_answer = accepted_length <= 3 or user_length <= 3
+        is_short_answer = accepted_length <= 4 or user_length <= 4
         is_numeric_answer = accepted.isdigit() or user.isdigit()
 
         if is_short_answer or is_numeric_answer:

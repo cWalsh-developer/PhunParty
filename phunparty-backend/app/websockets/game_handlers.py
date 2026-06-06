@@ -644,10 +644,13 @@ class BuzzerGameHandler(GameEventHandler):
     ) -> Dict[str, Any]:
         """Build answer-mode data for the buzzer winner only."""
         question_data = question_data or {}
+        difficulty = str(question_data.get("difficulty") or "easy").lower()
         options = (
             question_data.get("display_options") or question_data.get("options") or []
         )
-        ui_mode = "multiple_choice" if options else "text_input"
+        uses_text_input = difficulty == "hard" or not options
+        display_options = [] if uses_text_input else options
+        ui_mode = "text_input" if uses_text_input else "multiple_choice"
 
         return {
             "ui_mode": ui_mode,
@@ -655,12 +658,12 @@ class BuzzerGameHandler(GameEventHandler):
             "question": question_data.get("question"),
             "genre": question_data.get("genre"),
             "difficulty": question_data.get("difficulty"),
-            "display_options": options,
-            "options": options,
+            "display_options": display_options,
+            "options": display_options,
             "message": (
-                "You buzzed first. Choose your answer."
-                if options
-                else "You buzzed first. Enter your answer."
+                "You buzzed first. Enter your answer."
+                if uses_text_input
+                else "You buzzed first. Choose your answer."
             ),
         }
 
@@ -703,10 +706,16 @@ class BuzzerGameHandler(GameEventHandler):
     ) -> bool:
         """Check if the answer is correct using the shared validation service."""
         try:
+            from app.logic.game_logic import question_allows_fuzzy_validation
+
             question = get_question_by_id(question_id, db)
             if not question:
                 return False
-            return validate_answer_against_question(answer, question).is_correct
+            return validate_answer_against_question(
+                answer,
+                question,
+                allow_fuzzy=question_allows_fuzzy_validation(question),
+            ).is_correct
         except Exception as e:
             logger.error(f"Error checking answer: {e}")
             return False
