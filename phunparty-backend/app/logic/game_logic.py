@@ -8,17 +8,23 @@ import logging
 import random
 from datetime import UTC, datetime
 
-from app.database.dbCRUD import (advance_to_next_question,
-                                 count_responses_for_question,
-                                 create_player_response,
-                                 get_game_session_state,
-                                 get_number_of_players_in_session,
-                                 get_player_response, get_question_by_id,
-                                 update_game_state_waiting_status,
-                                 update_scores)
+from app.database.dbCRUD import (
+    advance_to_next_question,
+    count_responses_for_question,
+    create_player_response,
+    get_game_session_state,
+    get_number_of_players_in_session,
+    get_player_response,
+    get_question_by_id,
+    update_game_state_waiting_status,
+    update_scores,
+)
 from app.database.fair_play_crud import (
-    count_fair_play_resolved_players_for_question, count_kicked_players,
-    is_player_frozen_for_question, is_player_kicked)
+    count_fair_play_resolved_players_for_question,
+    count_kicked_players,
+    is_player_frozen_for_question,
+    is_player_kicked,
+)
 from app.logic.answer_validation import validate_answer_against_question
 from sqlalchemy.orm import Session
 

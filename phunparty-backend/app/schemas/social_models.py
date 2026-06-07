@@ -2,8 +2,16 @@ import uuid
 from datetime import UTC, datetime
 
 from app.config import Base
-from sqlalchemy import (JSON, Boolean, CheckConstraint, Column, DateTime,
-                        ForeignKey, String, UniqueConstraint)
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    String,
+    UniqueConstraint,
+)
 
 
 def uuid_text() -> str:

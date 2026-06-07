@@ -5,11 +5,19 @@ from contextlib import asynccontextmanager
 from app.config import Base, engine
 from app.database.fair_play_migrations import ensure_fair_play_columns
 from app.database.social_migrations import ensure_social_player_columns
-from app.routes import (authentication, friends, game, game_logic,
-                        notifications, passwordReset, photos, players,
-                        questions, scores)
-from app.schemas.fair_play_models import (FairPlayViolation,
-                                          SessionPlayerFairPlay)
+from app.routes import (
+    authentication,
+    friends,
+    game,
+    game_logic,
+    notifications,
+    passwordReset,
+    photos,
+    players,
+    questions,
+    scores,
+)
+from app.schemas.fair_play_models import FairPlayViolation, SessionPlayerFairPlay
 from app.schemas.game_model import Game
 from app.schemas.game_session_model import GameSession
 from app.schemas.game_state_models import GameSessionState, PlayerResponse
@@ -19,10 +27,13 @@ from app.schemas.questions_model import Questions
 from app.schemas.scores_model import Scores
 from app.schemas.session_player_assignment_model import SessionAssignment
 from app.schemas.session_question_assignment import SessionQuestionAssignment
-from app.schemas.social_models import (FriendRequest, Friendship, Notification,
-                                       UserPushToken)
-from app.security.rate_limit import (enforce_rate_limit, get_client_ip,
-                                     rate_limiter)
+from app.schemas.social_models import (
+    FriendRequest,
+    Friendship,
+    Notification,
+    UserPushToken,
+)
+from app.security.rate_limit import enforce_rate_limit, get_client_ip, rate_limiter
 from app.websockets import routes as websocket_routes
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware

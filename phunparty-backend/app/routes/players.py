@@ -1,11 +1,16 @@
 from datetime import UTC, datetime
 from typing import List
 
-from app.database.dbCRUD import (create_player, delete_player, get_all_players,
-                                 get_all_sessions_from_player,
-                                 get_game_history_for_player,
-                                 get_player_by_email, get_player_by_ID,
-                                 update_player)
+from app.database.dbCRUD import (
+    create_player,
+    delete_player,
+    get_all_players,
+    get_all_sessions_from_player,
+    get_game_history_for_player,
+    get_player_by_email,
+    get_player_by_ID,
+    update_player,
+)
 from app.dependencies import get_current_player, get_db, require_admin_api_key
 from app.models.players import Player, PlayerUpdate
 from app.models.response_models import PlayerResponse

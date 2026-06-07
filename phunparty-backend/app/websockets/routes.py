@@ -9,18 +9,26 @@ from collections.abc import Generator
 from datetime import datetime, timedelta
 from typing import Optional
 
-from app.database.dbCRUD import (get_current_question_details,
-                                 get_game_session_state, get_player_by_ID,
-                                 get_session_by_code)
-from app.database.fair_play_crud import (get_eligible_player_ids_for_session,
-                                         get_fair_play_record,
-                                         has_focus_violation_for_question,
-                                         is_player_kicked,
-                                         record_focus_violation,
-                                         update_fair_play_settings)
-from app.dependencies import (get_current_player, get_db,
-                              get_player_from_token_value,
-                              require_admin_api_key)
+from app.database.dbCRUD import (
+    get_current_question_details,
+    get_game_session_state,
+    get_player_by_ID,
+    get_session_by_code,
+)
+from app.database.fair_play_crud import (
+    get_eligible_player_ids_for_session,
+    get_fair_play_record,
+    has_focus_violation_for_question,
+    is_player_kicked,
+    record_focus_violation,
+    update_fair_play_settings,
+)
+from app.dependencies import (
+    get_current_player,
+    get_db,
+    get_player_from_token_value,
+    require_admin_api_key,
+)
 from app.logic.game_logic import check_and_advance_game
 from app.security.loggingUtils import safe_player_ref
 from app.security.ownership import assert_session_owner
@@ -28,17 +36,26 @@ from app.security.rls import set_rls_current_player
 from app.security.roster_identity import make_roster_player_id
 from app.websockets.game_handlers import create_game_handler
 from app.websockets.game_lifecycle import handle_game_end
-from app.websockets.game_modes import (BUZZER_GAME_TYPE,
-                                       resolve_session_game_type)
+from app.websockets.game_modes import BUZZER_GAME_TYPE, resolve_session_game_type
 from app.websockets.manager import SessionPhase, manager
-from app.websockets.scheduler import (COUNTDOWN_DURATION_MS,
-                                      NEXT_QUESTION_REVEAL_DELAY_MS,
-                                      advance_or_end_current_question,
-                                      format_buzzer_question_for_mobile,
-                                      iso_utc, reveal_current_question,
-                                      start_countdown, utc_now)
-from fastapi import (APIRouter, Depends, HTTPException, Query, WebSocket,
-                     WebSocketDisconnect)
+from app.websockets.scheduler import (
+    COUNTDOWN_DURATION_MS,
+    NEXT_QUESTION_REVEAL_DELAY_MS,
+    advance_or_end_current_question,
+    format_buzzer_question_for_mobile,
+    iso_utc,
+    reveal_current_question,
+    start_countdown,
+    utc_now,
+)
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -2172,8 +2189,7 @@ async def handle_game_start(
             )
 
         # Update game state in database to mark as started
-        from app.logic.game_logic import (get_game_session_state,
-                                          updateGameStartStatus)
+        from app.logic.game_logic import get_game_session_state, updateGameStartStatus
 
         updateGameStartStatus(db, session_code, True)
 
@@ -2222,8 +2238,7 @@ async def handle_game_start(
         first_question_data = None
         if game_state and game_state.current_question_id:
             try:
-                from app.logic.game_logic import \
-                    get_question_with_randomized_options
+                from app.logic.game_logic import get_question_with_randomized_options
 
                 question_full = get_question_with_randomized_options(
                     db, game_state.current_question_id
@@ -2371,8 +2386,10 @@ async def handle_game_start(
         await asyncio.sleep(0.2)
 
         # Get player counts for accurate status
-        from app.database.dbCRUD import (count_responses_for_question,
-                                         get_number_of_players_in_session)
+        from app.database.dbCRUD import (
+            count_responses_for_question,
+            get_number_of_players_in_session,
+        )
 
         total_players = get_number_of_players_in_session(db, session_code)
         current_responses = 0

@@ -5,13 +5,15 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Optional
 
-from app.database.dbCRUD import (advance_to_next_question,
-                                 get_current_question_details,
-                                 get_game_session_state, get_session_by_code)
+from app.database.dbCRUD import (
+    advance_to_next_question,
+    get_current_question_details,
+    get_game_session_state,
+    get_session_by_code,
+)
 from app.dependencies import get_db
 from app.security.rls import set_rls_current_player
-from app.websockets.game_modes import (BUZZER_GAME_TYPE,
-                                       resolve_session_game_type)
+from app.websockets.game_modes import BUZZER_GAME_TYPE, resolve_session_game_type
 from app.websockets.manager import SessionPhase, manager
 from sqlalchemy.orm import Session
 
@@ -306,8 +308,9 @@ async def reveal_current_question(
         try:
             game_state = get_game_session_state(db, session_code)
             if game_state and getattr(game_state, "fair_play_enabled", False) is True:
-                from app.websockets.routes import \
-                    schedule_absent_player_fair_play_checks
+                from app.websockets.routes import (
+                    schedule_absent_player_fair_play_checks,
+                )
 
                 asyncio.create_task(
                     schedule_absent_player_fair_play_checks(

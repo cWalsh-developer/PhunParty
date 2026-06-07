@@ -23,12 +23,16 @@ from app.schemas.session_player_assignment_model import SessionAssignment
 from app.schemas.session_question_assignment import SessionQuestionAssignment
 from app.utils.friend_codes import generate_friend_code
 from app.utils.hash_password import hash_password
-from app.utils.id_generator import (generate_assignment_id, generate_game_code,
-                                    generate_player_id, generate_question_id,
-                                    generate_response_id, generate_score_id,
-                                    generate_session_code)
-from app.utils.phone_numbers import (normalize_phone_number,
-                                     phone_number_candidates)
+from app.utils.id_generator import (
+    generate_assignment_id,
+    generate_game_code,
+    generate_player_id,
+    generate_question_id,
+    generate_response_id,
+    generate_score_id,
+    generate_session_code,
+)
+from app.utils.phone_numbers import normalize_phone_number, phone_number_candidates
 
 
 def generate_unique_friend_code(db: Session) -> str:
@@ -397,8 +401,7 @@ def deactivate_player(db: Session, player_id: str) -> dict:
     if player.active_game_code:
         player.active_game_code = None
 
-    from app.database.friend_crud import \
-        revoke_pending_friend_requests_for_player
+    from app.database.friend_crud import revoke_pending_friend_requests_for_player
 
     revoked_friend_requests = revoke_pending_friend_requests_for_player(db, player_id)
 
@@ -472,8 +475,7 @@ def permanently_delete_player(db: Session, player_id: str) -> None:
     if player.active_game_code:
         player.active_game_code = None
 
-    from app.database.friend_crud import \
-        revoke_pending_friend_requests_for_player
+    from app.database.friend_crud import revoke_pending_friend_requests_for_player
 
     revoke_pending_friend_requests_for_player(db, player_id)
 
@@ -1236,8 +1238,7 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
 
         # Get full question details with randomized options using the same logic as broadcast_question_with_options
         if current_question:
-            from app.logic.game_logic import \
-                build_question_with_randomized_options
+            from app.logic.game_logic import build_question_with_randomized_options
 
             try:
                 question_details = build_question_with_randomized_options(

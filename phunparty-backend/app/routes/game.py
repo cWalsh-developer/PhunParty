@@ -3,20 +3,31 @@ from typing import List
 from app.database.dbCRUD import create_game as cg
 from app.database.dbCRUD import create_game_session, end_game_session
 from app.database.dbCRUD import get_all_games as gag
-from app.database.dbCRUD import (get_all_public_sessions, get_game_by_code,
-                                 get_game_history_for_player,
-                                 get_player_private_sessions,
-                                 get_session_by_code, get_session_details,
-                                 join_game)
+from app.database.dbCRUD import (
+    get_all_public_sessions,
+    get_game_by_code,
+    get_game_history_for_player,
+    get_player_private_sessions,
+    get_session_by_code,
+    get_session_details,
+    join_game,
+)
 from app.dependencies import get_current_player, get_db, require_admin_api_key
 from app.models.game import GameCreation, GameJoinRequest, GameSessionCreation
 from app.models.response_models import GameHistoryResponse, GameResponse
 from app.queue.join_queue_manager import join_queue_manager
-from app.queue.queue_models import (JoinQueueRequest, JoinQueueResponse,
-                                    QueueStatsResponse, QueueStatusResponse)
+from app.queue.queue_models import (
+    JoinQueueRequest,
+    JoinQueueResponse,
+    QueueStatsResponse,
+    QueueStatusResponse,
+)
 from app.schemas.players_model import Players
-from app.security.ownership import (assert_public_or_member_or_owner,
-                                    assert_same_player, assert_session_owner)
+from app.security.ownership import (
+    assert_public_or_member_or_owner,
+    assert_same_player,
+    assert_session_owner,
+)
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
 from app.websockets.manager import manager
 from fastapi import APIRouter, Depends, HTTPException, Request

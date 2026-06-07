@@ -4,6 +4,7 @@ Run this script daily via cron job.
 """
 
 import logging
+
 # Configure logging
 import os
 import sys

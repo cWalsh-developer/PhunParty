@@ -1,15 +1,19 @@
-from app.database.notification_crud import (list_notifications,
-                                            mark_all_notifications_read,
-                                            mark_notification_read,
-                                            register_push_token,
-                                            update_notification_settings)
+from app.database.notification_crud import (
+    list_notifications,
+    mark_all_notifications_read,
+    mark_notification_read,
+    register_push_token,
+    update_notification_settings,
+)
 from app.dependencies import get_current_player, get_db
-from app.models.notifications import (NotificationListResponse,
-                                      NotificationResponse,
-                                      NotificationSettingsResponse,
-                                      NotificationSettingsUpdate,
-                                      PushTokenRegistrationRequest,
-                                      PushTokenResponse)
+from app.models.notifications import (
+    NotificationListResponse,
+    NotificationResponse,
+    NotificationSettingsResponse,
+    NotificationSettingsUpdate,
+    PushTokenRegistrationRequest,
+    PushTokenResponse,
+)
 from app.schemas.players_model import Players
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session

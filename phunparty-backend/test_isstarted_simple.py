@@ -1,7 +1,6 @@
 import json
 
-from app.database.dbCRUD import (get_current_question_details,
-                                 get_game_session_state)
+from app.database.dbCRUD import get_current_question_details, get_game_session_state
 from app.dependencies import get_db
 from sqlalchemy import text
 
