@@ -28,7 +28,8 @@ class AnswerVerificationResponseModel(BaseModel):
 
 
 class ScoresResponseModel(BaseModel):
-    player_id: str
+    display_name: str
+    player_photo_url: Optional[str] = None
     score: int
     result: Optional[ResultType] = None
     session_code: str
@@ -54,8 +55,9 @@ class QuestionsAddedResponseModel(BaseModel):
 
 
 class SubmitAnswerRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     session_code: str
-    player_id: str
     question_id: str
     player_answer: str
 

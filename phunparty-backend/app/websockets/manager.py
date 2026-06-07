@@ -70,6 +70,7 @@ class ConnectionManager:
         # session_code -> terminal/final session snapshot kept after game end
         self.terminal_sessions: Dict[str, Dict[str, Any]] = {}
         self.pending_acks: Dict[str, Dict[str, Any]] = {}
+        self._missing_connection_warning_at: Dict[str, float] = {}
         # session_code:player_id values for players who explicitly left.
         self.intentional_leaves: Set[str] = set()
         # player leave tasks: "session_code:player_id" -> asyncio.Task
@@ -830,9 +831,19 @@ class ConnectionManager:
     ):
         """Broadcast message to all clients in a session with filtering options and reliability"""
         if session_code not in self.active_connections:
-            logger.warning(
-                f"Cannot broadcast to session {session_code} - no active connections"
+            message_type = message.get("type", "event")
+            warning_key = f"{session_code}:{message_type}"
+            now = time.time()
+            last_warning_at = self._missing_connection_warning_at.get(
+                warning_key, 0
             )
+            log = logger.warning if now - last_warning_at >= 30 else logger.debug
+            log(
+                "Cannot broadcast %s to session %s - no active connections",
+                message_type,
+                session_code,
+            )
+            self._missing_connection_warning_at[warning_key] = now
             return
 
         exclude_websockets = exclude_websockets or []

@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 def utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
+
 from app.schemas.game_model import Game
 from app.schemas.game_session_model import GameSession
 from app.schemas.game_state_models import GameSessionState, PlayerResponse
@@ -241,12 +242,10 @@ def end_game_session(db: Session, session_code: str) -> dict:
                 "game_state": "completed",
                 "final_results": [
                     {
-                        "player_id": result.player_id,
+                        "display_name": result.player_display_name or "Player",
+                        "player_photo_url": result.player_photo_url,
                         "score": result.score,
-                        "result": result.result,
-                        "player_name": get_player_by_ID(
-                            db, result.player_id
-                        ).player_name,
+                        "result": result.result.value if result.result else None,
                         "session_code": session_code,
                     }
                     for result in final_results
@@ -748,9 +747,20 @@ def update_scores(db: Session, session_code: str, player_id: str) -> Scores:
 def create_score(db: Session, session_code: str, player_id: str) -> Scores:
     """Create a new score entry for a player in a game session."""
     score_id = generate_score_id()
+
+    player = get_player_by_ID(db, player_id)
+
     new_score = Scores(
-        score_id=score_id, session_code=session_code, player_id=player_id, score=0
+        score_id=score_id,
+        session_code=session_code,
+        player_id=player_id,
+        score=0,
+        player_display_name=(
+            player.player_name if player and player.player_name else "Player"
+        ),
+        player_photo_url=(player.profile_photo_url if player else None),
     )
+
     db.add(new_score)
     db.commit()
     db.refresh(new_score)
@@ -1435,50 +1445,42 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
 
 def get_final_scores(db: Session, session_code: str) -> list[dict]:
     """
-    Get final scores for a game session, ranked by score (highest first).
-    Includes player details and their results (win/lose/draw).
-
-    Args:
-        db: Database session
-        session_code: The session code to get scores for
-
-    Returns:
-        list[dict]: List of score dictionaries with player info, sorted by score descending
+    Get final scores for a game session without exposing internal player IDs.
+    Uses display-name snapshots stored on the score row.
     """
     try:
-        # Join Scores with Players to get player details
-        scores_query = (
-            db.query(Scores, Players)
-            .join(Players, Scores.player_id == Players.player_id)
+        scores = (
+            db.query(Scores)
             .filter(Scores.session_code == session_code)
             .order_by(Scores.score.desc())
             .all()
         )
 
-        if not scores_query:
+        if not scores:
             logger.warning(f"No scores found for session {session_code}")
             return []
 
-        # Format the results
         final_scores = []
-        for score, player in scores_query:
+
+        for score in scores:
+            rank = len([s for s in scores if s.score > score.score]) + 1
+
             final_scores.append(
                 {
-                    "player_id": player.player_id,
-                    "player_name": player.player_name,
-                    "player_photo": getattr(player, "player_photo", None),
+                    "display_name": score.player_display_name or "Player",
+                    "player_photo_url": score.player_photo_url,
                     "score": score.score,
-                    "result": (
-                        score.result.value if score.result else None
-                    ),  # win/lose/draw
-                    "rank": len([s for s, _ in scores_query if s.score > score.score])
-                    + 1,
+                    "result": score.result.value if score.result else None,
+                    "rank": rank,
                 }
             )
 
         logger.info(
-            f"Retrieved {len(final_scores)} final scores for session {session_code}"
+            "Retrieved %s final scores for session %s",
+            len(final_scores),
+            session_code,
         )
+
         return final_scores
 
     except Exception as e:

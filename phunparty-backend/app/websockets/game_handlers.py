@@ -3,6 +3,7 @@ Game event handlers for different game types
 Handles the business logic for different game modes
 """
 
+from app.security.loggingUtils import safe_player_ref
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict
@@ -375,7 +376,7 @@ class BuzzerGameHandler(GameEventHandler):
             logger.info(
                 "Ignoring stale buzzer press session=%s player=%s incoming=%s current=%s",
                 self.session_code,
-                player_id,
+                safe_player_ref(player_id),
                 incoming_question_id,
                 current_question_id,
             )
