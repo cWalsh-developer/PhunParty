@@ -6,6 +6,10 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 from app.schemas.game_model import Game
 from app.schemas.game_session_model import GameSession
 from app.schemas.game_state_models import GameSessionState, PlayerResponse
@@ -18,6 +22,7 @@ from app.schemas.session_player_assignment_model import SessionAssignment
 from app.schemas.session_question_assignment import SessionQuestionAssignment
 from app.utils.hash_password import hash_password
 from app.utils.friend_codes import generate_friend_code
+from app.utils.phone_numbers import normalize_phone_number, phone_number_candidates
 from app.utils.id_generator import (
     generate_assignment_id,
     generate_game_code,
@@ -226,7 +231,7 @@ def end_game_session(db: Session, session_code: str) -> dict:
         if game_state:
             game_state.is_active = False
             game_state.is_waiting_for_players = False
-            game_state.ended_at = datetime.utcnow()
+            game_state.ended_at = utc_now()
 
         # Calculate and return final results
         try:
@@ -308,6 +313,34 @@ def get_player_by_email(db: Session, player_email: str) -> Players:
     )
 
 
+def get_player_by_phone_any_status(db: Session, phone: str) -> Players:
+    """Retrieve a non-deleted player by phone, including deactivated accounts."""
+    candidates = phone_number_candidates(phone)
+    if not candidates:
+        return None
+
+    return (
+        db.query(Players)
+        .filter(Players.player_mobile.in_(candidates))
+        .filter(Players.is_deleted == False)
+        .first()
+    )
+
+
+def ensure_phone_number_available(
+    db: Session, player_mobile: str | None, current_player_id: str | None = None
+) -> str | None:
+    normalized_mobile = normalize_phone_number(player_mobile)
+    if not normalized_mobile:
+        return None
+
+    existing_player = get_player_by_phone_any_status(db, normalized_mobile)
+    if existing_player and existing_player.player_id != current_player_id:
+        raise ValueError("Account with this phone number already exists")
+
+    return normalized_mobile
+
+
 def create_player(
     db: Session,
     player_name: str,
@@ -319,11 +352,12 @@ def create_player(
     """Create a new player and add them to a game."""
     player_id = generate_player_id()
     hashed_password = hash_password(hashed_password)
+    normalized_mobile = ensure_phone_number_available(db, player_mobile)
     new_player = Players(
         player_id=player_id,
         player_name=player_name,
         player_email=player_email,
-        player_mobile=player_mobile,
+        player_mobile=normalized_mobile,
         hashed_password=hashed_password,
         active_game_code=game_code,
         friend_code=generate_unique_friend_code(db),
@@ -368,6 +402,10 @@ def deactivate_player(db: Session, player_id: str) -> dict:
     if player.active_game_code:
         player.active_game_code = None
 
+    from app.database.friend_crud import revoke_pending_friend_requests_for_player
+
+    revoked_friend_requests = revoke_pending_friend_requests_for_player(db, player_id)
+
     db.commit()
     db.refresh(player)
 
@@ -383,6 +421,7 @@ def deactivate_player(db: Session, player_id: str) -> dict:
         "grace_period_days": 30,
         "permanent_deletion_date": expiration_dt.isoformat(),
         "reactivation_available": True,
+        "revoked_friend_requests": revoked_friend_requests,
     }
 
 
@@ -436,6 +475,10 @@ def permanently_delete_player(db: Session, player_id: str) -> None:
     # Clear active game code if they're in a game
     if player.active_game_code:
         player.active_game_code = None
+
+    from app.database.friend_crud import revoke_pending_friend_requests_for_player
+
+    revoke_pending_friend_requests_for_player(db, player_id)
 
     # DELETE all PII - GDPR compliant
     player.player_name = "Deleted User"  # Generic, non-identifying
@@ -504,9 +547,14 @@ def update_player(db: Session, player_id: str, player: Player) -> Players:
     if new_player.active_game_code is not None:
         raise ValueError("Cannot update player name while they are in a game")
     else:
-        new_player.player_name = player.player_name
-        new_player.player_email = player.player_email
-        new_player.player_mobile = player.player_mobile
+        if player.player_name is not None:
+            new_player.player_name = player.player_name
+        if player.player_email is not None:
+            new_player.player_email = player.player_email
+        if player.player_mobile is not None:
+            new_player.player_mobile = ensure_phone_number_available(
+                db, player.player_mobile, current_player_id=player_id
+            )
         if (
             hasattr(player, "profile_photo_url")
             and player.profile_photo_url is not None
@@ -1275,7 +1323,17 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
 
 def get_player_by_phone(db: Session, phone: str) -> Players:
     """Retrieve a player by their phone number."""
-    return db.query(Players).filter(Players.player_mobile == phone).first()
+    candidates = phone_number_candidates(phone)
+    if not candidates:
+        return None
+
+    return (
+        db.query(Players)
+        .filter(Players.player_mobile.in_(candidates))
+        .filter(Players.is_deleted == False)
+        .filter(Players.is_deactivated == False)
+        .first()
+    )
 
 
 ## Password Reset CRUD operations --------------------------------------------------------------------------------------------------------------
@@ -1317,7 +1375,7 @@ def verify_and_reset_password(
     db: Session, phone: str, otp: str, new_password: str
 ) -> bool:
     if verify_otp(db, phone, otp):
-        player = db.query(Players).filter(Players.player_mobile == phone).first()
+        player = get_player_by_phone(db, phone)
         if player:
             player.hashed_password = hash_password(new_password)
             db.commit()
@@ -1326,7 +1384,7 @@ def verify_and_reset_password(
 
 
 def update_password(db: Session, phone: str, new_password: str) -> bool:
-    player = db.query(Players).filter(Players.player_mobile == phone).first()
+    player = get_player_by_phone(db, phone)
     if player:
         player.hashed_password = hash_password(new_password)
         db.commit()
@@ -1355,7 +1413,7 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
 
         # Update game state to mark as ended
         game_state.is_active = False
-        game_state.ended_at = datetime.utcnow()
+        game_state.ended_at = utc_now()
 
         # Calculate game results (win/lose/draw) for all players
         try:

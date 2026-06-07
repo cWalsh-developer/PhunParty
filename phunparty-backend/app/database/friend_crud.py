@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Optional
 
 from sqlalchemy import and_, or_
@@ -14,6 +14,11 @@ from app.utils.friend_codes import normalize_friend_code
 PENDING = "pending"
 ACCEPTED = "accepted"
 REJECTED = "rejected"
+REVOKED = "revoked"
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def ensure_player_friend_code(db: Session, player: Players) -> Players:
@@ -154,7 +159,7 @@ def accept_friend_request(
         raise ValueError("Pending friend request not found")
 
     friend_request.status = ACCEPTED
-    friend_request.responded_at = datetime.utcnow()
+    friend_request.responded_at = utc_now()
 
     player_low_id, player_high_id = canonical_friendship_pair(
         friend_request.sender_player_id, friend_request.receiver_player_id
@@ -201,10 +206,31 @@ def reject_friend_request(
         raise ValueError("Pending friend request not found")
 
     friend_request.status = REJECTED
-    friend_request.responded_at = datetime.utcnow()
+    friend_request.responded_at = utc_now()
     db.commit()
     db.refresh(friend_request)
     return friend_request
+
+
+def revoke_pending_friend_requests_for_player(db: Session, player_id: str) -> int:
+    requests = (
+        db.query(FriendRequest)
+        .filter(FriendRequest.status == PENDING)
+        .filter(
+            or_(
+                FriendRequest.sender_player_id == player_id,
+                FriendRequest.receiver_player_id == player_id,
+            )
+        )
+        .all()
+    )
+
+    now = utc_now()
+    for friend_request in requests:
+        friend_request.status = REVOKED
+        friend_request.responded_at = now
+
+    return len(requests)
 
 
 def list_incoming_requests(db: Session, player_id: str) -> list[FriendRequest]:

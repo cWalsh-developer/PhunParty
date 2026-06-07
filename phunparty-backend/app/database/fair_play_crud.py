@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -10,6 +10,10 @@ from app.schemas.scores_model import Scores
 from app.schemas.session_player_assignment_model import SessionAssignment
 
 DEFAULT_MAX_FAIR_PLAY_STRIKES = 3
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def update_fair_play_settings(
@@ -131,7 +135,7 @@ def record_focus_violation(
     )
 
     record.strike_count += 1
-    record.updated_at = datetime.utcnow()
+    record.updated_at = utc_now()
     if record.strike_count >= max_strikes:
         record.is_kicked = True
 

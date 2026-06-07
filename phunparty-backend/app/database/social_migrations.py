@@ -54,4 +54,29 @@ def ensure_social_player_columns() -> None:
             text("ALTER TABLE players ALTER COLUMN friend_code SET NOT NULL")
         )
 
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS ix_players_active_mobile_unique
+                    ON players ((
+                        CASE
+                            WHEN player_mobile LIKE '0%'
+                            THEN '+44' || substring(player_mobile from 2)
+                            ELSE player_mobile
+                        END
+                    ))
+                    WHERE player_mobile IS NOT NULL
+                    AND is_deleted = FALSE
+                    """
+                )
+            )
+    except Exception as exc:
+        logger.warning(
+            "Could not create unique active phone index. Resolve duplicate active "
+            "player_mobile values, then rerun startup migration: %s",
+            exc,
+        )
+
     logger.info("Social player columns are ready")

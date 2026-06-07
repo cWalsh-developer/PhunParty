@@ -1,6 +1,6 @@
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Dict, Optional, Set
 from dataclasses import dataclass
 from enum import Enum
@@ -10,6 +10,10 @@ from app.database.dbCRUD import join_game
 from app.websockets.manager import manager as websocket_manager
 
 logger = logging.getLogger(__name__)
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class QueueStatus(Enum):
@@ -340,7 +344,7 @@ class JoinQueueManager:
         """Clean up expired queue entries"""
         while self._running:
             try:
-                current_time = datetime.utcnow()
+                current_time = utc_now()
                 expired_entries = []
 
                 for queue_id, entry in self.queue.items():

@@ -490,7 +490,7 @@ async def broadcast_question_with_options(
         # CRITICAL: Queue the question data so mobile clients can retrieve it
         # This ensures questions are never lost even if WebSocket messages are missed
         mobile_question_data = player_message["data"]
-        start_at = datetime.utcnow().isoformat() + "Z"
+        start_at = datetime.now(UTC).replace(tzinfo=None).isoformat() + "Z"
         phase_state = manager.set_session_phase(
             session_code,
             SessionPhase.QUESTION,

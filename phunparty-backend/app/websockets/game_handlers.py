@@ -22,6 +22,7 @@ from app.websockets.scheduler import (
     advance_or_end_current_question,
     iso_utc,
     reveal_current_question,
+    utc_now,
 )
 from app.database.fair_play_crud import (
     is_player_frozen_for_question,
@@ -53,7 +54,7 @@ class GameEventHandler:
         """Broadcast question to all clients with different formats"""
         # Reset all players' answered status for the new question
         manager.reset_all_players_answered(self.session_code)
-        start_at = datetime.utcnow().isoformat() + "Z"
+        start_at = iso_utc(utc_now())
         phase_state = manager.set_session_phase(
             self.session_code,
             SessionPhase.QUESTION,
@@ -201,7 +202,7 @@ class TriviaGameHandler(GameEventHandler):
                 game_state = get_game_session_state(db, self.session_code)
                 if game_state and game_state.current_question_id:
                     manager.clear_question_queue(self.session_code)
-                    question_start_at = datetime.utcnow() + timedelta(
+                    question_start_at = utc_now() + timedelta(
                         milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
                     )
                     await reveal_current_question(
@@ -679,7 +680,7 @@ class BuzzerGameHandler(GameEventHandler):
             return False
 
         manager.clear_question_queue(self.session_code)
-        question_start_at = datetime.utcnow() + timedelta(
+        question_start_at = utc_now() + timedelta(
             milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
         )
         return await reveal_current_question(

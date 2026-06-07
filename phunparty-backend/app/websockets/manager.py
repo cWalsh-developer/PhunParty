@@ -6,7 +6,8 @@ Handles real-time communication between web UI and mobile app
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+import time
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Union
 
@@ -168,10 +169,13 @@ class ConnectionManager:
         return f"ws_{id(websocket)}_{datetime.now().timestamp()}"
 
     def _utc_now_ms(self) -> int:
-        return int(datetime.utcnow().timestamp() * 1000)
+        return int(time.time() * 1000)
+
+    def _utc_now(self) -> datetime:
+        return datetime.now(UTC).replace(tzinfo=None)
 
     def _utc_now_iso(self) -> str:
-        return datetime.utcnow().isoformat() + "Z"
+        return self._utc_now().isoformat() + "Z"
 
     def make_event_id(
         self, session_code: str, event_type: str, data: Optional[Dict[str, Any]] = None
@@ -405,7 +409,7 @@ class ConnectionManager:
         player_id: Optional[str] = None,
         player_name: Optional[str] = None,
         player_photo: Optional[str] = None,
-    ):
+    ) -> bool:
         """Connect a client to a game session"""
         await websocket.accept()
 
@@ -491,7 +495,7 @@ class ConnectionManager:
             logger.error(f"Failed to send connection confirmation: {e}")
             # Clean up partially registered connection to avoid ghost players.
             self.disconnect(websocket)
-            return
+            return False
 
         # If this is a reconnect, cancel pending delayed leave for this player.
         if client_type == "mobile" and player_id:
@@ -551,6 +555,8 @@ class ConnectionManager:
             logger.info(
                 f"✅ Mobile join flow completed for {player_name} in session {session_code}"
             )
+
+        return True
 
     def disconnect(self, websocket: WebSocket):
         """Disconnect a client"""
@@ -642,13 +648,13 @@ class ConnectionManager:
         ttl_seconds: int = 900,
     ) -> Dict[str, Any]:
         """Keep final session/Fair Play state briefly after the live session ends."""
-        expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds)
+        expires_at = self._utc_now() + timedelta(seconds=ttl_seconds)
 
         terminal_snapshot = {
             **snapshot,
             "session_code": session_code,
             "terminal": True,
-            "cached_at": datetime.utcnow().isoformat() + "Z",
+            "cached_at": self._utc_now_iso(),
             "expires_at": expires_at.isoformat() + "Z",
         }
 
@@ -677,7 +683,7 @@ class ConnectionManager:
             self.terminal_sessions.pop(session_code, None)
             return None
 
-        if datetime.utcnow() > expires_at:
+        if self._utc_now() > expires_at:
             self.terminal_sessions.pop(session_code, None)
             return None
 
@@ -1562,7 +1568,7 @@ class ConnectionManager:
 
                     ping_message = {
                         "type": "ping",
-                        "serverTime": int(datetime.utcnow().timestamp() * 1000),
+                        "serverTime": self._utc_now_ms(),
                         "auto": True,  # Mark as automatic server ping
                     }
 

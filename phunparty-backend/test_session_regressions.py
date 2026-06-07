@@ -2,7 +2,7 @@ import asyncio
 import os
 import sys
 import types
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -396,7 +396,7 @@ def test_build_sync_state_recovers_active_game_to_question_not_intro():
         isstarted=True,
         total_questions=5,
         ispublic=True,
-        started_at=datetime.utcnow() - timedelta(seconds=60),
+        started_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=60),
         ended_at=None,
     )
 
@@ -1354,10 +1354,6 @@ def test_fair_play_return_uses_client_returned_at_for_reconnect_delay():
         def now(tz=None):
             now = datetime.fromisoformat("2026-06-01T12:00:03+00:00")
             return now if tz else now.replace(tzinfo=None)
-
-        @staticmethod
-        def utcnow():
-            return datetime.fromisoformat("2026-06-01T12:00:03")
 
     with patch.object(routes, "datetime", FakeDateTime):
         with patch.object(routes, "manager") as mock_manager:
