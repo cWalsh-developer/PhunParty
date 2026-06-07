@@ -120,7 +120,9 @@ def validate_uploaded_image(filename: str, content: bytes) -> str:
         image = Image.open(BytesIO(content))
         image.verify()
     except Exception:
-        raise HTTPException(status_code=400, detail="Uploaded file is not a valid image")
+        raise HTTPException(
+            status_code=400, detail="Uploaded file is not a valid image"
+        )
 
     image = Image.open(BytesIO(content))
     if image.format not in ALLOWED_IMAGE_FORMATS:

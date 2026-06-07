@@ -62,7 +62,9 @@ def request_response(
         created_at=friend_request.created_at,
         responded_at=friend_request.responded_at,
         sender=profile_response(db, current_player_id, sender) if sender else None,
-        receiver=profile_response(db, current_player_id, receiver) if receiver else None,
+        receiver=(
+            profile_response(db, current_player_id, receiver) if receiver else None
+        ),
     )
 
 

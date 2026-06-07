@@ -22,6 +22,4 @@ class Players(Base):
     friend_code = Column(String, unique=True, index=True, nullable=False)
     allow_friend_code_search = Column(Boolean, default=True, nullable=False)
     allow_phone_discovery = Column(Boolean, default=False, nullable=False)
-    friend_request_notifications_enabled = Column(
-        Boolean, default=True, nullable=False
-    )
+    friend_request_notifications_enabled = Column(Boolean, default=True, nullable=False)

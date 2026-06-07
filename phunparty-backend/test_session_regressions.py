@@ -109,7 +109,9 @@ def test_get_session_details_uses_ispublic_field():
 
     with patch.object(dbCRUD, "get_session_by_code", return_value=session):
         with patch.object(dbCRUD, "get_game_by_code", return_value=game):
-            with patch.object(dbCRUD, "get_game_session_state", return_value=game_state):
+            with patch.object(
+                dbCRUD, "get_game_session_state", return_value=game_state
+            ):
                 result = dbCRUD.get_session_details(MagicMock(), "SESSION123")
 
     assert result["is_public"] is False
@@ -186,9 +188,7 @@ def test_answer_validation_accepts_compact_formula_spacing():
 
 def test_answer_validation_exact_mode_rejects_close_multiple_choice_answer():
     result = answer_validation.validate_answer("5", ["7"], allow_fuzzy=False)
-    decimal_result = answer_validation.validate_answer(
-        "7.0", ["7"], allow_fuzzy=False
-    )
+    decimal_result = answer_validation.validate_answer("7.0", ["7"], allow_fuzzy=False)
 
     assert result.is_correct is False
     assert result.method == "no_match"
@@ -324,7 +324,9 @@ def test_check_and_advance_game_counts_fair_play_resolved_players():
 
     with patch.object(game_logic, "get_number_of_players_in_session", return_value=2):
         with patch.object(game_logic, "count_kicked_players", return_value=0):
-            with patch.object(game_logic, "count_responses_for_question", return_value=1):
+            with patch.object(
+                game_logic, "count_responses_for_question", return_value=1
+            ):
                 with patch.object(
                     game_logic,
                     "count_fair_play_resolved_players_for_question",
@@ -333,7 +335,9 @@ def test_check_and_advance_game_counts_fair_play_resolved_players():
                     with patch.object(
                         game_logic, "get_game_session_state", return_value=game_state
                     ):
-                        with patch.object(game_logic, "update_game_state_waiting_status"):
+                        with patch.object(
+                            game_logic, "update_game_state_waiting_status"
+                        ):
                             with patch.object(
                                 game_logic,
                                 "advance_to_next_question",
@@ -360,7 +364,9 @@ def test_check_and_advance_game_ignores_kicked_players_denominator():
 
     with patch.object(game_logic, "get_number_of_players_in_session", return_value=3):
         with patch.object(game_logic, "count_kicked_players", return_value=1):
-            with patch.object(game_logic, "count_responses_for_question", return_value=2):
+            with patch.object(
+                game_logic, "count_responses_for_question", return_value=2
+            ):
                 with patch.object(
                     game_logic,
                     "count_fair_play_resolved_players_for_question",
@@ -369,7 +375,9 @@ def test_check_and_advance_game_ignores_kicked_players_denominator():
                     with patch.object(
                         game_logic, "get_game_session_state", return_value=game_state
                     ):
-                        with patch.object(game_logic, "update_game_state_waiting_status"):
+                        with patch.object(
+                            game_logic, "update_game_state_waiting_status"
+                        ):
                             with patch.object(
                                 game_logic,
                                 "advance_to_next_question",
@@ -592,9 +600,7 @@ def test_game_lifecycle_broadcasts_final_scores_for_already_ended_session():
     mock_db = MagicMock()
     mock_db.query.return_value.filter.return_value.first.return_value = game_state
 
-    with patch.object(
-        game_lifecycle, "update_game_session_ended", return_value=False
-    ):
+    with patch.object(game_lifecycle, "update_game_session_ended", return_value=False):
         with patch.object(
             game_lifecycle, "get_final_scores", return_value=final_scores
         ):
@@ -669,7 +675,9 @@ def test_buzzer_state_update_broadcast_uses_authoritative_state():
     state["current_buzzer_winner"] = "P1"
     state["frozen_players"].add("P2")
 
-    with patch.object(manager, "broadcast_to_session", new_callable=AsyncMock) as broadcast:
+    with patch.object(
+        manager, "broadcast_to_session", new_callable=AsyncMock
+    ) as broadcast:
         try:
             asyncio.run(manager.broadcast_buzzer_state_update(session_code))
         finally:
@@ -1183,9 +1191,7 @@ def test_focus_violation_records_strike_and_freezes_player():
     mock_manager.freeze_player_for_question.assert_called_once_with(
         "SESSION123", "P1", "Q1"
     )
-    mock_manager.set_player_answered.assert_called_once_with(
-        "SESSION123", "P1", True
-    )
+    mock_manager.set_player_answered.assert_called_once_with("SESSION123", "P1", True)
     mock_manager.update_fair_play_status.assert_called_once_with(
         "SESSION123",
         "P1",
@@ -1208,9 +1214,9 @@ def test_focus_violation_records_strike_and_freezes_player():
         "player_answered",
         "game_status_update",
     ]
-    player_answered_payload = (
-        mock_manager.broadcast_to_session.await_args_list[2].args[1]["data"]
-    )
+    player_answered_payload = mock_manager.broadcast_to_session.await_args_list[2].args[
+        1
+    ]["data"]
     assert player_answered_payload["answer_status"] == "frozen"
     assert player_answered_payload["answered_current"] is True
     mock_manager.send_personal_critical_message.assert_awaited_once_with(
@@ -1362,7 +1368,9 @@ def test_fair_play_return_uses_client_returned_at_for_reconnect_delay():
             mock_manager.broadcast_player_roster_update = AsyncMock()
             mock_manager.send_personal_message = AsyncMock()
             with patch.object(
-                routes, "resync_buzzer_ui_after_fair_play_return", new_callable=AsyncMock
+                routes,
+                "resync_buzzer_ui_after_fair_play_return",
+                new_callable=AsyncMock,
             ):
                 with patch.object(
                     routes, "handle_focus_violation", new_callable=AsyncMock
@@ -1425,7 +1433,9 @@ def test_fair_play_window_violation_defaults_to_multi_window_reason():
     websocket = MagicMock()
     game_handler = MagicMock()
 
-    with patch.object(routes, "handle_fair_play_focus_lost", new_callable=AsyncMock) as focus_lost:
+    with patch.object(
+        routes, "handle_fair_play_focus_lost", new_callable=AsyncMock
+    ) as focus_lost:
         asyncio.run(
             routes.handle_websocket_message(
                 {
@@ -1453,7 +1463,9 @@ def test_kick_player_for_fair_play_sends_status_before_closing_socket():
     websocket.close = AsyncMock()
     db = MagicMock()
 
-    with patch.object(routes, "get_player_by_ID", return_value=SimpleNamespace(player_name="Alice")):
+    with patch.object(
+        routes, "get_player_by_ID", return_value=SimpleNamespace(player_name="Alice")
+    ):
         with patch.object(routes, "manager") as mock_manager:
             mock_manager.get_player_connections.return_value = {
                 "ws1": {"websocket": websocket}
@@ -1549,8 +1561,12 @@ def test_buzzer_ui_update_sends_answer_data_only_to_winner():
         call.args[0]["data"]
         for call in mock_manager.send_personal_message.await_args_list
     ]
-    winner_message = next(data for data in sent_messages if data["button_state"] == "answer_mode")
-    waiting_message = next(data for data in sent_messages if data["button_state"] == "waiting")
+    winner_message = next(
+        data for data in sent_messages if data["button_state"] == "answer_mode"
+    )
+    waiting_message = next(
+        data for data in sent_messages if data["button_state"] == "waiting"
+    )
 
     assert winner_message["is_current_player"] is True
     assert winner_message["ui_mode"] == "multiple_choice"

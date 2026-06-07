@@ -53,9 +53,7 @@ def canonical_friendship_pair(player_a_id: str, player_b_id: str) -> tuple[str, 
 def get_friendship(
     db: Session, player_a_id: str, player_b_id: str
 ) -> Optional[Friendship]:
-    player_low_id, player_high_id = canonical_friendship_pair(
-        player_a_id, player_b_id
-    )
+    player_low_id, player_high_id = canonical_friendship_pair(player_a_id, player_b_id)
     return (
         db.query(Friendship)
         .filter(Friendship.player_low_id == player_low_id)
@@ -98,7 +96,9 @@ def get_relationship_status(
     if are_friends(db, current_player_id, other_player_id):
         return "friends"
 
-    pending_request = get_pending_request_between(db, current_player_id, other_player_id)
+    pending_request = get_pending_request_between(
+        db, current_player_id, other_player_id
+    )
     if not pending_request:
         return "none"
     if pending_request.sender_player_id == current_player_id:
@@ -266,9 +266,11 @@ def list_friends(db: Session, player_id: str) -> list[Players]:
         .all()
     )
     friend_ids = [
-        friendship.player_high_id
-        if friendship.player_low_id == player_id
-        else friendship.player_low_id
+        (
+            friendship.player_high_id
+            if friendship.player_low_id == player_id
+            else friendship.player_low_id
+        )
         for friendship in friendships
     ]
     if not friend_ids:

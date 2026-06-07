@@ -28,9 +28,7 @@ def assert_same_player(current_player: Players, requested_player_id: str) -> Non
 
 def get_session_or_404(db: Session, session_code: str) -> GameSession:
     session = (
-        db.query(GameSession)
-        .filter(GameSession.session_code == session_code)
-        .first()
+        db.query(GameSession).filter(GameSession.session_code == session_code).first()
     )
     if not session:
         raise not_found("Session")

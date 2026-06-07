@@ -411,7 +411,9 @@ async def scheduled_question_reveal(
             acting_player_id=acting_player_id,
         )
     except Exception:
-        logger.exception("Scheduled question reveal failed for session %s", session_code)
+        logger.exception(
+            "Scheduled question reveal failed for session %s", session_code
+        )
     finally:
         db_generator.close()
 
@@ -424,11 +426,7 @@ async def scheduled_countdown_watchdog(
     """Reveal the question if the countdown scheduler left the session behind."""
     sleep_seconds = max(
         0,
-        (
-            question_start_at
-            + timedelta(milliseconds=750)
-            - utc_now()
-        ).total_seconds(),
+        (question_start_at + timedelta(milliseconds=750) - utc_now()).total_seconds(),
     )
     await asyncio.sleep(sleep_seconds)
 

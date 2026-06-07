@@ -159,9 +159,7 @@ def build_player_fair_play_status(
 
                 return {
                     "player_id": player_id,
-                    "roster_player_id": make_roster_player_id(
-                        session_code, player_id
-                    ),
+                    "roster_player_id": make_roster_player_id(session_code, player_id),
                     "session_code": session_code,
                     "phase": terminal_session.get("phase", "ended"),
                     "ended_at": terminal_session.get("ended_at"),
@@ -687,9 +685,7 @@ async def send_initial_session_state(
             fair_play_status = {
                 **manager.get_fair_play_status(session_code, player_id),
                 "player_id": player_id,
-                "roster_player_id": make_roster_player_id(
-                    session_code, player_id
-                ),
+                "roster_player_id": make_roster_player_id(session_code, player_id),
             }
             initial_state["data"]["player_fair_play_status"] = fair_play_status
             initial_state["data"]["authoritative_state"][
@@ -871,9 +867,7 @@ async def handle_websocket_message(
                 "type": "player_left",
                 "data": {
                     "player_id": player_id,
-                    "roster_player_id": make_roster_player_id(
-                        session_code, player_id
-                    ),
+                    "roster_player_id": make_roster_player_id(session_code, player_id),
                     "player_name": player_name,
                     "reason": "left_game",
                     "timestamp": datetime.now().isoformat(),
@@ -1978,9 +1972,7 @@ async def kick_player_for_fair_play(
                 "type": "fair_play_status_update",
                 "data": {
                     "player_id": player_id,
-                    "roster_player_id": make_roster_player_id(
-                        session_code, player_id
-                    ),
+                    "roster_player_id": make_roster_player_id(session_code, player_id),
                     "player_name": player_name,
                     "strike_count": max_strikes,
                     "max_strikes": max_strikes,
@@ -1999,9 +1991,7 @@ async def kick_player_for_fair_play(
                 "type": "kicked_from_session",
                 "data": {
                     "player_id": player_id,
-                    "roster_player_id": make_roster_player_id(
-                        session_code, player_id
-                    ),
+                    "roster_player_id": make_roster_player_id(session_code, player_id),
                     "player_name": player_name,
                     "reason": "fair_play_strikes",
                     "strike_count": max_strikes,

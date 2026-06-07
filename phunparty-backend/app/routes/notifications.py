@@ -64,9 +64,7 @@ def read_notification(
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
-    notification = mark_notification_read(
-        db, current_player.player_id, notification_id
-    )
+    notification = mark_notification_read(db, current_player.player_id, notification_id)
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
     return notification

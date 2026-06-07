@@ -363,13 +363,13 @@ def build_question_with_randomized_options(question) -> dict:
                     "question": question.question,
                     "answer": question.answer,
                     "genre": question.genre,
-                        "difficulty": (
-                            question.difficulty.value if question.difficulty else "easy"
-                        ),
-                        "question_options": [],
-                        "display_options": [],
-                        "correct_index": None,
-                    }
+                    "difficulty": (
+                        question.difficulty.value if question.difficulty else "easy"
+                    ),
+                    "question_options": [],
+                    "display_options": [],
+                    "correct_index": None,
+                }
 
         # Combine incorrect options with correct answer
         all_options = incorrect_options + [question.answer]

@@ -532,9 +532,7 @@ class ConnectionManager:
                     "session_code": session_code,
                     "client_type": client_type,
                     "player_id": player_id,
-                    "roster_player_id": make_roster_player_id(
-                        session_code, player_id
-                    ),
+                    "roster_player_id": make_roster_player_id(session_code, player_id),
                     "player_name": player_name,
                     "timestamp": datetime.now().isoformat(),
                     "requires_ack": True,
@@ -820,9 +818,7 @@ class ConnectionManager:
                     {**message, "timestamp": datetime.now().timestamp()},
                     connection_info,
                 )
-                await websocket.send_text(
-                    json.dumps(outbound_message)
-                )
+                await websocket.send_text(json.dumps(outbound_message))
                 return True
             except WebSocketDisconnect:
                 logger.warning(
@@ -1801,11 +1797,11 @@ class ConnectionManager:
         return {
             "question_id": state.get("current_question_id"),
             "current_buzzer_winner": current_winner,
-            "current_buzzer_winner_roster_id": make_roster_player_id(
-                session_code, current_winner
-            )
-            if current_winner
-            else None,
+            "current_buzzer_winner_roster_id": (
+                make_roster_player_id(session_code, current_winner)
+                if current_winner
+                else None
+            ),
             "frozen_players": frozen_players,
             "frozen_roster_player_ids": [
                 make_roster_player_id(session_code, player_id)

@@ -142,6 +142,7 @@ async def security_headers(request: Request, call_next):
 
     return response
 
+
 app.include_router(
     game.router,
     prefix="/game",
@@ -246,6 +247,7 @@ app.include_router(
 
 # Mount static files for serving photos
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
 
 @app.get("/")
 def read_root():

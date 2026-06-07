@@ -14,9 +14,10 @@ END
 
 def main() -> None:
     with SessionLocal() as db:
-        duplicate_groups = db.execute(
-            text(
-                f"""
+        duplicate_groups = (
+            db.execute(
+                text(
+                    f"""
                 SELECT {NORMALIZED_MOBILE_SQL} AS normalized_mobile,
                        COUNT(*) AS account_count
                 FROM players
@@ -26,8 +27,11 @@ def main() -> None:
                 HAVING COUNT(*) > 1
                 ORDER BY account_count DESC, normalized_mobile
                 """
+                )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
 
         if not duplicate_groups:
             print("No duplicate non-deleted player_mobile values found.")
@@ -38,9 +42,10 @@ def main() -> None:
             normalized_mobile = group["normalized_mobile"]
             print(f"\n{normalized_mobile} ({group['account_count']} accounts)")
 
-            rows = db.execute(
-                text(
-                    f"""
+            rows = (
+                db.execute(
+                    text(
+                        f"""
                     SELECT player_id,
                            player_name,
                            player_email,
@@ -55,9 +60,12 @@ def main() -> None:
                     AND {NORMALIZED_MOBILE_SQL} = :normalized_mobile
                     ORDER BY is_deactivated ASC, player_email NULLS LAST, player_id
                     """
-                ),
-                {"normalized_mobile": normalized_mobile},
-            ).mappings().all()
+                    ),
+                    {"normalized_mobile": normalized_mobile},
+                )
+                .mappings()
+                .all()
+            )
 
             for row in rows:
                 print(

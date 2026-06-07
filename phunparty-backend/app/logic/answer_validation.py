@@ -151,9 +151,7 @@ def validate_answer(
             and accepted_decimal is not None
             and user_decimal == accepted_decimal
         ):
-            return AnswerValidationResult(
-                True, "numeric", str(accepted_answer), 100
-            )
+            return AnswerValidationResult(True, "numeric", str(accepted_answer), 100)
 
         distance = _levenshtein_distance(user, accepted)
         accepted_length = len(accepted)
