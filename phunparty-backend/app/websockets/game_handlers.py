@@ -16,6 +16,7 @@ from app.database.dbCRUD import (
     get_question_by_id,
 )
 from app.logic.answer_validation import validate_answer_against_question
+from app.security.roster_identity import make_roster_player_id
 from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.manager import SessionPhase, manager
 from app.websockets.scheduler import (
@@ -164,6 +165,9 @@ class TriviaGameHandler(GameEventHandler):
                     "type": "player_answered",
                     "data": {
                         "player_id": player_id,
+                        "roster_player_id": make_roster_player_id(
+                            self.session_code, player_id
+                        ),
                         "player_name": player_name,
                         "answered_at": datetime.now().isoformat(),
                         "is_correct": result.get("is_correct", False),
@@ -430,6 +434,9 @@ class BuzzerGameHandler(GameEventHandler):
                 "type": "buzzer_winner",
                 "data": {
                     "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(
+                        self.session_code, player_id
+                    ),
                     "player_name": player_name,
                     "timestamp": datetime.now().isoformat(),
                 },
@@ -473,6 +480,9 @@ class BuzzerGameHandler(GameEventHandler):
                     "type": "correct_answer",
                     "data": {
                         "player_id": player_id,
+                        "roster_player_id": make_roster_player_id(
+                            self.session_code, player_id
+                        ),
                         "player_name": player_name,
                         "answer": answer,
                         "correct": True,
@@ -522,10 +532,17 @@ class BuzzerGameHandler(GameEventHandler):
                     "type": "incorrect_answer",
                     "data": {
                         "player_id": player_id,
+                        "roster_player_id": make_roster_player_id(
+                            self.session_code, player_id
+                        ),
                         "player_name": player_name,
                         "answer": answer,
                         "correct": False,
                         "frozen_players": list(state["frozen_players"]),
+                        "frozen_roster_player_ids": [
+                            make_roster_player_id(self.session_code, frozen_id)
+                            for frozen_id in state["frozen_players"]
+                        ],
                     },
                 },
             )

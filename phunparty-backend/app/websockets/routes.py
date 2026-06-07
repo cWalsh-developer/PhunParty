@@ -39,6 +39,7 @@ from app.dependencies import get_current_player
 from app.logic.game_logic import check_and_advance_game
 from app.security.ownership import assert_session_owner
 from app.security.rls import set_rls_current_player
+from app.security.roster_identity import make_roster_player_id
 from app.websockets.game_handlers import create_game_handler
 from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.game_modes import BUZZER_GAME_TYPE, resolve_session_game_type
@@ -158,6 +159,9 @@ def build_player_fair_play_status(
 
                 return {
                     "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(
+                        session_code, player_id
+                    ),
                     "session_code": session_code,
                     "phase": terminal_session.get("phase", "ended"),
                     "ended_at": terminal_session.get("ended_at"),
@@ -186,6 +190,7 @@ def build_player_fair_play_status(
             # was not removed.
             return {
                 "player_id": player_id,
+                "roster_player_id": make_roster_player_id(session_code, player_id),
                 "session_code": session_code,
                 "phase": terminal_session.get("phase", "ended"),
                 "ended_at": terminal_session.get("ended_at"),
@@ -210,6 +215,7 @@ def build_player_fair_play_status(
 
             return {
                 "player_id": player_id,
+                "roster_player_id": make_roster_player_id(session_code, player_id),
                 "session_code": session_code,
                 "phase": "ended",
                 "strike_count": strike_count,
@@ -250,6 +256,7 @@ def build_player_fair_play_status(
 
     return {
         "player_id": player_id,
+        "roster_player_id": make_roster_player_id(session_code, player_id),
         "session_code": session_code,
         "strike_count": strike_count,
         "max_strikes": max_strikes,
@@ -628,20 +635,21 @@ async def websocket_endpoint(
         logger.error(f"WebSocket connection error: {e}")
         await close_websocket_safely(websocket, code=4000, reason="Connection error")
     finally:
-        if client_type == "mobile" and player_id:
-            disconnect_db, disconnect_db_generator = open_db_session(
-                authenticated_player_id or player_id
-            )
-            try:
-                await handle_mobile_disconnect_during_fair_play(
-                    session_code=session_code,
-                    player_id=player_id,
-                    db=disconnect_db,
+        if connected:
+            if client_type == "mobile" and player_id:
+                disconnect_db, disconnect_db_generator = open_db_session(
+                    authenticated_player_id or player_id
                 )
-            finally:
-                close_db_session(disconnect_db_generator)
+                try:
+                    await handle_mobile_disconnect_during_fair_play(
+                        session_code=session_code,
+                        player_id=player_id,
+                        db=disconnect_db,
+                    )
+                finally:
+                    close_db_session(disconnect_db_generator)
 
-        manager.disconnect(websocket)
+            manager.disconnect(websocket)
 
 
 async def send_initial_session_state(
@@ -679,6 +687,9 @@ async def send_initial_session_state(
             fair_play_status = {
                 **manager.get_fair_play_status(session_code, player_id),
                 "player_id": player_id,
+                "roster_player_id": make_roster_player_id(
+                    session_code, player_id
+                ),
             }
             initial_state["data"]["player_fair_play_status"] = fair_play_status
             initial_state["data"]["authoritative_state"][
@@ -860,6 +871,9 @@ async def handle_websocket_message(
                 "type": "player_left",
                 "data": {
                     "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(
+                        session_code, player_id
+                    ),
                     "player_name": player_name,
                     "reason": "left_game",
                     "timestamp": datetime.now().isoformat(),
@@ -1838,6 +1852,7 @@ async def handle_focus_violation(
     )
     status_payload = {
         "player_id": player_id,
+        "roster_player_id": make_roster_player_id(session_code, player_id),
         "player_name": player_name,
         "question_id": question_id,
         "strike_count": record.strike_count,
@@ -1963,6 +1978,9 @@ async def kick_player_for_fair_play(
                 "type": "fair_play_status_update",
                 "data": {
                     "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(
+                        session_code, player_id
+                    ),
                     "player_name": player_name,
                     "strike_count": max_strikes,
                     "max_strikes": max_strikes,
@@ -1981,6 +1999,9 @@ async def kick_player_for_fair_play(
                 "type": "kicked_from_session",
                 "data": {
                     "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(
+                        session_code, player_id
+                    ),
                     "player_name": player_name,
                     "reason": "fair_play_strikes",
                     "strike_count": max_strikes,
@@ -2007,6 +2028,7 @@ async def kick_player_for_fair_play(
             "type": "player_kicked",
             "data": {
                 "player_id": player_id,
+                "roster_player_id": make_roster_player_id(session_code, player_id),
                 "player_name": player_name,
                 "reason": "fair_play_strikes",
                 "strike_count": max_strikes,
