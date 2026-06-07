@@ -834,9 +834,7 @@ class ConnectionManager:
             message_type = message.get("type", "event")
             warning_key = f"{session_code}:{message_type}"
             now = time.time()
-            last_warning_at = self._missing_connection_warning_at.get(
-                warning_key, 0
-            )
+            last_warning_at = self._missing_connection_warning_at.get(warning_key, 0)
             log = logger.warning if now - last_warning_at >= 30 else logger.debug
             log(
                 "Cannot broadcast %s to session %s - no active connections",
