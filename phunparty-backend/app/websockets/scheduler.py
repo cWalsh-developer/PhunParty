@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -11,8 +11,10 @@ from app.database.dbCRUD import (
     advance_to_next_question,
     get_current_question_details,
     get_game_session_state,
+    get_session_by_code,
 )
 from app.dependencies import get_db
+from app.security.rls import set_rls_current_player
 from app.websockets.game_modes import BUZZER_GAME_TYPE, resolve_session_game_type
 from app.websockets.manager import SessionPhase, manager
 
@@ -23,6 +25,10 @@ NEXT_QUESTION_REVEAL_DELAY_MS = 2000
 QUESTION_BROADCAST_LEAD_MS = 2000
 QUESTION_DURATION_MS = 30000
 TIMED_QUESTION_DIFFICULTIES = {"medium", "hard"}
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def iso_utc(dt: datetime) -> str:
@@ -81,8 +87,34 @@ def question_uses_timer(question_data: dict) -> bool:
     return normalize_question_difficulty(question_data) in TIMED_QUESTION_DIFFICULTIES
 
 
+def get_session_owner_id(db: Session, session_code: str) -> Optional[str]:
+    try:
+        session = get_session_by_code(db, session_code)
+        return getattr(session, "owner_player_id", None) if session else None
+    except Exception:
+        logger.exception("Could not resolve session owner for %s", session_code)
+        return None
+
+
+def apply_scheduled_rls_context(
+    db: Session, session_code: str, acting_player_id: Optional[str]
+) -> None:
+    if acting_player_id:
+        set_rls_current_player(db, acting_player_id)
+        return
+
+    owner_player_id = get_session_owner_id(db, session_code)
+    if owner_player_id:
+        set_rls_current_player(db, owner_player_id)
+    else:
+        logger.warning("Scheduled task has no RLS player context for %s", session_code)
+
+
 async def advance_or_end_current_question(
-    session_code: str, db: Session, reason: str = "question_timeout"
+    session_code: str,
+    db: Session,
+    reason: str = "question_timeout",
+    acting_player_id: Optional[str] = None,
 ) -> bool:
     """Advance the DB question pointer and broadcast the next authoritative state."""
     result = advance_to_next_question(db, session_code)
@@ -98,11 +130,14 @@ async def advance_or_end_current_question(
             return False
 
         manager.clear_question_queue(session_code)
-        question_start_at = datetime.utcnow() + timedelta(
+        question_start_at = utc_now() + timedelta(
             milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
         )
         return await reveal_current_question(
-            session_code, db, iso_utc(question_start_at)
+            session_code,
+            db,
+            iso_utc(question_start_at),
+            acting_player_id=acting_player_id,
         )
 
     if action == "game_ended":
@@ -117,16 +152,40 @@ async def advance_or_end_current_question(
 
 
 async def reveal_current_question(
-    session_code: str, db: Session, start_at_iso: str
+    session_code: str,
+    db: Session,
+    start_at_iso: str,
+    acting_player_id: Optional[str] = None,
 ) -> bool:
     """Move the server-owned phase to QUESTION and broadcast exactly once."""
     game_status = get_current_question_details(db, session_code)
     if not game_status or not game_status.get("current_question"):
-        logger.warning(f"No current question found for session {session_code}")
+        game_state = get_game_session_state(db, session_code)
+        logger.warning(
+            "No current question found for session %s while revealing. "
+            "game_status=%s game_state_exists=%s current_question_id=%s acting_player_id=%s",
+            session_code,
+            game_status,
+            bool(game_state),
+            getattr(game_state, "current_question_id", None),
+            acting_player_id,
+        )
+        await manager.broadcast_to_session(
+            session_code,
+            {
+                "type": "error",
+                "data": {
+                    "message": "Could not reveal the current question.",
+                    "reason": "current_question_not_visible",
+                },
+            },
+            only_client_types=["web"],
+        )
         return False
 
     question_data = game_status["current_question"]
     game_type = resolve_session_game_type(db, session_code)
+    scheduled_player_id = acting_player_id or get_session_owner_id(db, session_code)
     question_id = question_data.get("question_id")
     phase_state = manager.get_session_phase_state(session_code)
     if (
@@ -145,7 +204,7 @@ async def reveal_current_question(
         logger.warning(
             f"Invalid question start_at for {session_code}: {start_at_iso}; using current time"
         )
-        question_starts_at = datetime.utcnow()
+        question_starts_at = utc_now()
 
     has_question_timer = question_uses_timer(question_data)
     expires_at = (
@@ -239,7 +298,12 @@ async def reveal_current_question(
     )
     if question_id and expires_at:
         asyncio.create_task(
-            scheduled_question_timeout(session_code, question_id, expires_at)
+            scheduled_question_timeout(
+                session_code,
+                question_id,
+                expires_at,
+                acting_player_id=scheduled_player_id,
+            )
         )
     if question_id:
         try:
@@ -253,6 +317,7 @@ async def reveal_current_question(
                     schedule_absent_player_fair_play_checks(
                         session_code=session_code,
                         question_id=question_id,
+                        acting_player_id=scheduled_player_id,
                     )
                 )
         except Exception:
@@ -263,10 +328,13 @@ async def reveal_current_question(
 
 
 async def scheduled_question_timeout(
-    session_code: str, question_id: str, expires_at: datetime
+    session_code: str,
+    question_id: str,
+    expires_at: datetime,
+    acting_player_id: Optional[str] = None,
 ):
     """Advance the current question when the server-owned question timer expires."""
-    sleep_seconds = max(0, (expires_at - datetime.utcnow()).total_seconds())
+    sleep_seconds = max(0, (expires_at - utc_now()).total_seconds())
     await asyncio.sleep(sleep_seconds)
 
     phase_state = manager.get_session_phase_state(session_code)
@@ -293,20 +361,28 @@ async def scheduled_question_timeout(
     db_generator = get_db()
     db = next(db_generator)
     try:
+        apply_scheduled_rls_context(db, session_code, acting_player_id)
         logger.info(f"Question {question_id} timed out for session {session_code}")
         await advance_or_end_current_question(
-            session_code, db, reason="question_timeout"
+            session_code,
+            db,
+            reason="question_timeout",
+            acting_player_id=acting_player_id,
         )
     finally:
         db_generator.close()
 
 
-async def scheduled_question_reveal(session_code: str, question_start_at: datetime):
+async def scheduled_question_reveal(
+    session_code: str,
+    question_start_at: datetime,
+    acting_player_id: Optional[str] = None,
+):
     """Reveal the current question from a server-owned countdown timer."""
     broadcast_at = question_start_at - timedelta(
         milliseconds=QUESTION_BROADCAST_LEAD_MS
     )
-    sleep_seconds = max(0, (broadcast_at - datetime.utcnow()).total_seconds())
+    sleep_seconds = max(0, (broadcast_at - utc_now()).total_seconds())
     await asyncio.sleep(sleep_seconds)
 
     phase_state = manager.get_session_phase_state(session_code)
@@ -327,7 +403,61 @@ async def scheduled_question_reveal(session_code: str, question_start_at: dateti
     db_generator = get_db()
     db = next(db_generator)
     try:
-        await reveal_current_question(session_code, db, question_start_at_iso)
+        apply_scheduled_rls_context(db, session_code, acting_player_id)
+        await reveal_current_question(
+            session_code,
+            db,
+            question_start_at_iso,
+            acting_player_id=acting_player_id,
+        )
+    except Exception:
+        logger.exception("Scheduled question reveal failed for session %s", session_code)
+    finally:
+        db_generator.close()
+
+
+async def scheduled_countdown_watchdog(
+    session_code: str,
+    question_start_at: datetime,
+    acting_player_id: Optional[str] = None,
+):
+    """Reveal the question if the countdown scheduler left the session behind."""
+    sleep_seconds = max(
+        0,
+        (
+            question_start_at
+            + timedelta(milliseconds=750)
+            - utc_now()
+        ).total_seconds(),
+    )
+    await asyncio.sleep(sleep_seconds)
+
+    phase_state = manager.get_session_phase_state(session_code)
+    question_start_at_iso = iso_utc(question_start_at)
+    if (
+        phase_state.get("phase") != SessionPhase.COUNTDOWN.value
+        or phase_state.get("question_start_at") != question_start_at_iso
+    ):
+        return
+
+    logger.warning(
+        "Countdown watchdog revealing stuck session %s at %s",
+        session_code,
+        question_start_at_iso,
+    )
+
+    db_generator = get_db()
+    db = next(db_generator)
+    try:
+        apply_scheduled_rls_context(db, session_code, acting_player_id)
+        await reveal_current_question(
+            session_code,
+            db,
+            question_start_at_iso,
+            acting_player_id=acting_player_id,
+        )
+    except Exception:
+        logger.exception("Countdown watchdog failed for session %s", session_code)
     finally:
         db_generator.close()
 
@@ -340,10 +470,11 @@ async def start_countdown(
     current_question_id: Optional[str] = None,
     current_question_index: Optional[int] = None,
     total_questions: Optional[int] = None,
+    acting_player_id: Optional[str] = None,
 ):
     """Enter COUNTDOWN and schedule the authoritative QUESTION transition."""
     duration_ms = normalize_countdown_duration_ms(duration_ms, session_code, reason)
-    countdown_start = datetime.utcnow() + timedelta(milliseconds=delay_ms)
+    countdown_start = utc_now() + timedelta(milliseconds=delay_ms)
     question_start_at = countdown_start + timedelta(milliseconds=duration_ms)
     countdown_start_iso = iso_utc(countdown_start)
     question_start_at_iso = iso_utc(question_start_at)
@@ -374,4 +505,17 @@ async def start_countdown(
         critical=True,
         require_ack=True,
     )
-    asyncio.create_task(scheduled_question_reveal(session_code, question_start_at))
+    asyncio.create_task(
+        scheduled_question_reveal(
+            session_code,
+            question_start_at,
+            acting_player_id=acting_player_id,
+        )
+    )
+    asyncio.create_task(
+        scheduled_countdown_watchdog(
+            session_code,
+            question_start_at,
+            acting_player_id=acting_player_id,
+        )
+    )

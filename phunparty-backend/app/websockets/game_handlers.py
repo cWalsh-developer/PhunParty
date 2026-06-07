@@ -3,6 +3,7 @@ Game event handlers for different game types
 Handles the business logic for different game modes
 """
 
+from app.security.loggingUtils import safe_player_ref
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict
@@ -15,6 +16,7 @@ from app.database.dbCRUD import (
     get_question_by_id,
 )
 from app.logic.answer_validation import validate_answer_against_question
+from app.security.roster_identity import make_roster_player_id
 from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.manager import SessionPhase, manager
 from app.websockets.scheduler import (
@@ -22,6 +24,7 @@ from app.websockets.scheduler import (
     advance_or_end_current_question,
     iso_utc,
     reveal_current_question,
+    utc_now,
 )
 from app.database.fair_play_crud import (
     is_player_frozen_for_question,
@@ -53,7 +56,7 @@ class GameEventHandler:
         """Broadcast question to all clients with different formats"""
         # Reset all players' answered status for the new question
         manager.reset_all_players_answered(self.session_code)
-        start_at = datetime.utcnow().isoformat() + "Z"
+        start_at = iso_utc(utc_now())
         phase_state = manager.set_session_phase(
             self.session_code,
             SessionPhase.QUESTION,
@@ -162,6 +165,9 @@ class TriviaGameHandler(GameEventHandler):
                     "type": "player_answered",
                     "data": {
                         "player_id": player_id,
+                        "roster_player_id": make_roster_player_id(
+                            self.session_code, player_id
+                        ),
                         "player_name": player_name,
                         "answered_at": datetime.now().isoformat(),
                         "is_correct": result.get("is_correct", False),
@@ -201,7 +207,7 @@ class TriviaGameHandler(GameEventHandler):
                 game_state = get_game_session_state(db, self.session_code)
                 if game_state and game_state.current_question_id:
                     manager.clear_question_queue(self.session_code)
-                    question_start_at = datetime.utcnow() + timedelta(
+                    question_start_at = utc_now() + timedelta(
                         milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
                     )
                     await reveal_current_question(
@@ -374,7 +380,7 @@ class BuzzerGameHandler(GameEventHandler):
             logger.info(
                 "Ignoring stale buzzer press session=%s player=%s incoming=%s current=%s",
                 self.session_code,
-                player_id,
+                safe_player_ref(player_id),
                 incoming_question_id,
                 current_question_id,
             )
@@ -428,6 +434,9 @@ class BuzzerGameHandler(GameEventHandler):
                 "type": "buzzer_winner",
                 "data": {
                     "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(
+                        self.session_code, player_id
+                    ),
                     "player_name": player_name,
                     "timestamp": datetime.now().isoformat(),
                 },
@@ -471,6 +480,9 @@ class BuzzerGameHandler(GameEventHandler):
                     "type": "correct_answer",
                     "data": {
                         "player_id": player_id,
+                        "roster_player_id": make_roster_player_id(
+                            self.session_code, player_id
+                        ),
                         "player_name": player_name,
                         "answer": answer,
                         "correct": True,
@@ -520,10 +532,17 @@ class BuzzerGameHandler(GameEventHandler):
                     "type": "incorrect_answer",
                     "data": {
                         "player_id": player_id,
+                        "roster_player_id": make_roster_player_id(
+                            self.session_code, player_id
+                        ),
                         "player_name": player_name,
                         "answer": answer,
                         "correct": False,
                         "frozen_players": list(state["frozen_players"]),
+                        "frozen_roster_player_ids": [
+                            make_roster_player_id(self.session_code, frozen_id)
+                            for frozen_id in state["frozen_players"]
+                        ],
                     },
                 },
             )
@@ -679,7 +698,7 @@ class BuzzerGameHandler(GameEventHandler):
             return False
 
         manager.clear_question_queue(self.session_code)
-        question_start_at = datetime.utcnow() + timedelta(
+        question_start_at = utc_now() + timedelta(
             milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
         )
         return await reveal_current_question(

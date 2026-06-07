@@ -1,10 +1,14 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
 from app.schemas.players_model import Players
 from app.schemas.social_models import Notification, UserPushToken
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def create_notification(
@@ -52,7 +56,7 @@ def mark_notification_read(
 
     if not notification.is_read:
         notification.is_read = True
-        notification.read_at = datetime.utcnow()
+        notification.read_at = utc_now()
         db.commit()
         db.refresh(notification)
     return notification
@@ -65,7 +69,7 @@ def mark_all_notifications_read(db: Session, player_id: str) -> int:
         .filter(Notification.is_read == False)
         .all()
     )
-    now = datetime.utcnow()
+    now = utc_now()
     for notification in notifications:
         notification.is_read = True
         notification.read_at = now
@@ -85,7 +89,7 @@ def register_push_token(
         .filter(UserPushToken.expo_push_token == expo_push_token)
         .first()
     )
-    now = datetime.utcnow()
+    now = utc_now()
     if token:
         token.player_id = player_id
         token.device_id = device_id

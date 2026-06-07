@@ -6,6 +6,11 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 from app.schemas.game_model import Game
 from app.schemas.game_session_model import GameSession
 from app.schemas.game_state_models import GameSessionState, PlayerResponse
@@ -18,6 +23,7 @@ from app.schemas.session_player_assignment_model import SessionAssignment
 from app.schemas.session_question_assignment import SessionQuestionAssignment
 from app.utils.hash_password import hash_password
 from app.utils.friend_codes import generate_friend_code
+from app.utils.phone_numbers import normalize_phone_number, phone_number_candidates
 from app.utils.id_generator import (
     generate_assignment_id,
     generate_game_code,
@@ -226,7 +232,7 @@ def end_game_session(db: Session, session_code: str) -> dict:
         if game_state:
             game_state.is_active = False
             game_state.is_waiting_for_players = False
-            game_state.ended_at = datetime.utcnow()
+            game_state.ended_at = utc_now()
 
         # Calculate and return final results
         try:
@@ -236,12 +242,10 @@ def end_game_session(db: Session, session_code: str) -> dict:
                 "game_state": "completed",
                 "final_results": [
                     {
-                        "player_id": result.player_id,
+                        "display_name": result.player_display_name or "Player",
+                        "player_photo_url": result.player_photo_url,
                         "score": result.score,
-                        "result": result.result,
-                        "player_name": get_player_by_ID(
-                            db, result.player_id
-                        ).player_name,
+                        "result": result.result.value if result.result else None,
                         "session_code": session_code,
                     }
                     for result in final_results
@@ -308,6 +312,34 @@ def get_player_by_email(db: Session, player_email: str) -> Players:
     )
 
 
+def get_player_by_phone_any_status(db: Session, phone: str) -> Players:
+    """Retrieve a non-deleted player by phone, including deactivated accounts."""
+    candidates = phone_number_candidates(phone)
+    if not candidates:
+        return None
+
+    return (
+        db.query(Players)
+        .filter(Players.player_mobile.in_(candidates))
+        .filter(Players.is_deleted == False)
+        .first()
+    )
+
+
+def ensure_phone_number_available(
+    db: Session, player_mobile: str | None, current_player_id: str | None = None
+) -> str | None:
+    normalized_mobile = normalize_phone_number(player_mobile)
+    if not normalized_mobile:
+        return None
+
+    existing_player = get_player_by_phone_any_status(db, normalized_mobile)
+    if existing_player and existing_player.player_id != current_player_id:
+        raise ValueError("Account with this phone number already exists")
+
+    return normalized_mobile
+
+
 def create_player(
     db: Session,
     player_name: str,
@@ -319,11 +351,12 @@ def create_player(
     """Create a new player and add them to a game."""
     player_id = generate_player_id()
     hashed_password = hash_password(hashed_password)
+    normalized_mobile = ensure_phone_number_available(db, player_mobile)
     new_player = Players(
         player_id=player_id,
         player_name=player_name,
         player_email=player_email,
-        player_mobile=player_mobile,
+        player_mobile=normalized_mobile,
         hashed_password=hashed_password,
         active_game_code=game_code,
         friend_code=generate_unique_friend_code(db),
@@ -368,6 +401,10 @@ def deactivate_player(db: Session, player_id: str) -> dict:
     if player.active_game_code:
         player.active_game_code = None
 
+    from app.database.friend_crud import revoke_pending_friend_requests_for_player
+
+    revoked_friend_requests = revoke_pending_friend_requests_for_player(db, player_id)
+
     db.commit()
     db.refresh(player)
 
@@ -383,6 +420,7 @@ def deactivate_player(db: Session, player_id: str) -> dict:
         "grace_period_days": 30,
         "permanent_deletion_date": expiration_dt.isoformat(),
         "reactivation_available": True,
+        "revoked_friend_requests": revoked_friend_requests,
     }
 
 
@@ -436,6 +474,10 @@ def permanently_delete_player(db: Session, player_id: str) -> None:
     # Clear active game code if they're in a game
     if player.active_game_code:
         player.active_game_code = None
+
+    from app.database.friend_crud import revoke_pending_friend_requests_for_player
+
+    revoke_pending_friend_requests_for_player(db, player_id)
 
     # DELETE all PII - GDPR compliant
     player.player_name = "Deleted User"  # Generic, non-identifying
@@ -504,9 +546,14 @@ def update_player(db: Session, player_id: str, player: Player) -> Players:
     if new_player.active_game_code is not None:
         raise ValueError("Cannot update player name while they are in a game")
     else:
-        new_player.player_name = player.player_name
-        new_player.player_email = player.player_email
-        new_player.player_mobile = player.player_mobile
+        if player.player_name is not None:
+            new_player.player_name = player.player_name
+        if player.player_email is not None:
+            new_player.player_email = player.player_email
+        if player.player_mobile is not None:
+            new_player.player_mobile = ensure_phone_number_available(
+                db, player.player_mobile, current_player_id=player_id
+            )
         if (
             hasattr(player, "profile_photo_url")
             and player.profile_photo_url is not None
@@ -700,9 +747,20 @@ def update_scores(db: Session, session_code: str, player_id: str) -> Scores:
 def create_score(db: Session, session_code: str, player_id: str) -> Scores:
     """Create a new score entry for a player in a game session."""
     score_id = generate_score_id()
+
+    player = get_player_by_ID(db, player_id)
+
     new_score = Scores(
-        score_id=score_id, session_code=session_code, player_id=player_id, score=0
+        score_id=score_id,
+        session_code=session_code,
+        player_id=player_id,
+        score=0,
+        player_display_name=(
+            player.player_name if player and player.player_name else "Player"
+        ),
+        player_photo_url=(player.profile_photo_url if player else None),
     )
+
     db.add(new_score)
     db.commit()
     db.refresh(new_score)
@@ -1275,7 +1333,17 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
 
 def get_player_by_phone(db: Session, phone: str) -> Players:
     """Retrieve a player by their phone number."""
-    return db.query(Players).filter(Players.player_mobile == phone).first()
+    candidates = phone_number_candidates(phone)
+    if not candidates:
+        return None
+
+    return (
+        db.query(Players)
+        .filter(Players.player_mobile.in_(candidates))
+        .filter(Players.is_deleted == False)
+        .filter(Players.is_deactivated == False)
+        .first()
+    )
 
 
 ## Password Reset CRUD operations --------------------------------------------------------------------------------------------------------------
@@ -1317,7 +1385,7 @@ def verify_and_reset_password(
     db: Session, phone: str, otp: str, new_password: str
 ) -> bool:
     if verify_otp(db, phone, otp):
-        player = db.query(Players).filter(Players.player_mobile == phone).first()
+        player = get_player_by_phone(db, phone)
         if player:
             player.hashed_password = hash_password(new_password)
             db.commit()
@@ -1326,7 +1394,7 @@ def verify_and_reset_password(
 
 
 def update_password(db: Session, phone: str, new_password: str) -> bool:
-    player = db.query(Players).filter(Players.player_mobile == phone).first()
+    player = get_player_by_phone(db, phone)
     if player:
         player.hashed_password = hash_password(new_password)
         db.commit()
@@ -1355,7 +1423,7 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
 
         # Update game state to mark as ended
         game_state.is_active = False
-        game_state.ended_at = datetime.utcnow()
+        game_state.ended_at = utc_now()
 
         # Calculate game results (win/lose/draw) for all players
         try:
@@ -1377,50 +1445,42 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
 
 def get_final_scores(db: Session, session_code: str) -> list[dict]:
     """
-    Get final scores for a game session, ranked by score (highest first).
-    Includes player details and their results (win/lose/draw).
-
-    Args:
-        db: Database session
-        session_code: The session code to get scores for
-
-    Returns:
-        list[dict]: List of score dictionaries with player info, sorted by score descending
+    Get final scores for a game session without exposing internal player IDs.
+    Uses display-name snapshots stored on the score row.
     """
     try:
-        # Join Scores with Players to get player details
-        scores_query = (
-            db.query(Scores, Players)
-            .join(Players, Scores.player_id == Players.player_id)
+        scores = (
+            db.query(Scores)
             .filter(Scores.session_code == session_code)
             .order_by(Scores.score.desc())
             .all()
         )
 
-        if not scores_query:
+        if not scores:
             logger.warning(f"No scores found for session {session_code}")
             return []
 
-        # Format the results
         final_scores = []
-        for score, player in scores_query:
+
+        for score in scores:
+            rank = len([s for s in scores if s.score > score.score]) + 1
+
             final_scores.append(
                 {
-                    "player_id": player.player_id,
-                    "player_name": player.player_name,
-                    "player_photo": getattr(player, "player_photo", None),
+                    "display_name": score.player_display_name or "Player",
+                    "player_photo_url": score.player_photo_url,
                     "score": score.score,
-                    "result": (
-                        score.result.value if score.result else None
-                    ),  # win/lose/draw
-                    "rank": len([s for s, _ in scores_query if s.score > score.score])
-                    + 1,
+                    "result": score.result.value if score.result else None,
+                    "rank": rank,
                 }
             )
 
         logger.info(
-            f"Retrieved {len(final_scores)} final scores for session {session_code}"
+            "Retrieved %s final scores for session %s",
+            len(final_scores),
+            session_code,
         )
+
         return final_scores
 
     except Exception as e:

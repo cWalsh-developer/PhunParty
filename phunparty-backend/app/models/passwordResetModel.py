@@ -12,4 +12,5 @@ class PasswordVerifyRequest(BaseModel):
 
 class PasswordUpdateRequest(BaseModel):
     phone_number: str
+    reset_token: str
     new_password: str

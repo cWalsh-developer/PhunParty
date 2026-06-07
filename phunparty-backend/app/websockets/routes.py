@@ -2,6 +2,7 @@
 WebSocket routes for real-time game functionality
 """
 
+from app.security.loggingUtils import safe_player_ref
 import asyncio
 from collections.abc import Generator
 from datetime import datetime, timedelta
@@ -33,8 +34,12 @@ from app.database.fair_play_crud import (
     record_focus_violation,
     update_fair_play_settings,
 )
-from app.dependencies import get_db
+from app.dependencies import get_db, get_player_from_token_value, require_admin_api_key
+from app.dependencies import get_current_player
 from app.logic.game_logic import check_and_advance_game
+from app.security.ownership import assert_session_owner
+from app.security.rls import set_rls_current_player
+from app.security.roster_identity import make_roster_player_id
 from app.websockets.game_handlers import create_game_handler
 from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.game_modes import BUZZER_GAME_TYPE, resolve_session_game_type
@@ -47,6 +52,7 @@ from app.websockets.scheduler import (
     iso_utc,
     reveal_current_question,
     start_countdown,
+    utc_now,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,10 +80,14 @@ def parse_optional_bool(value):
     return bool(value)
 
 
-def open_db_session() -> tuple[Session, Generator[Session, None, None]]:
+def open_db_session(
+    current_player_id: Optional[str] = None,
+) -> tuple[Session, Generator[Session, None, None]]:
     """Open a short-lived DB session from the FastAPI dependency generator."""
     db_generator = get_db()
     db = next(db_generator)
+    if current_player_id:
+        set_rls_current_player(db, current_player_id)
     return db, db_generator
 
 
@@ -86,6 +96,22 @@ def close_db_session(db_generator: Generator[Session, None, None]) -> None:
         db_generator.close()
     except Exception:
         logger.exception("Error closing websocket DB session")
+
+
+async def close_websocket_safely(websocket: WebSocket, code: int, reason: str) -> None:
+    try:
+        await websocket.close(code=code, reason=reason)
+    except RuntimeError as e:
+        logger.debug("WebSocket already closed while closing: %s", e)
+
+
+async def send_websocket_error_safely(websocket: WebSocket, message: str) -> bool:
+    try:
+        await websocket.send_text(json.dumps({"type": "error", "message": message}))
+        return True
+    except RuntimeError as e:
+        logger.debug("WebSocket already closed while sending error: %s", e)
+        return False
 
 
 def build_player_fair_play_status(
@@ -133,6 +159,9 @@ def build_player_fair_play_status(
 
                 return {
                     "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(
+                        session_code, player_id
+                    ),
                     "session_code": session_code,
                     "phase": terminal_session.get("phase", "ended"),
                     "ended_at": terminal_session.get("ended_at"),
@@ -161,6 +190,7 @@ def build_player_fair_play_status(
             # was not removed.
             return {
                 "player_id": player_id,
+                "roster_player_id": make_roster_player_id(session_code, player_id),
                 "session_code": session_code,
                 "phase": terminal_session.get("phase", "ended"),
                 "ended_at": terminal_session.get("ended_at"),
@@ -185,6 +215,7 @@ def build_player_fair_play_status(
 
             return {
                 "player_id": player_id,
+                "roster_player_id": make_roster_player_id(session_code, player_id),
                 "session_code": session_code,
                 "phase": "ended",
                 "strike_count": strike_count,
@@ -225,6 +256,7 @@ def build_player_fair_play_status(
 
     return {
         "player_id": player_id,
+        "roster_player_id": make_roster_player_id(session_code, player_id),
         "session_code": session_code,
         "strike_count": strike_count,
         "max_strikes": max_strikes,
@@ -242,8 +274,11 @@ def build_player_fair_play_status(
 def get_player_fair_play_status(
     session_code: str,
     player_id: str,
+    current_player=Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
+    if current_player.player_id != player_id:
+        assert_session_owner(db, current_player, session_code)
     return build_player_fair_play_status(db, session_code, player_id)
 
 
@@ -303,7 +338,7 @@ def build_sync_state(
             seconds_since_start = None
             if started_at:
                 seconds_since_start = (
-                    datetime.utcnow() - started_at.replace(tzinfo=None)
+                    utc_now() - started_at.replace(tzinfo=None)
                 ).total_seconds()
 
             is_fresh_intro = game_state.get("current_question_index", 0) == 0 and (
@@ -319,7 +354,7 @@ def build_sync_state(
                 "total_questions": game_state.get("total_questions"),
             }
             if recovery_phase == SessionPhase.QUESTION:
-                phase_updates["start_at"] = iso_utc(datetime.utcnow())
+                phase_updates["start_at"] = iso_utc(utc_now())
 
             phase_state = manager.set_session_phase(
                 session_code,
@@ -400,6 +435,7 @@ async def websocket_endpoint(
     game_type: Optional[str] = Query(
         None, description="Optional game mode override, e.g. 'trivia' or 'buzzer'"
     ),
+    token: Optional[str] = Query(None, description="JWT access token"),
 ):
     """
     WebSocket endpoint for game session communication
@@ -412,24 +448,43 @@ async def websocket_endpoint(
     """
     game_handler = None
     resolved_game_type = None
+    authenticated_player_id: Optional[str] = None
+    connected = False
 
     try:
         db, db_generator = open_db_session()
         try:
-            # Verify session exists
+            if not token:
+                await websocket.close(code=4001, reason="Authentication token required")
+                return
+
+            try:
+                current_player = get_player_from_token_value(token, db)
+            except HTTPException:
+                await websocket.close(code=4001, reason="Invalid authentication token")
+                return
+
+            # Verify session exists after JWT auth has set the RLS context.
             session = get_session_by_code(db, session_code)
             if not session:
                 await websocket.close(code=4004, reason="Session not found")
                 return
 
-            # For mobile clients, verify player exists
+            authenticated_player_id = current_player.player_id
+
             if client_type == "mobile":
-                if not player_id:
+                player_id = current_player.player_id
+            else:
+                try:
+                    assert_session_owner(db, current_player, session_code)
+                except HTTPException:
                     await websocket.close(
-                        code=4001, reason="Player ID required for mobile clients"
+                        code=4003, reason="Only the host can control this session"
                     )
                     return
 
+            # For mobile clients, verify player exists
+            if client_type == "mobile":
                 player = get_player_by_ID(db, player_id)
                 if not player:
                     await websocket.close(code=4004, reason="Player not found")
@@ -453,7 +508,7 @@ async def websocket_endpoint(
 
                 if existing_connections:
                     logger.warning(
-                        f"Player {player_id} ({player_name}) already has {len(existing_connections)} connection(s) to session {session_code}"
+                        f"Player {safe_player_ref(player_id)} ({player_name}) already has {len(existing_connections)} connection(s) to session {session_code}"
                     )
                     logger.info(
                         f"Closing {len(existing_connections)} old connection(s) before establishing new one"
@@ -473,7 +528,7 @@ async def websocket_endpoint(
                                     )
                                 )
                                 logger.info(
-                                    f"Closed old connection {old_ws_id} for player {player_id}"
+                                    f"Closed old connection {old_ws_id} for player {safe_player_ref(player_id)}"
                                 )
                         except Exception as e:
                             logger.error(f"Error closing old connection: {e}")
@@ -489,7 +544,7 @@ async def websocket_endpoint(
             close_db_session(db_generator)
 
         # Connect to session after DB validation has completed.
-        await manager.connect(
+        connected = await manager.connect(
             websocket=websocket,
             session_code=session_code,
             client_type=client_type,
@@ -497,6 +552,8 @@ async def websocket_endpoint(
             player_name=player_name,
             player_photo=player_photo,
         )
+        if not connected:
+            return
 
         # Log connection stats for monitoring
         total_connections = manager.get_total_connection_count()
@@ -506,7 +563,7 @@ async def websocket_endpoint(
         )
 
         # Send initial session state with its own short-lived DB session.
-        initial_db, initial_db_generator = open_db_session()
+        initial_db, initial_db_generator = open_db_session(authenticated_player_id)
         try:
             await send_initial_session_state(
                 websocket,
@@ -531,7 +588,9 @@ async def websocket_endpoint(
                 data = await websocket.receive_text()
                 message = json.loads(data)
 
-                message_db, message_db_generator = open_db_session()
+                message_db, message_db_generator = open_db_session(
+                    authenticated_player_id
+                )
                 try:
                     await handle_websocket_message(
                         message,
@@ -539,6 +598,7 @@ async def websocket_endpoint(
                         session_code,
                         client_type,
                         player_id,
+                        authenticated_player_id,
                         game_handler,
                         message_db,
                     )
@@ -548,31 +608,48 @@ async def websocket_endpoint(
             except WebSocketDisconnect:
                 break
             except json.JSONDecodeError:
-                await websocket.send_text(
-                    json.dumps({"type": "error", "message": "Invalid JSON format"})
+                sent = await send_websocket_error_safely(
+                    websocket, "Invalid JSON format"
                 )
+                if not sent:
+                    break
+            except RuntimeError as e:
+                error_text = str(e)
+                if (
+                    'Need to call "accept" first' in error_text
+                    or "close message has been sent" in error_text
+                    or "WebSocket is not connected" in error_text
+                ):
+                    logger.info("WebSocket closed during message loop: %s", e)
+                    break
+                raise
             except Exception as e:
                 logger.error(f"Error handling WebSocket message: {e}")
-                await websocket.send_text(
-                    json.dumps({"type": "error", "message": "Internal server error"})
+                sent = await send_websocket_error_safely(
+                    websocket, "Internal server error"
                 )
+                if not sent:
+                    break
 
     except Exception as e:
         logger.error(f"WebSocket connection error: {e}")
-        await websocket.close(code=4000, reason="Connection error")
+        await close_websocket_safely(websocket, code=4000, reason="Connection error")
     finally:
-        if client_type == "mobile" and player_id:
-            disconnect_db, disconnect_db_generator = open_db_session()
-            try:
-                await handle_mobile_disconnect_during_fair_play(
-                    session_code=session_code,
-                    player_id=player_id,
-                    db=disconnect_db,
+        if connected:
+            if client_type == "mobile" and player_id:
+                disconnect_db, disconnect_db_generator = open_db_session(
+                    authenticated_player_id or player_id
                 )
-            finally:
-                close_db_session(disconnect_db_generator)
+                try:
+                    await handle_mobile_disconnect_during_fair_play(
+                        session_code=session_code,
+                        player_id=player_id,
+                        db=disconnect_db,
+                    )
+                finally:
+                    close_db_session(disconnect_db_generator)
 
-        manager.disconnect(websocket)
+            manager.disconnect(websocket)
 
 
 async def send_initial_session_state(
@@ -610,6 +687,9 @@ async def send_initial_session_state(
             fair_play_status = {
                 **manager.get_fair_play_status(session_code, player_id),
                 "player_id": player_id,
+                "roster_player_id": make_roster_player_id(
+                    session_code, player_id
+                ),
             }
             initial_state["data"]["player_fair_play_status"] = fair_play_status
             initial_state["data"]["authoritative_state"][
@@ -680,6 +760,7 @@ async def handle_websocket_message(
     session_code: str,
     client_type: str,
     player_id: Optional[str],
+    authenticated_player_id: str,
     game_handler,
     db: Session,
 ):
@@ -699,7 +780,7 @@ async def handle_websocket_message(
         manager.update_heartbeat(websocket)
 
         # Include server time for client clock offset calculation
-        server_time_ms = int(datetime.utcnow().timestamp() * 1000)
+        server_time_ms = manager._utc_now_ms()
         client_sent_at = data.get("clientSentAt") if data else None
 
         pong_data = {
@@ -790,6 +871,9 @@ async def handle_websocket_message(
                 "type": "player_left",
                 "data": {
                     "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(
+                        session_code, player_id
+                    ),
                     "player_name": player_name,
                     "reason": "left_game",
                     "timestamp": datetime.now().isoformat(),
@@ -880,7 +964,7 @@ async def handle_websocket_message(
                 logger.info(
                     "Ignoring stale buzzer press session=%s player=%s incoming=%s current=%s",
                     session_code,
-                    player_id,
+                    safe_player_ref(player_id),
                     incoming_question_id,
                     current_question_id,
                 )
@@ -913,7 +997,12 @@ async def handle_websocket_message(
 
     elif message_type == "start_game" and client_type == "web":
         # Web client starting the game
-        await handle_game_start(session_code, game_handler, db)
+        await handle_game_start(
+            session_code,
+            game_handler,
+            db,
+            acting_player_id=authenticated_player_id,
+        )
 
     elif message_type == "update_session_settings" and client_type != "mobile":
         await handle_update_session_settings(session_code, data, db)
@@ -935,11 +1024,17 @@ async def handle_websocket_message(
         logger.info(
             f"Starting countdown for {session_code}: reason=intro_complete duration_ms={countdown_duration_ms} data={data}"
         )
-        game_state = get_game_session_state(db, session_code)
+        game_state = await ensure_current_question_ready_for_countdown(
+            session_code, db, "intro_complete"
+        )
+        if not game_state:
+            manager.update_heartbeat(websocket)
+            return
         await start_countdown(
             session_code,
             duration_ms=countdown_duration_ms,
             reason="intro_complete",
+            acting_player_id=authenticated_player_id,
             current_question_id=(
                 game_state.current_question_id if game_state else None
             ),
@@ -964,7 +1059,7 @@ async def handle_websocket_message(
                 "type": "intro_skipped",
                 "data": {
                     **manager.get_session_phase_state(session_code),
-                    "skipped_at": iso_utc(datetime.utcnow()),
+                    "skipped_at": iso_utc(utc_now()),
                 },
             },
             critical=True,
@@ -977,11 +1072,17 @@ async def handle_websocket_message(
         logger.info(
             f"Starting countdown for {session_code}: reason=skip_intro duration_ms={countdown_duration_ms} data={data}"
         )
-        game_state = get_game_session_state(db, session_code)
+        game_state = await ensure_current_question_ready_for_countdown(
+            session_code, db, "skip_intro"
+        )
+        if not game_state:
+            manager.update_heartbeat(websocket)
+            return
         await start_countdown(
             session_code,
             duration_ms=countdown_duration_ms,
             reason="skip_intro",
+            acting_player_id=authenticated_player_id,
             current_question_id=(
                 game_state.current_question_id if game_state else None
             ),
@@ -992,15 +1093,59 @@ async def handle_websocket_message(
         )
 
     elif message_type == "countdown_complete" and client_type == "web":
+        phase_state = manager.get_session_phase_state(session_code)
+        current_phase = phase_state.get("phase")
+        if current_phase != SessionPhase.COUNTDOWN.value:
+            logger.info(
+                "Ignoring countdown_complete for %s; current phase is %s",
+                session_code,
+                current_phase,
+            )
+            manager.update_heartbeat(websocket)
+            return
+
+        question_start_at = phase_state.get("question_start_at")
+        if question_start_at:
+            try:
+                question_start_at_dt = datetime.fromisoformat(
+                    str(question_start_at).replace("Z", "")
+                )
+                if question_start_at_dt > utc_now() + timedelta(milliseconds=500):
+                    logger.info(
+                        "Ignoring early countdown_complete for %s; question_start_at=%s",
+                        session_code,
+                        question_start_at,
+                    )
+                    manager.update_heartbeat(websocket)
+                    return
+            except ValueError:
+                logger.warning(
+                    "Invalid countdown question_start_at for %s: %s",
+                    session_code,
+                    question_start_at,
+                )
+
         logger.info(
-            f"Received countdown_complete for {session_code}; server scheduler owns reveal"
+            "Recovering countdown_complete for %s by revealing current question",
+            session_code,
+        )
+        await reveal_current_question(
+            session_code,
+            db,
+            question_start_at or iso_utc(utc_now()),
+            acting_player_id=authenticated_player_id,
         )
         manager.update_heartbeat(websocket)
         return
 
     elif message_type == "next_question" and client_type == "web":
         # Web client moving to next question
-        await handle_next_question(session_code, game_handler, db)
+        await handle_next_question(
+            session_code,
+            game_handler,
+            db,
+            acting_player_id=authenticated_player_id,
+        )
 
     elif message_type == "end_game" and client_type == "web":
         # Web client ending the game
@@ -1026,7 +1171,11 @@ async def handle_websocket_message(
 
     elif message_type == "broadcast_current_question" and client_type == "web":
         # Legacy host command: route through synchronized countdown.
-        await handle_broadcast_current_question(session_code, db)
+        await handle_broadcast_current_question(
+            session_code,
+            db,
+            acting_player_id=authenticated_player_id,
+        )
 
     else:
         logger.warning(f"Unknown message type: {message_type} from {client_type}")
@@ -1096,7 +1245,7 @@ async def handle_mobile_disconnect_during_fair_play(
     if manager.get_pending_focus_loss(session_code, player_id):
         return
 
-    lost_at = iso_utc(datetime.utcnow())
+    lost_at = iso_utc(utc_now())
     manager.record_pending_focus_loss(
         session_code=session_code,
         player_id=player_id,
@@ -1107,7 +1256,7 @@ async def handle_mobile_disconnect_during_fair_play(
     logger.info(
         "FAIR PLAY DISCONNECT LOSS session=%s player=%s question=%s lost_at=%s",
         session_code,
-        player_id,
+        safe_player_ref(player_id),
         question_id,
         lost_at,
     )
@@ -1131,7 +1280,7 @@ async def handle_fair_play_focus_lost(
     logger.warning(
         "FAIR PLAY FOCUS LOST HANDLER HIT session=%s player=%s data=%s",
         session_code,
-        player_id,
+        safe_player_ref(player_id),
         data,
     )
     """Start a backend-owned Fair Play grace window for focus loss."""
@@ -1150,18 +1299,18 @@ async def handle_fair_play_focus_lost(
     current_question_id = phase_state.get("current_question_id")
     if not question_id or question_id != current_question_id:
         logger.info(
-            f"Ignoring focus loss for {session_code}/{player_id}; question {question_id} != {current_question_id}"
+            f"Ignoring focus loss for {session_code}/{safe_player_ref(player_id)}; question {question_id} != {current_question_id}"
         )
         return
 
     reason = data.get("reason") or "left_question_screen"
-    lost_at = data.get("occurred_at") or iso_utc(datetime.utcnow())
+    lost_at = data.get("occurred_at") or iso_utc(utc_now())
 
     if reason in IMMEDIATE_FAIR_PLAY_VIOLATION_REASONS:
         logger.info(
             "FAIR PLAY IMMEDIATE STRIKE session=%s player=%s question=%s reason=%s",
             session_code,
-            player_id,
+            safe_player_ref(player_id),
             question_id,
             reason,
         )
@@ -1182,7 +1331,7 @@ async def handle_fair_play_focus_lost(
     logger.info(
         "FAIR PLAY LOST session=%s player=%s question=%s reason=%s lost_at=%s",
         session_code,
-        player_id,
+        safe_player_ref(player_id),
         question_id,
         reason,
         lost_at,
@@ -1193,7 +1342,7 @@ async def handle_fair_play_focus_lost(
         logger.info(
             "Ignoring additional Fair Play focus loss while pending exists: session=%s player=%s question=%s existing_reason=%s new_reason=%s original_lost_at=%s new_lost_at=%s",
             session_code,
-            player_id,
+            safe_player_ref(player_id),
             question_id,
             existing_pending.get("reason"),
             reason,
@@ -1253,7 +1402,7 @@ async def resync_buzzer_ui_after_fair_play_return(
             logger.info(
                 "Skipping buzzer UI resync after Fair Play return for stale question: session=%s player=%s incoming=%s current=%s",
                 session_code,
-                player_id,
+                safe_player_ref(player_id),
                 question_id,
                 current_question_id,
             )
@@ -1269,7 +1418,7 @@ async def resync_buzzer_ui_after_fair_play_return(
         logger.info(
             "Resynced buzzer UI after Fair Play return: session=%s player=%s question=%s",
             session_code,
-            player_id,
+            safe_player_ref(player_id),
             current_question_id,
         )
 
@@ -1277,7 +1426,7 @@ async def resync_buzzer_ui_after_fair_play_return(
         logger.exception(
             "Failed to resync buzzer UI after Fair Play return: session=%s player=%s question=%s",
             session_code,
-            player_id,
+            safe_player_ref(player_id),
             question_id,
         )
 
@@ -1297,7 +1446,7 @@ async def handle_fair_play_focus_returned(
     logger.info(
         "FAIR PLAY RETURNED session=%s player=%s question=%s pending=%s",
         session_code,
-        player_id,
+        safe_player_ref(player_id),
         data.get("question_id"),
         bool(pending),
     )
@@ -1342,7 +1491,7 @@ async def handle_fair_play_focus_returned(
             logger.warning(
                 "Late focus_returned after grace expired; applying strike now: session=%s player=%s question=%s reason=%s elapsed_ms=%s grace_ms=%s returned_at=%s received_at=%s",
                 session_code,
-                player_id,
+                safe_player_ref(player_id),
                 pending_question_id,
                 pending_reason,
                 round(elapsed_ms),
@@ -1353,7 +1502,7 @@ async def handle_fair_play_focus_returned(
 
             manager.clear_pending_focus_loss(session_code, player_id)
 
-            db, db_generator = open_db_session()
+            db, db_generator = open_db_session(player_id)
             try:
                 await handle_focus_violation(
                     websocket=websocket,
@@ -1375,7 +1524,7 @@ async def handle_fair_play_focus_returned(
         logger.exception(
             "Could not calculate Fair Play grace elapsed time: session=%s player=%s pending=%s",
             session_code,
-            player_id,
+            safe_player_ref(player_id),
             pending,
         )
 
@@ -1384,14 +1533,14 @@ async def handle_fair_play_focus_returned(
     if cleared:
         manager.update_fair_play_status(
             session_code,
-            player_id,
+            safe_player_ref(player_id),
             connection_state="connected",
             answer_status=None,
         )
 
         await manager.broadcast_player_roster_update(session_code)
 
-        db, db_generator = open_db_session()
+        db, db_generator = open_db_session(player_id)
         try:
             await resync_buzzer_ui_after_fair_play_return(
                 session_code=session_code,
@@ -1407,8 +1556,7 @@ async def handle_fair_play_focus_returned(
                 "type": "fair_play_focus_grace_cleared",
                 "data": {
                     **cleared,
-                    "returned_at": data.get("returned_at")
-                    or iso_utc(datetime.utcnow()),
+                    "returned_at": data.get("returned_at") or iso_utc(utc_now()),
                 },
             },
             websocket,
@@ -1424,7 +1572,7 @@ async def finalize_focus_loss_after_grace(
     logger.warning(
         "FAIR PLAY GRACE FINALIZER START session=%s player=%s question=%s lost_at=%s",
         session_code,
-        player_id,
+        safe_player_ref(player_id),
         question_id,
         lost_at,
     )
@@ -1434,7 +1582,7 @@ async def finalize_focus_loss_after_grace(
     logger.warning(
         "FAIR PLAY GRACE FINALIZER CHECK session=%s player=%s question=%s expected_lost_at=%s pending=%s",
         session_code,
-        player_id,
+        safe_player_ref(player_id),
         question_id,
         lost_at,
         pending,
@@ -1446,7 +1594,7 @@ async def finalize_focus_loss_after_grace(
         logger.info(
             "FAIR PLAY GRACE FINALIZER STALE session=%s player=%s question=%s expected_lost_at=%s pending=%s",
             session_code,
-            player_id,
+            safe_player_ref(player_id),
             question_id,
             lost_at,
             pending,
@@ -1456,7 +1604,7 @@ async def finalize_focus_loss_after_grace(
     logger.warning(
         "FAIR PLAY GRACE FINALIZER AWARDING STRIKE session=%s player=%s question=%s reason=%s lost_at=%s pending=%s",
         session_code,
-        player_id,
+        safe_player_ref(player_id),
         question_id,
         pending.get("reason"),
         lost_at,
@@ -1464,7 +1612,7 @@ async def finalize_focus_loss_after_grace(
     )
 
     manager.clear_pending_focus_loss(session_code, player_id)
-    db, db_generator = open_db_session()
+    db, db_generator = open_db_session(player_id)
     try:
         await handle_focus_violation(
             websocket=None,
@@ -1485,6 +1633,7 @@ async def schedule_absent_player_fair_play_checks(
     session_code: str,
     question_id: str,
     grace_ms: int = FAIR_PLAY_GRACE_PERIOD_MS,
+    acting_player_id: Optional[str] = None,
 ):
     """Strike eligible players who are still absent shortly after a question starts."""
     await asyncio.sleep(grace_ms / 1000)
@@ -1495,7 +1644,7 @@ async def schedule_absent_player_fair_play_checks(
     ):
         return
 
-    db, db_generator = open_db_session()
+    db, db_generator = open_db_session(acting_player_id)
     try:
         game_state = get_game_session_state(db, session_code)
         if not game_state or not getattr(game_state, "fair_play_enabled", False):
@@ -1518,7 +1667,7 @@ async def schedule_absent_player_fair_play_checks(
                 data={
                     "question_id": question_id,
                     "reason": "not_present_when_question_started",
-                    "occurred_at": iso_utc(datetime.utcnow()),
+                    "occurred_at": iso_utc(utc_now()),
                 },
                 db=db,
             )
@@ -1544,7 +1693,7 @@ async def advance_after_fair_play_if_ready(
         updated_game_state = get_game_session_state(db, session_code)
         if updated_game_state and updated_game_state.current_question_id:
             manager.clear_question_queue(session_code)
-            question_start_at = datetime.utcnow() + timedelta(
+            question_start_at = utc_now() + timedelta(
                 milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
             )
             await reveal_current_question(
@@ -1598,7 +1747,7 @@ async def apply_buzzer_fair_play_freeze(
             logger.info(
                 "Fair Play froze current buzzer winner; reopening buzzes: session=%s player=%s question=%s",
                 session_code,
-                player_id,
+                safe_player_ref(player_id),
                 question_id,
             )
 
@@ -1611,7 +1760,7 @@ async def apply_buzzer_fair_play_freeze(
             logger.info(
                 "Fair Play froze non-winner while buzzer open; keeping buzzes active: session=%s player=%s question=%s",
                 session_code,
-                player_id,
+                safe_player_ref(player_id),
                 question_id,
             )
 
@@ -1623,7 +1772,7 @@ async def apply_buzzer_fair_play_freeze(
             logger.info(
                 "Fair Play froze non-winner while another player is answering; keeping current buzzer winner: session=%s player=%s winner=%s question=%s",
                 session_code,
-                player_id,
+                safe_player_ref(player_id),
                 state.get("current_buzzer_winner"),
                 question_id,
             )
@@ -1646,7 +1795,7 @@ async def apply_buzzer_fair_play_freeze(
         logger.exception(
             "Failed to apply buzzer Fair Play freeze: session=%s player=%s question=%s",
             session_code,
-            player_id,
+            safe_player_ref(player_id),
             question_id,
         )
 
@@ -1703,6 +1852,7 @@ async def handle_focus_violation(
     )
     status_payload = {
         "player_id": player_id,
+        "roster_player_id": make_roster_player_id(session_code, player_id),
         "player_name": player_name,
         "question_id": question_id,
         "strike_count": record.strike_count,
@@ -1828,6 +1978,9 @@ async def kick_player_for_fair_play(
                 "type": "fair_play_status_update",
                 "data": {
                     "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(
+                        session_code, player_id
+                    ),
                     "player_name": player_name,
                     "strike_count": max_strikes,
                     "max_strikes": max_strikes,
@@ -1846,6 +1999,9 @@ async def kick_player_for_fair_play(
                 "type": "kicked_from_session",
                 "data": {
                     "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(
+                        session_code, player_id
+                    ),
                     "player_name": player_name,
                     "reason": "fair_play_strikes",
                     "strike_count": max_strikes,
@@ -1872,6 +2028,7 @@ async def kick_player_for_fair_play(
             "type": "player_kicked",
             "data": {
                 "player_id": player_id,
+                "roster_player_id": make_roster_player_id(session_code, player_id),
                 "player_name": player_name,
                 "reason": "fair_play_strikes",
                 "strike_count": max_strikes,
@@ -1907,7 +2064,11 @@ async def handle_get_question_with_options(
         )
 
 
-async def handle_broadcast_current_question(session_code: str, db: Session):
+async def handle_broadcast_current_question(
+    session_code: str,
+    db: Session,
+    acting_player_id: Optional[str] = None,
+):
     """
     Handle legacy request to reveal the current question.
 
@@ -1932,6 +2093,7 @@ async def handle_broadcast_current_question(session_code: str, db: Session):
             current_question_id=game_state.current_question_id,
             current_question_index=game_state.current_question_index,
             total_questions=game_state.total_questions,
+            acting_player_id=acting_player_id,
         )
 
     except Exception as e:
@@ -1942,7 +2104,56 @@ async def handle_broadcast_current_question(session_code: str, db: Session):
         )
 
 
-async def handle_game_start(session_code: str, game_handler, db: Session):
+async def ensure_current_question_ready_for_countdown(
+    session_code: str,
+    db: Session,
+    reason: str,
+):
+    game_state = get_game_session_state(db, session_code)
+    game_status = (
+        get_current_question_details(db, session_code)
+        if game_state and game_state.current_question_id
+        else None
+    )
+
+    if (
+        game_state
+        and game_state.current_question_id
+        and game_status
+        and game_status.get("current_question")
+    ):
+        return game_state
+
+    logger.error(
+        "Cannot start countdown for %s after %s; current question is not visible. "
+        "game_state_exists=%s current_question_id=%s game_status=%s",
+        session_code,
+        reason,
+        bool(game_state),
+        getattr(game_state, "current_question_id", None),
+        game_status,
+    )
+    manager.set_session_phase(session_code, SessionPhase.LOBBY)
+    await manager.broadcast_to_session(
+        session_code,
+        {
+            "type": "error",
+            "data": {
+                "message": "The current question could not be loaded. Please restart the session.",
+                "reason": "current_question_not_visible",
+            },
+        },
+        critical=True,
+    )
+    return None
+
+
+async def handle_game_start(
+    session_code: str,
+    game_handler,
+    db: Session,
+    acting_player_id: Optional[str] = None,
+):
     """Handle game start event"""
     try:
         logger.info(f"ðŸŽ® Starting game for session {session_code}")
@@ -1992,6 +2203,43 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
         # Get current game state to get the current question ID
         game_state = get_game_session_state(db, session_code)
         current_question = None
+
+        game_status = (
+            get_current_question_details(db, session_code)
+            if game_state and game_state.current_question_id
+            else None
+        )
+        if (
+            not game_state
+            or not game_state.current_question_id
+            or not game_status
+            or not game_status.get("current_question")
+        ):
+            logger.error(
+                "Cannot start game for %s; current question is not visible. "
+                "game_state_exists=%s current_question_id=%s game_status=%s",
+                session_code,
+                bool(game_state),
+                getattr(game_state, "current_question_id", None),
+                game_status,
+            )
+            if game_state:
+                game_state.isstarted = False
+                game_state.is_waiting_for_players = True
+                db.commit()
+            manager.set_session_phase(session_code, SessionPhase.LOBBY)
+            await manager.broadcast_to_session(
+                session_code,
+                {
+                    "type": "error",
+                    "data": {
+                        "message": "The first question could not be loaded. Please restart the session.",
+                        "reason": "current_question_not_visible",
+                    },
+                },
+                critical=True,
+            )
+            return
 
         # Get first question data to include in game_started event
         first_question_data = None
@@ -2193,7 +2441,12 @@ async def handle_game_start(session_code: str, game_handler, db: Session):
         logger.error(f"Error starting game: {e}", exc_info=True)
 
 
-async def handle_next_question(session_code: str, game_handler, db: Session):
+async def handle_next_question(
+    session_code: str,
+    game_handler,
+    db: Session,
+    acting_player_id: Optional[str] = None,
+):
     """Handle moving to next question"""
     try:
         from app.logic.game_logic import get_game_session_state
@@ -2204,7 +2457,12 @@ async def handle_next_question(session_code: str, game_handler, db: Session):
             logger.error(f"No current question found for session {session_code}")
             return
 
-        await advance_or_end_current_question(session_code, db, reason="next_question")
+        await advance_or_end_current_question(
+            session_code,
+            db,
+            reason="next_question",
+            acting_player_id=acting_player_id,
+        )
 
     except Exception as e:
         logger.error(f"Error advancing to next question: {e}")
@@ -2267,7 +2525,10 @@ async def websocket_health_check():
 
 
 @router.get("/ws/sessions/{session_code}/stats")
-async def get_session_websocket_stats(session_code: str):
+async def get_session_websocket_stats(
+    session_code: str,
+    _: str = Depends(require_admin_api_key),
+):
     """Get WebSocket connection statistics for a session"""
     stats = manager.get_session_stats(session_code)
     return {"session_code": session_code, "stats": stats}
@@ -2275,7 +2536,10 @@ async def get_session_websocket_stats(session_code: str):
 
 @router.post("/ws/sessions/{session_code}/broadcast")
 async def broadcast_to_session(
-    session_code: str, message: dict, client_type: Optional[str] = None
+    session_code: str,
+    message: dict,
+    client_type: Optional[str] = None,
+    _: str = Depends(require_admin_api_key),
 ):
     """Broadcast a message to all clients in a session (admin endpoint)"""
     try:

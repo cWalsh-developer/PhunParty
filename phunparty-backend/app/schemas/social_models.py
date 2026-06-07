@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     Boolean,
@@ -19,6 +19,10 @@ def uuid_text() -> str:
     return str(uuid.uuid4())
 
 
+def utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
 class FriendRequest(Base):
     __tablename__ = "friend_requests"
 
@@ -31,7 +35,7 @@ class FriendRequest(Base):
     )
     status = Column(String, nullable=False, default="pending", index=True)
     message = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
     responded_at = Column(DateTime, nullable=True)
 
     __table_args__ = (
@@ -52,7 +56,7 @@ class Friendship(Base):
     player_high_id = Column(
         String, ForeignKey("players.player_id"), nullable=False, index=True
     )
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
 
     __table_args__ = (
         CheckConstraint(
@@ -82,7 +86,7 @@ class Notification(Base):
     body = Column(String, nullable=False)
     data = Column(JSON, nullable=True)
     is_read = Column(Boolean, default=False, nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
     read_at = Column(DateTime, nullable=True)
 
 
@@ -97,5 +101,5 @@ class UserPushToken(Base):
     device_id = Column(String, nullable=True)
     platform = Column(String, nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, nullable=False)

@@ -6,11 +6,15 @@ Handles real-time communication between web UI and mobile app
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+import time
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Union
 
 from fastapi import WebSocket, WebSocketDisconnect
+
+from app.security.loggingUtils import safe_player_ref
+from app.security.roster_identity import make_roster_player_id
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +47,17 @@ class ConnectionManager:
         "question_started",
         "game_ended",
     }
+    WEB_PRIVATE_ID_KEYS = {
+        "player_id",
+        "player_ids",
+        "owner_player_id",
+        "sender_player_id",
+        "receiver_player_id",
+        "recipient_player_id",
+        "actor_player_id",
+        "current_buzzer_winner",
+        "frozen_players",
+    }
 
     def __init__(self):
         # session_code -> {websocket_id: {websocket, client_type, player_info}}
@@ -69,6 +84,7 @@ class ConnectionManager:
         # session_code -> terminal/final session snapshot kept after game end
         self.terminal_sessions: Dict[str, Dict[str, Any]] = {}
         self.pending_acks: Dict[str, Dict[str, Any]] = {}
+        self._missing_connection_warning_at: Dict[str, float] = {}
         # session_code:player_id values for players who explicitly left.
         self.intentional_leaves: Set[str] = set()
         # player leave tasks: "session_code:player_id" -> asyncio.Task
@@ -79,6 +95,46 @@ class ConnectionManager:
         self._ping_task = None
         self._start_heartbeat_checker()
         self._start_automatic_ping()
+
+    def _connection_info_for_websocket(
+        self, websocket: WebSocket
+    ) -> Optional[Dict[str, Any]]:
+        for registry_info in self.websocket_registry.values():
+            if registry_info.get("websocket") != websocket:
+                continue
+
+            session_code = registry_info.get("session_code")
+            for connection_info in self.active_connections.get(
+                session_code, {}
+            ).values():
+                if connection_info.get("websocket") == websocket:
+                    return connection_info
+
+        return None
+
+    def _sanitize_for_web_client(self, value: Any) -> Any:
+        if isinstance(value, list):
+            return [self._sanitize_for_web_client(item) for item in value]
+
+        if not isinstance(value, dict):
+            return value
+
+        sanitized: Dict[str, Any] = {}
+        for key, item in value.items():
+            if key in self.WEB_PRIVATE_ID_KEYS:
+                continue
+
+            sanitized[key] = self._sanitize_for_web_client(item)
+
+        return sanitized
+
+    def _outbound_message_for_connection(
+        self, message: Dict[str, Any], connection_info: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        if connection_info and connection_info.get("client_type") == "web":
+            return self._sanitize_for_web_client(message)
+
+        return message
 
     def _player_task_key(self, session_code: str, player_id: str) -> str:
         return f"{session_code}:{player_id}"
@@ -137,6 +193,9 @@ class ConnectionManager:
                         "type": "player_left",
                         "data": {
                             "player_id": player_id,
+                            "roster_player_id": make_roster_player_id(
+                                session_code, player_id
+                            ),
                             "player_name": player_name,
                             "timestamp": datetime.now().isoformat(),
                         },
@@ -168,10 +227,13 @@ class ConnectionManager:
         return f"ws_{id(websocket)}_{datetime.now().timestamp()}"
 
     def _utc_now_ms(self) -> int:
-        return int(datetime.utcnow().timestamp() * 1000)
+        return int(time.time() * 1000)
+
+    def _utc_now(self) -> datetime:
+        return datetime.now(UTC).replace(tzinfo=None)
 
     def _utc_now_iso(self) -> str:
-        return datetime.utcnow().isoformat() + "Z"
+        return self._utc_now().isoformat() + "Z"
 
     def make_event_id(
         self, session_code: str, event_type: str, data: Optional[Dict[str, Any]] = None
@@ -405,7 +467,7 @@ class ConnectionManager:
         player_id: Optional[str] = None,
         player_name: Optional[str] = None,
         player_photo: Optional[str] = None,
-    ):
+    ) -> bool:
         """Connect a client to a game session"""
         await websocket.accept()
 
@@ -453,31 +515,38 @@ class ConnectionManager:
             f"Client connected: {client_type} to session {session_code} (ws_id: {ws_id}, player: {player_name or 'N/A'})"
         )
         logger.info(
-            "CONNECT DEBUG session=%s client_type=%s player_id=%s player_name=%s player_photo=%s",
+            "CONNECT DEBUG session=%s client_type=%s player_ref=%s player_name=%s player_photo=%s",
             session_code,
             client_type,
-            player_id,
+            safe_player_ref(player_id),
             player_name,
             player_photo,
         )
 
         # Send connection confirmation to the connecting client and wait for ack
         try:
+            connection_established_message = {
+                "type": "connection_established",
+                "data": {
+                    "ws_id": ws_id,
+                    "session_code": session_code,
+                    "client_type": client_type,
+                    "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(
+                        session_code, player_id
+                    ),
+                    "player_name": player_name,
+                    "timestamp": datetime.now().isoformat(),
+                    "requires_ack": True,
+                },
+                "timestamp": datetime.now().timestamp(),
+            }
             await websocket.send_text(
                 json.dumps(
-                    {
-                        "type": "connection_established",
-                        "data": {
-                            "ws_id": ws_id,
-                            "session_code": session_code,
-                            "client_type": client_type,
-                            "player_id": player_id,
-                            "player_name": player_name,
-                            "timestamp": datetime.now().isoformat(),
-                            "requires_ack": True,
-                        },
-                        "timestamp": datetime.now().timestamp(),
-                    }
+                    self._outbound_message_for_connection(
+                        connection_established_message,
+                        connection_info,
+                    )
                 )
             )
 
@@ -491,7 +560,7 @@ class ConnectionManager:
             logger.error(f"Failed to send connection confirmation: {e}")
             # Clean up partially registered connection to avoid ghost players.
             self.disconnect(websocket)
-            return
+            return False
 
         # If this is a reconnect, cancel pending delayed leave for this player.
         if client_type == "mobile" and player_id:
@@ -525,6 +594,9 @@ class ConnectionManager:
                         "type": "player_joined",
                         "data": {
                             "player_id": player_id,
+                            "roster_player_id": make_roster_player_id(
+                                session_code, player_id
+                            ),
                             "player_name": player_name,
                             "player_photo": player_photo,
                             "timestamp": datetime.now().isoformat(),
@@ -551,6 +623,8 @@ class ConnectionManager:
             logger.info(
                 f"✅ Mobile join flow completed for {player_name} in session {session_code}"
             )
+
+        return True
 
     def disconnect(self, websocket: WebSocket):
         """Disconnect a client"""
@@ -642,13 +716,13 @@ class ConnectionManager:
         ttl_seconds: int = 900,
     ) -> Dict[str, Any]:
         """Keep final session/Fair Play state briefly after the live session ends."""
-        expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds)
+        expires_at = self._utc_now() + timedelta(seconds=ttl_seconds)
 
         terminal_snapshot = {
             **snapshot,
             "session_code": session_code,
             "terminal": True,
-            "cached_at": datetime.utcnow().isoformat() + "Z",
+            "cached_at": self._utc_now_iso(),
             "expires_at": expires_at.isoformat() + "Z",
         }
 
@@ -677,7 +751,7 @@ class ConnectionManager:
             self.terminal_sessions.pop(session_code, None)
             return None
 
-        if datetime.utcnow() > expires_at:
+        if self._utc_now() > expires_at:
             self.terminal_sessions.pop(session_code, None)
             return None
 
@@ -741,8 +815,13 @@ class ConnectionManager:
         """Send message to specific WebSocket with retry logic"""
         for attempt in range(retries + 1):
             try:
+                connection_info = self._connection_info_for_websocket(websocket)
+                outbound_message = self._outbound_message_for_connection(
+                    {**message, "timestamp": datetime.now().timestamp()},
+                    connection_info,
+                )
                 await websocket.send_text(
-                    json.dumps({**message, "timestamp": datetime.now().timestamp()})
+                    json.dumps(outbound_message)
                 )
                 return True
             except WebSocketDisconnect:
@@ -824,9 +903,17 @@ class ConnectionManager:
     ):
         """Broadcast message to all clients in a session with filtering options and reliability"""
         if session_code not in self.active_connections:
-            logger.warning(
-                f"Cannot broadcast to session {session_code} - no active connections"
+            message_type = message.get("type", "event")
+            warning_key = f"{session_code}:{message_type}"
+            now = time.time()
+            last_warning_at = self._missing_connection_warning_at.get(warning_key, 0)
+            log = logger.warning if now - last_warning_at >= 30 else logger.debug
+            log(
+                "Cannot broadcast %s to session %s - no active connections",
+                message_type,
+                session_code,
             )
+            self._missing_connection_warning_at[warning_key] = now
             return
 
         exclude_websockets = exclude_websockets or []
@@ -894,7 +981,11 @@ class ConnectionManager:
 
             for attempt in range(max_attempts):
                 try:
-                    await websocket.send_text(json.dumps(message_with_timestamp))
+                    outbound_message = self._outbound_message_for_connection(
+                        message_with_timestamp,
+                        connection_info,
+                    )
+                    await websocket.send_text(json.dumps(outbound_message))
                     if should_require_ack:
                         self._track_ack_target(
                             message_with_timestamp["event_id"],
@@ -929,8 +1020,13 @@ class ConnectionManager:
                         )
                         disconnected_websockets.append(websocket)
 
-        logger.debug(
-            f"✅ Broadcast complete: {success_count}/{total_targets} clients received '{message.get('type')}' (📱mobile: {mobile_sent}, 💻web: {web_sent})"
+        logger.info(
+            "Broadcast complete: %s/%s clients received %s (mobile=%s, web=%s)",
+            success_count,
+            total_targets,
+            message.get("type"),
+            mobile_sent,
+            web_sent,
         )
 
         # Clean up disconnected websockets
@@ -960,7 +1056,9 @@ class ConnectionManager:
             # Log details about connected mobile clients
             for conn in mobile_connections:
                 logger.debug(
-                    f"📱 Mobile client: player_id={conn.get('player_id')}, ws_id={conn.get('ws_id')}"
+                    "Mobile client: player_ref=%s, ws_id=%s",
+                    safe_player_ref(conn.get("player_id")),
+                    conn.get("ws_id"),
                 )
 
         await self.broadcast_to_session(
@@ -1002,6 +1100,7 @@ class ConnectionManager:
 
             player_data = {
                 "player_id": player_id,
+                "roster_player_id": make_roster_player_id(session_code, player_id),
                 "player_name": player_name,
                 "player_photo": connection_info.get("player_photo"),
                 "connected_at": connection_info.get("connected_at"),
@@ -1035,7 +1134,7 @@ class ConnectionManager:
             "ROSTER DEBUG session=%s players=%s",
             session_code,
             [
-                (player.get("player_name"), player.get("player_id"))
+                (player.get("player_name"), player.get("roster_player_id"))
                 for player in deduped_players
             ],
         )
@@ -1066,9 +1165,7 @@ class ConnectionManager:
             # Find the websocket object by ID
             if websocket_id in self.websocket_registry:
                 websocket = self.websocket_registry[websocket_id]["websocket"]
-                await websocket.send_text(
-                    json.dumps({**message, "timestamp": datetime.now().timestamp()})
-                )
+                await self.send_personal_message(message, websocket)
             else:
                 logger.warning(f"WebSocket ID {websocket_id} not found in registry")
         except Exception as e:
@@ -1562,7 +1659,7 @@ class ConnectionManager:
 
                     ping_message = {
                         "type": "ping",
-                        "serverTime": int(datetime.utcnow().timestamp() * 1000),
+                        "serverTime": self._utc_now_ms(),
                         "auto": True,  # Mark as automatic server ping
                     }
 
@@ -1699,10 +1796,21 @@ class ConnectionManager:
 
     def format_buzzer_state_update(self, session_code: str) -> Dict[str, Any]:
         state = self.get_buzzer_state(session_code)
+        current_winner = state.get("current_buzzer_winner")
+        frozen_players = list(state.get("frozen_players", set()))
         return {
             "question_id": state.get("current_question_id"),
-            "current_buzzer_winner": state.get("current_buzzer_winner"),
-            "frozen_players": list(state.get("frozen_players", set())),
+            "current_buzzer_winner": current_winner,
+            "current_buzzer_winner_roster_id": make_roster_player_id(
+                session_code, current_winner
+            )
+            if current_winner
+            else None,
+            "frozen_players": frozen_players,
+            "frozen_roster_player_ids": [
+                make_roster_player_id(session_code, player_id)
+                for player_id in frozen_players
+            ],
             "question_active": state.get("question_active", False),
             "transitioning": state.get("transitioning", False),
             "accepting_buzzes": state.get("accepting_buzzes", False),

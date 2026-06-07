@@ -1,6 +1,8 @@
+from datetime import UTC, datetime
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database.dbCRUD import (
@@ -13,43 +15,90 @@ from app.database.dbCRUD import (
     get_player_by_ID,
     update_player,
 )
-from app.dependencies import get_api_key, get_db
+from app.dependencies import get_current_player, get_db, require_admin_api_key
 from app.models.players import Player, PlayerUpdate
 from app.models.response_models import PlayerResponse
+from app.schemas.players_model import Players
+from app.schemas.session_player_assignment_model import SessionAssignment
+from app.security.ownership import assert_same_player
+from app.security.rate_limit import enforce_rate_limit, get_client_ip
 
-router = APIRouter(dependencies=[Depends(get_api_key)])
+router = APIRouter()
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 @router.post("/create", tags=["Players"])
-def create_player_route(player: Player, db: Session = Depends(get_db)):
-    """
-    Create a new player in the game.
-    """
+async def create_player_route(
+    request: Request,
+    player: Player,
+    db: Session = Depends(get_db),
+):
+    await enforce_rate_limit(
+        request,
+        scope="register-ip",
+        identifier=get_client_ip(request),
+        limit=5,
+        window_seconds=3600,
+    )
+    await enforce_rate_limit(
+        request,
+        scope="register-email",
+        identifier=player.player_email,
+        limit=3,
+        window_seconds=3600,
+    )
+
     try:
         existing_player = get_player_by_email(db, player.player_email)
         if existing_player:
             raise HTTPException(
                 status_code=400, detail="Account with this email already exists"
             )
-        game = create_player(
+        return create_player(
             db,
             player.player_name,
             player.player_email,
             player.player_mobile,
             player.hashed_password,
         )
-        return game
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail="Account with this email or phone number already exists",
+        )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Failed to create account")
 
 
+@router.get("/me", response_model=PlayerResponse, tags=["Players"])
+def get_me(current_player: Players = Depends(get_current_player)):
+    return current_player
+
+
+@router.get("/me/owned-sessions", tags=["Players"])
+def get_my_owned_sessions(
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
+    return get_all_sessions_from_player(db, current_player.player_id)
+
+
 @router.get("/{player_id}", response_model=PlayerResponse, tags=["Players"])
-def get_player_route(player_id: str, db: Session = Depends(get_db)):
-    """
-    Retrieve a player by their ID.
-    """
+def get_player_route(
+    player_id: str,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
+    assert_same_player(current_player, player_id)
+
     try:
         player = get_player_by_ID(db, player_id)
         if not player:
@@ -57,17 +106,17 @@ def get_player_route(player_id: str, db: Session = Depends(get_db)):
         return player
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=500, detail="Unable to retrieve player information"
         )
 
 
 @router.get("/", response_model=List[PlayerResponse], tags=["Players"])
-def get_all_players_route(db: Session = Depends(get_db)):
-    """
-    Retrieve all players in the game.
-    """
+def get_all_players_route(
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin_api_key),
+):
     try:
         players = get_all_players(db)
         if not players:
@@ -75,40 +124,40 @@ def get_all_players_route(db: Session = Depends(get_db)):
         return players
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Unable to retrieve players list")
 
 
 @router.delete("/{player_id}", tags=["Players"])
-def delete_player_route(player_id: str, db: Session = Depends(get_db)):
-    """
-    Deactivate a player account (30-day grace period before permanent deletion).
-    """
+def delete_player_route(
+    player_id: str,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
+    assert_same_player(current_player, player_id)
+
     try:
         player = get_player_by_ID(db, player_id)
         if not player:
             raise HTTPException(status_code=404, detail="Player not found")
-
-        # This now deactivates the account instead of immediately deleting
-        result = delete_player(db, player_id)
-        return result
+        return delete_player(db, player_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to deactivate account: {str(e)}"
-        )
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to deactivate account")
 
 
 @router.put("/{player_id}", tags=["Players"])
 def update_player_route(
-    player_id: str, player: PlayerUpdate, db: Session = Depends(get_db)
+    player_id: str,
+    player: PlayerUpdate,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
 ):
-    """
-    Update the name of a player.
-    """
+    assert_same_player(current_player, player_id)
+
     try:
         existing_player = get_player_by_ID(db, player_id)
         if not existing_player:
@@ -117,32 +166,33 @@ def update_player_route(
         if not updated_player:
             raise HTTPException(status_code=400, detail="Failed to update player")
         return updated_player
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail="Account with this email or phone number already exists",
+        )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=500, detail="Unable to update player information"
         )
 
 
-@router.get(
-    "/allOwnedSessions/{player_id}",
-    tags=["Players"],
-)
-def get_all_sessions_route(player_id: str, db: Session = Depends(get_db)):
-    """
-    Get all active game sessions for a specific player.
-    """
+@router.get("/allOwnedSessions/{player_id}", tags=["Players"])
+def get_all_sessions_route(
+    player_id: str,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
+    assert_same_player(current_player, player_id)
+
     try:
-        sessions = get_all_sessions_from_player(db, player_id)
-        if not sessions:
-            raise HTTPException(
-                status_code=404, detail="No active sessions found for this player"
-            )
-        return sessions
-    except HTTPException:
-        raise
-    except Exception as e:
+        return get_all_sessions_from_player(db, player_id)
+    except Exception:
         raise HTTPException(
             status_code=500, detail="Unable to retrieve player sessions"
         )
@@ -151,10 +201,13 @@ def get_all_sessions_route(player_id: str, db: Session = Depends(get_db)):
 @router.get(
     "/allSessions/{player_id}", response_model=List[PlayerResponse], tags=["Players"]
 )
-def get_player_gameplay_history(player_id: str, db: Session = Depends(get_db)):
-    """
-    Get the gameplay history for a specific player.
-    """
+def get_player_gameplay_history(
+    player_id: str,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
+    assert_same_player(current_player, player_id)
+
     try:
         history = get_game_history_for_player(db, player_id)
         if not history:
@@ -164,30 +217,25 @@ def get_player_gameplay_history(player_id: str, db: Session = Depends(get_db)):
         return history
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=500, detail="Unable to retrieve gameplay history"
         )
 
 
 @router.post("/leave-session/{player_id}", tags=["Players"])
-def leave_session_route(player_id: str, db: Session = Depends(get_db)):
-    """
-    Leave a game session.
-    """
+def leave_session_route(
+    player_id: str,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
+    assert_same_player(current_player, player_id)
+
     try:
-        # Check if player exists first
         player = get_player_by_ID(db, player_id)
 
         if player:
-            # Update player's active game code to None
             player.active_game_code = None
-
-            # Also clear any session assignments for this player
-            from app.schemas.session_player_assignment_model import SessionAssignment
-            from datetime import datetime
-
-            # End any active session assignments (those without session_end)
             active_assignments = (
                 db.query(SessionAssignment)
                 .filter(SessionAssignment.player_id == player_id)
@@ -196,31 +244,26 @@ def leave_session_route(player_id: str, db: Session = Depends(get_db)):
             )
 
             for assignment in active_assignments:
-                assignment.session_end = datetime.utcnow()
+                assignment.session_end = utc_now()
 
             db.commit()
 
-        # Always return success - if player doesn't exist, they're not in a session anyway
         return {"detail": "Player left the session successfully"}
-    except Exception as e:
+    except Exception:
         db.rollback()
-        raise HTTPException(
-            status_code=500, detail=f"Failed to leave session: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail="Failed to leave session")
 
 
 @router.get("/debug/player-status/{player_id}", tags=["Players"])
-def get_player_status_route(player_id: str, db: Session = Depends(get_db)):
-    """
-    Debug endpoint: Get detailed player status.
-    """
+def get_player_status_route(
+    player_id: str,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin_api_key),
+):
     try:
         player = get_player_by_ID(db, player_id)
         if not player:
             raise HTTPException(status_code=404, detail="Player not found")
-
-        # Get active assignments
-        from app.schemas.session_player_assignment_model import SessionAssignment
 
         active_assignments = (
             db.query(SessionAssignment)
@@ -244,7 +287,5 @@ def get_player_status_route(player_id: str, db: Session = Depends(get_db)):
         }
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to get player status: {str(e)}"
-        )
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to get player status")

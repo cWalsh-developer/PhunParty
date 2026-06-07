@@ -1,4 +1,6 @@
 from pydantic import BaseModel
+from typing import Optional
+from pydantic import BaseModel, ConfigDict
 
 
 class GameCreation(BaseModel):
@@ -7,14 +9,16 @@ class GameCreation(BaseModel):
 
 
 class GameSessionCreation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     host_name: str
     number_of_questions: int
     game_code: str
-    owner_player_id: str  # Added to track session owner
-    ispublic: bool = True  # New field to indicate if the session is public
-    difficulty: str = None  # Optional difficulty level: 'easy', 'medium', or 'hard'
+    ispublic: bool = True
+    difficulty: Optional[str] = None
 
 
 class GameJoinRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     session_code: str
-    player_id: str

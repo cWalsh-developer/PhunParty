@@ -1,20 +1,26 @@
 import glob
 import os
 import uuid
+from io import BytesIO
 from pathlib import Path
 
+from PIL import Image
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.database.dbCRUD import get_player_by_ID
-from app.dependencies import get_api_key, get_db
+from app.database.dbCRUD import get_player_by_ID, update_player_photo
+from app.dependencies import get_current_player, get_db, require_admin_api_key
+from app.schemas.players_model import Players
+from app.security.ownership import assert_same_player
 
 # Create photos directory if it doesn't exist
 UPLOAD_DIR = Path("uploads/photos")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Allowed image formats
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
 # DiceBear avatar styles for generated avatars
@@ -28,7 +34,7 @@ DICEBEAR_STYLES = [
     "personas",
 ]
 
-router = APIRouter(dependencies=[Depends(get_api_key)])
+router = APIRouter()
 
 
 def cleanup_old_player_photos(player_id: str, upload_dir: Path = UPLOAD_DIR):
@@ -99,43 +105,69 @@ def cleanup_old_player_photos_safe(
         print(f"❌ Error during safe photo cleanup for player {player_id}: {e}")
 
 
-def is_valid_image(filename: str) -> bool:
-    """Check if the file has a valid image extension."""
-    return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
+def validate_uploaded_image(filename: str, content: bytes) -> str:
+    if not filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Invalid image extension")
+
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="File too large. Max size: 5MB")
+
+    try:
+        image = Image.open(BytesIO(content))
+        image.verify()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Uploaded file is not a valid image")
+
+    image = Image.open(BytesIO(content))
+    if image.format not in ALLOWED_IMAGE_FORMATS:
+        raise HTTPException(status_code=400, detail="Unsupported image format")
+
+    return suffix
+
+
+def safe_photo_path(filename: str) -> Path:
+    safe_name = Path(filename).name
+    if safe_name != filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    file_path = UPLOAD_DIR / safe_name
+    resolved_upload_dir = UPLOAD_DIR.resolve()
+    resolved_file_path = file_path.resolve()
+
+    if not str(resolved_file_path).startswith(str(resolved_upload_dir)):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    return file_path
 
 
 @router.post("/upload/{player_id}", tags=["Photos"])
 async def upload_player_photo(
-    player_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)
+    player_id: str,
+    file: UploadFile = File(...),
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
 ):
     """
     Upload a profile photo for a player.
     """
+    assert_same_player(current_player, player_id)
+
     try:
         # Check if player exists
         player = get_player_by_ID(db, player_id)
         if not player:
             raise HTTPException(status_code=404, detail="Player not found")
 
-        # Validate file
-        if not file.filename:
-            raise HTTPException(status_code=400, detail="No file provided")
-
-        if not is_valid_image(file.filename):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
-            )
-
-        # Check file size
         file_content = await file.read()
-        if len(file_content) > MAX_FILE_SIZE:
-            raise HTTPException(status_code=400, detail="File too large. Max size: 5MB")
+        file_extension = validate_uploaded_image(file.filename, file_content)
 
         cleanup_old_player_photos(player_id, UPLOAD_DIR)
 
         # Generate unique filename
-        file_extension = Path(file.filename).suffix.lower()
         unique_filename = f"{player_id}_{uuid.uuid4()}{file_extension}"
         file_path = UPLOAD_DIR / unique_filename
 
@@ -147,8 +179,6 @@ async def upload_player_photo(
         photo_url = f"/photos/{unique_filename}"
 
         # Update player in database
-        from app.database.dbCRUD import update_player_photo
-
         update_player_photo(db, player_id, photo_url)
 
         return {
@@ -166,10 +196,16 @@ async def upload_player_photo(
 
 
 @router.delete("/{player_id}/photo", tags=["Photos"])
-async def delete_player_photo(player_id: str, db: Session = Depends(get_db)):
+async def delete_player_photo(
+    player_id: str,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
     """
     Delete a player's profile photo.
     """
+    assert_same_player(current_player, player_id)
+
     try:
         player = get_player_by_ID(db, player_id)
         if not player:
@@ -180,15 +216,13 @@ async def delete_player_photo(player_id: str, db: Session = Depends(get_db)):
 
         # Extract filename from URL
         filename = player.profile_photo_url.split("/")[-1]
-        file_path = UPLOAD_DIR / filename
+        file_path = safe_photo_path(filename)
 
         # Delete file if it exists
         if file_path.exists():
             file_path.unlink()
 
         # Update database
-        from app.database.dbCRUD import update_player_photo
-
         update_player_photo(db, player_id, None)
 
         return {"message": "Photo deleted successfully"}
@@ -203,11 +237,14 @@ async def set_player_avatar(
     player_id: str,
     avatar_style: str,
     avatar_seed: str = "default",
+    current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
     """
     Set a DiceBear generated avatar for a player.
     """
+    assert_same_player(current_player, player_id)
+
     try:
         # Check if player exists
         player = get_player_by_ID(db, player_id)
@@ -231,8 +268,6 @@ async def set_player_avatar(
         )
 
         # Update player in database
-        from app.database.dbCRUD import update_player_photo
-
         update_player_photo(db, player_id, avatar_url)
 
         return {
@@ -327,13 +362,10 @@ async def get_photo(filename: str):
     Serve a photo file.
     """
     try:
-        file_path = UPLOAD_DIR / filename
+        file_path = safe_photo_path(filename)
 
         if not file_path.exists():
             raise HTTPException(status_code=404, detail="Photo not found")
-
-        # You might want to use FileResponse here for better performance
-        from fastapi.responses import FileResponse
 
         return FileResponse(
             path=file_path,
@@ -347,7 +379,10 @@ async def get_photo(filename: str):
 
 
 @router.delete("/maintenance/cleanup-orphaned", tags=["Photos"])
-async def cleanup_orphaned_photos(db: Session = Depends(get_db)):
+async def cleanup_orphaned_photos(
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin_api_key),
+):
     """
     Maintenance endpoint to clean up orphaned photos (files that exist but aren't referenced in database).
     Use with caution - only run this occasionally for maintenance.
@@ -391,7 +426,7 @@ async def cleanup_orphaned_photos(db: Session = Depends(get_db)):
 
 
 @router.get("/maintenance/storage-info", tags=["Photos"])
-async def get_storage_info():
+async def get_storage_info(_: str = Depends(require_admin_api_key)):
     """
     Get information about photo storage usage.
     """

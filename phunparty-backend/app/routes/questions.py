@@ -5,16 +5,21 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database.dbCRUD import get_question_by_id, submit_questions
-from app.dependencies import get_api_key, get_db
+from app.dependencies import get_current_player, get_db, require_admin_api_key
 from app.models.enums import DifficultyLevel
 from app.schemas.questions_model import Questions
 from app.models.response_models import QuestionRequest, QuestionsAddedResponseModel
+from app.schemas.players_model import Players
 
-router = APIRouter(dependencies=[Depends(get_api_key)])
+router = APIRouter()
 
 
 @router.get("/{question_id}", tags=["Questions"])
-def get_question_by_id_route(question_id: str, db: Session = Depends(get_db)):
+def get_question_by_id_route(
+    question_id: str,
+    db: Session = Depends(get_db),
+    current_player: Players = Depends(get_current_player),
+):
     """
     Retrieve a question by its ID with randomized answer options.
     """
@@ -41,12 +46,10 @@ def get_question_by_id_route(question_id: str, db: Session = Depends(get_db)):
         return {
             "question_id": question.question_id,
             "question": question.question,
-            "answer": question.answer,
             "genre": question.genre,
             "difficulty": question.difficulty,
             "question_options": raw_options if raw_options else [],
             "display_options": all_options,
-            "correct_index": correct_index,
         }
     except HTTPException:
         raise
@@ -56,7 +59,9 @@ def get_question_by_id_route(question_id: str, db: Session = Depends(get_db)):
 
 @router.post("/add", tags=["Questions"], response_model=QuestionsAddedResponseModel)
 def add_question_route(
-    question_request: QuestionRequest, db: Session = Depends(get_db)
+    question_request: QuestionRequest,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin_api_key),
 ):
     """
     Add a new question.

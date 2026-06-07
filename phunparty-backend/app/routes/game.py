@@ -1,6 +1,6 @@
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.database.dbCRUD import create_game as cg, end_game_session
@@ -17,9 +17,16 @@ from app.database.dbCRUD import (
     get_session_details,
     join_game,
 )
-from app.dependencies import get_api_key, get_db
+from app.dependencies import get_current_player, get_db, require_admin_api_key
 from app.models.game import GameCreation, GameJoinRequest, GameSessionCreation
 from app.models.response_models import GameHistoryResponse, GameResponse
+from app.schemas.players_model import Players
+from app.security.ownership import (
+    assert_public_or_member_or_owner,
+    assert_same_player,
+    assert_session_owner,
+)
+from app.security.rate_limit import enforce_rate_limit, get_client_ip
 from app.websockets.manager import manager
 from app.queue.join_queue_manager import join_queue_manager
 from app.queue.queue_models import (
@@ -29,11 +36,15 @@ from app.queue.queue_models import (
     QueueStatsResponse,
 )
 
-router = APIRouter(dependencies=[Depends(get_api_key)])
+router = APIRouter()
 
 
 @router.post("/", tags=["Game"])
-def create_game(request: GameCreation, db: Session = Depends(get_db)):
+def create_game(
+    request: GameCreation,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin_api_key),
+):
     try:
         game = cg(db, request.rules, request.genre)
         return {
@@ -48,7 +59,9 @@ def create_game(request: GameCreation, db: Session = Depends(get_db)):
 
 @router.post("/create/session", tags=["Game"])
 def create_game_session_route(
-    request: GameSessionCreation, db: Session = Depends(get_db)
+    request: GameSessionCreation,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
 ):
     """
     Create a new game session with randomly selected questions.
@@ -63,7 +76,7 @@ def create_game_session_route(
             request.host_name,
             request.number_of_questions,
             request.game_code,
-            request.owner_player_id,
+            current_player.player_id,
             request.ispublic,
             request.difficulty,
         )
@@ -88,14 +101,21 @@ def create_game_session_route(
 @router.get(
     "/history/{player_id}", response_model=List[GameHistoryResponse], tags=["Game"]
 )
-def get_player_game_history(player_id: str, db: Session = Depends(get_db)):
+def get_player_game_history(
+    player_id: str,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
     """
     Get the game history for a specific player.
     Returns a list of completed games with session_code, game_type (genre), and did_win (boolean).
     """
     try:
+        assert_same_player(current_player, player_id)
         history = get_game_history_for_player(db, player_id)
         return history
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
 
@@ -106,7 +126,11 @@ def get_player_game_history(player_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{game_code}", tags=["Game"])
-def get_game(game_code: str, db: Session = Depends(get_db)):
+def get_game(
+    game_code: str,
+    db: Session = Depends(get_db),
+    current_player: Players = Depends(get_current_player),
+):
     """
     Retrieve the game session details by game code.
     """
@@ -124,7 +148,9 @@ def get_game(game_code: str, db: Session = Depends(get_db)):
 
 
 @router.get("/", response_model=List[GameResponse], tags=["Game"])
-def get_all_games(db: Session = Depends(get_db)):
+def get_all_games(
+    db: Session = Depends(get_db),
+):
     """
     Retrieve all games.
     """
@@ -140,13 +166,25 @@ def get_all_games(db: Session = Depends(get_db)):
 
 
 @router.post("/join", tags=["Game"])
-def join_game_route(req: GameJoinRequest, db: Session = Depends(get_db)):
+async def join_game_route(
+    request: Request,
+    req: GameJoinRequest,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
     """
     Join an existing game session (direct join - may fail under high concurrency).
     For safer concurrent joins, use /join-queue endpoint instead.
     """
     try:
-        game = join_game(db, req.session_code, req.player_id)
+        await enforce_rate_limit(
+            request,
+            scope="game-join-ip",
+            identifier=get_client_ip(request),
+            limit=30,
+            window_seconds=300,
+        )
+        game = join_game(db, req.session_code, current_player.player_id)
         return {
             "message": "Successfully joined the game!",
         }
@@ -161,7 +199,11 @@ def join_game_route(req: GameJoinRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/join-queue", response_model=JoinQueueResponse, tags=["Game"])
-async def join_game_queue(request: JoinQueueRequest, db: Session = Depends(get_db)):
+async def join_game_queue(
+    request: JoinQueueRequest,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
     """
     Join a game session via queue system to prevent race conditions.
     This is the recommended way to join sessions when multiple players might join simultaneously.
@@ -181,7 +223,7 @@ async def join_game_queue(request: JoinQueueRequest, db: Session = Depends(get_d
 
         # Add to queue
         queue_id = await join_queue_manager.add_to_queue(
-            player_id=request.player_id,
+            player_id=current_player.player_id,
             session_code=request.session_code,
             websocket_id=request.websocket_id,
         )
@@ -227,7 +269,7 @@ async def get_queue_status(queue_id: str):
 
 
 @router.get("/queue-stats", response_model=QueueStatsResponse, tags=["Game"])
-async def get_queue_stats():
+async def get_queue_stats(_: str = Depends(require_admin_api_key)):
     """
     Get current queue statistics (for debugging/monitoring).
     """
@@ -245,7 +287,12 @@ async def get_queue_stats():
 
 
 @router.get("/session/{session_code}/join-info", tags=["Game"])
-def get_session_join_info(session_code: str, db: Session = Depends(get_db)):
+def get_session_join_info(
+    session_code: str,
+    request: Request,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
     """
     Get session join information for WebSocket connection.
     """
@@ -256,10 +303,17 @@ def get_session_join_info(session_code: str, db: Session = Depends(get_db)):
         session = get_session_by_code(db, session_code)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
+        assert_public_or_member_or_owner(db, current_player, session_code)
 
-        # Get API URL from environment variable (defaults to production)
-        api_url = os.getenv("API_URL", "https://api.phun.party")
-        web_url = os.getenv("WEB_URL", "https://phun.party")
+        # Prefer explicit deployment URLs, but in local development derive the
+        # socket host from the actual request. This prevents local mobile
+        # clients from receiving a production wss://api.phun.party URL.
+        api_url = (os.getenv("API_URL") or str(request.base_url)).rstrip("/")
+        web_url = (
+            os.getenv("WEB_URL")
+            or request.headers.get("origin")
+            or "https://phun.party"
+        ).rstrip("/")
 
         # Convert https to wss for WebSocket URL
         ws_url = api_url.replace("https://", "wss://").replace("http://", "ws://")
@@ -281,7 +335,11 @@ def get_session_join_info(session_code: str, db: Session = Depends(get_db)):
 
 
 @router.get("/session/{session_code}/details", tags=["Game"])
-def get_session_details_route(session_code: str, db: Session = Depends(get_db)):
+def get_session_details_route(
+    session_code: str,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
     """
     Get comprehensive session information including session code, genre,
     number of questions, active status, and privacy status.
@@ -290,6 +348,7 @@ def get_session_details_route(session_code: str, db: Session = Depends(get_db)):
         session_details = get_session_details(db, session_code)
         if not session_details:
             raise HTTPException(status_code=404, detail="Session not found")
+        assert_public_or_member_or_owner(db, current_player, session_code)
         return session_details
     except HTTPException:
         raise
@@ -300,7 +359,10 @@ def get_session_details_route(session_code: str, db: Session = Depends(get_db)):
 
 
 @router.get("/sessions/public", tags=["Game"])
-def get_all_public_sessions_route(db: Session = Depends(get_db)):
+def get_all_public_sessions_route(
+    db: Session = Depends(get_db),
+    current_player: Players = Depends(get_current_player),
+):
     """
     Get all public active sessions (available to everyone).
     Returns: session_code, genre, number_of_questions, difficulty
@@ -315,14 +377,21 @@ def get_all_public_sessions_route(db: Session = Depends(get_db)):
 
 
 @router.get("/sessions/private/{player_id}", tags=["Game"])
-def get_player_private_sessions_route(player_id: str, db: Session = Depends(get_db)):
+def get_player_private_sessions_route(
+    player_id: str,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
     """
     Get all private active sessions owned by a specific player.
     Returns: session_code, genre, number_of_questions, difficulty
     """
     try:
+        assert_same_player(current_player, player_id)
         sessions = get_player_private_sessions(db, player_id)
         return {"player_id": player_id, "sessions": sessions, "count": len(sessions)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500, detail="Unable to retrieve private sessions"
@@ -330,11 +399,16 @@ def get_player_private_sessions_route(player_id: str, db: Session = Depends(get_
 
 
 @router.post("/end-game/{session_code}", tags=["Game"])
-async def end_game_route(session_code: str, db: Session = Depends(get_db)):
+async def end_game_route(
+    session_code: str,
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
     """
     End a game session.
     """
     try:
+        assert_session_owner(db, current_player, session_code)
         result = end_game_session(db, session_code)
 
         # Broadcast game ended message to all connected WebSocket clients
@@ -347,5 +421,7 @@ async def end_game_route(session_code: str, db: Session = Depends(get_db)):
         )
 
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to end game session")

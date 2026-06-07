@@ -1,7 +1,9 @@
 import logging
 import os
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.config import Base, engine
 from app.schemas.game_model import Game
@@ -35,6 +37,7 @@ from app.routes import (
     scores,
 )
 from app.websockets import routes as websocket_routes
+from app.security.rate_limit import enforce_rate_limit, get_client_ip, rate_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,94 @@ health check endpoints.
 """
 
 
-app = FastAPI(title="PhunParty Backend API")
+def warn_about_websocket_process_state():
+    """Warn when deployment hints suggest multiple in-memory WebSocket managers."""
+    worker_hints = " ".join(
+        [
+            os.getenv("WEB_CONCURRENCY", ""),
+            os.getenv("GUNICORN_CMD_ARGS", ""),
+        ]
+    )
+    if (
+        "--workers 1" in worker_hints
+        or "--workers=1" in worker_hints
+        or "-w 1" in worker_hints
+        or worker_hints.strip() == "1"
+    ):
+        return
+
+    logger.warning(
+        "WebSocket session, phase, ACK, and roster state is in process memory. "
+        "Run this backend with one worker until that state moves to Redis/pub-sub."
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        Base.metadata.create_all(bind=engine)
+        ensure_fair_play_columns()
+        ensure_social_player_columns()
+    except Exception as e:
+        logger.warning("Could not create database tables: %s", e)
+
+    await rate_limiter.connect()
+    warn_about_websocket_process_state()
+    try:
+        yield
+    finally:
+        await rate_limiter.close()
+
+
+app = FastAPI(title="PhunParty Backend API", lifespan=lifespan)
+
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ALLOWED_ORIGINS",
+        "https://phun.party,http://localhost:5173",
+    ).split(",")
+    if origin.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+)
+
+
+@app.middleware("http")
+async def global_rate_limit(request: Request, call_next):
+    if request.url.path not in {"/health"}:
+        await enforce_rate_limit(
+            request,
+            scope="global-ip",
+            identifier=get_client_ip(request),
+            limit=300,
+            window_seconds=60,
+        )
+
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+
+    if os.getenv("ENVIRONMENT", "development").lower() == "production":
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
+        )
+
+    return response
 
 app.include_router(
     game.router,
@@ -156,38 +246,6 @@ app.include_router(
 
 # Mount static files for serving photos
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-
-# Initialize database tables
-try:
-    Base.metadata.create_all(bind=engine)
-    ensure_fair_play_columns()
-    ensure_social_player_columns()
-except Exception as e:
-    print(f"Warning: Could not create database tables: {e}")
-
-
-@app.on_event("startup")
-async def warn_about_websocket_process_state():
-    """Warn when deployment hints suggest multiple in-memory WebSocket managers."""
-    worker_hints = " ".join(
-        [
-            os.getenv("WEB_CONCURRENCY", ""),
-            os.getenv("GUNICORN_CMD_ARGS", ""),
-        ]
-    )
-    if (
-        "--workers 1" in worker_hints
-        or "--workers=1" in worker_hints
-        or "-w 1" in worker_hints
-        or worker_hints.strip() == "1"
-    ):
-        return
-
-    logger.warning(
-        "WebSocket session, phase, ACK, and roster state is in process memory. "
-        "Run this backend with one worker until that state moves to Redis/pub-sub."
-    )
-
 
 @app.get("/")
 def read_root():
