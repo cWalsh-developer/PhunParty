@@ -5,8 +5,9 @@ This will help us understand what's happening when players submit answers
 
 import asyncio
 import json
-import websockets
 import time
+
+import websockets
 
 
 async def simulate_player_answer(session_code, player_id, question_id, answer):

@@ -1,6 +1,7 @@
 from datetime import datetime
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
+
 from app.config import Base
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
 
 
 class PlayerResponse(Base):

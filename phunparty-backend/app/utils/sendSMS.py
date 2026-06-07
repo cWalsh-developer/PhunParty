@@ -2,13 +2,12 @@ import logging
 import os
 from pathlib import Path
 
+from app.database.dbCRUD import delete_expired_otps
+from app.utils.phone_numbers import normalize_phone_number
 from dotenv import load_dotenv
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from twilio.rest import Client
-
-from app.database.dbCRUD import delete_expired_otps
-from app.utils.phone_numbers import normalize_phone_number
 
 logger = logging.getLogger(__name__)
 

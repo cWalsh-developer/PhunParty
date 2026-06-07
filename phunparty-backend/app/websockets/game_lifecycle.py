@@ -5,11 +5,10 @@ import inspect
 import logging
 from datetime import datetime
 
-from sqlalchemy.orm import Session
-
 from app.database.dbCRUD import get_final_scores, update_game_session_ended
 from app.schemas.game_state_models import GameSessionState
 from app.websockets.manager import SessionPhase, manager
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 

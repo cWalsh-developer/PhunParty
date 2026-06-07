@@ -4,15 +4,14 @@ import uuid
 from io import BytesIO
 from pathlib import Path
 
-from PIL import Image
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
-
 from app.database.dbCRUD import get_player_by_ID, update_player_photo
 from app.dependencies import get_current_player, get_db, require_admin_api_key
 from app.schemas.players_model import Players
 from app.security.ownership import assert_same_player
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from PIL import Image
+from sqlalchemy.orm import Session
 
 # Create photos directory if it doesn't exist
 UPLOAD_DIR = Path("uploads/photos")

@@ -1,17 +1,9 @@
 from datetime import datetime
 
-from sqlalchemy import (
-    Boolean,
-    Column,
-    DateTime,
-    ForeignKey,
-    Integer,
-    String,
-    UniqueConstraint,
-)
-
 from app.config import Base
 from app.schemas.social_models import uuid_text
+from sqlalchemy import (Boolean, Column, DateTime, ForeignKey, Integer, String,
+                        UniqueConstraint)
 
 
 class SessionPlayerFairPlay(Base):

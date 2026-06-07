@@ -3,7 +3,9 @@ Test script to verify isstarted field is being sent through WebSocket
 """
 
 import json
-from app.database.dbCRUD import get_game_session_state, get_current_question_details
+
+from app.database.dbCRUD import (get_current_question_details,
+                                 get_game_session_state)
 from app.dependencies import get_db
 
 

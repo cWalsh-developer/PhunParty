@@ -1,5 +1,5 @@
-from pydantic import BaseModel
 from app.models.enums import ResultType
+from pydantic import BaseModel
 
 
 class Scores(BaseModel):

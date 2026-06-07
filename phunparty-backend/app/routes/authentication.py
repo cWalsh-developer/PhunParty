@@ -1,10 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy.orm import Session
-
-from app.database.dbCRUD import (
-    get_player_by_email,
-    reactivate_player,
-)
+from app.database.dbCRUD import get_player_by_email, reactivate_player
 from app.dependencies import get_current_player, get_db
 from app.models.loginRequest import ChangePasswordRequest, LoginRequest
 from app.schemas.players_model import Players
@@ -12,6 +6,8 @@ from app.security.rate_limit import enforce_rate_limit, get_client_ip
 from app.security.rls import set_rls_current_player, set_rls_login_email
 from app.utils.generateJWT import create_access_token
 from app.utils.hash_password import hash_password, verify_password
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.orm import Session
 
 router = APIRouter()
 

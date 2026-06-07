@@ -3,13 +3,13 @@ Scheduled task to permanently delete deactivated accounts after grace period.
 Run this script daily via cron job.
 """
 
-import sys
 import logging
-from app.database.dbCRUD import cleanup_expired_deactivated_accounts
-from app.config import SessionLocal
-
 # Configure logging
 import os
+import sys
+
+from app.config import SessionLocal
+from app.database.dbCRUD import cleanup_expired_deactivated_accounts
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 log_dir = os.path.join(script_dir, "logs")

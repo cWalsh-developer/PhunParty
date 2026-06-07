@@ -1,10 +1,9 @@
-from fastapi import HTTPException, status
-from sqlalchemy.orm import Session
-
 from app.schemas.game_session_model import GameSession
 from app.schemas.game_state_models import GameSessionState
 from app.schemas.players_model import Players
 from app.schemas.session_player_assignment_model import SessionAssignment
+from fastapi import HTTPException, status
+from sqlalchemy.orm import Session
 
 
 def forbidden() -> HTTPException:

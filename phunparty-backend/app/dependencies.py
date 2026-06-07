@@ -1,17 +1,16 @@
 import os
 import secrets
 
+from app.config import SessionLocal
+from app.schemas.players_model import Players
+from app.security.rls import clear_rls_context, set_rls_current_player
+from app.utils.generateJWT import ALGORITHM, SECRET_KEY
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.security.api_key import APIKeyHeader
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
-
-from app.config import SessionLocal
-from app.schemas.players_model import Players
-from app.security.rls import clear_rls_context, set_rls_current_player
-from app.utils.generateJWT import ALGORITHM, SECRET_KEY
 
 load_dotenv("credentials.env")
 

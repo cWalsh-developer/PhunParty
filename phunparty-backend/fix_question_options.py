@@ -2,16 +2,16 @@
 Script to check and fix question_options for existing questions
 """
 
-import sys
-import os
 import json
+import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from app.config import DatabaseURL
 from app.database.dbCRUD import get_question_by_id
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 # Create database connection
 engine = create_engine(DatabaseURL)

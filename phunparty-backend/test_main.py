@@ -109,9 +109,8 @@ def test_fastapi_basic_functionality():
                         mock_get_db.return_value = mock_db_session
 
                         try:
-                            from fastapi.testclient import TestClient
-
                             from app.main import app
+                            from fastapi.testclient import TestClient
 
                             client = TestClient(app)
 

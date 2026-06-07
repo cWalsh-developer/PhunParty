@@ -3,16 +3,16 @@ Production diagnostic script to check question_options JSON issues
 Run this on your production server to diagnose the JSON parsing problem
 """
 
-import sys
-import os
-import json
 import binascii
+import json
+import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from sqlalchemy.orm import sessionmaker
 from app.config import engine
 from app.database.dbCRUD import get_question_by_id
+from sqlalchemy.orm import sessionmaker
 
 # Use the existing engine from config
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

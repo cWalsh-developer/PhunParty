@@ -2,10 +2,11 @@
 Direct SQL test to check question_options column
 """
 
-import sys
-import os
-import psycopg2
 import json
+import os
+import sys
+
+import psycopg2
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 

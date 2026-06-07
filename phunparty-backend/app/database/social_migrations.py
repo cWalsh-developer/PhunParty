@@ -1,10 +1,9 @@
 import logging
 
-from sqlalchemy import text
-
 from app.config import SessionLocal, engine
 from app.database.dbCRUD import generate_unique_friend_code
 from app.schemas.players_model import Players
+from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 

@@ -11,10 +11,9 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Union
 
-from fastapi import WebSocket, WebSocketDisconnect
-
 from app.security.loggingUtils import safe_player_ref
 from app.security.roster_identity import make_roster_player_id
+from fastapi import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
 

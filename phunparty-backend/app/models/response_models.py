@@ -1,8 +1,7 @@
-from typing import Optional, List
+from typing import List, Optional
 
+from app.models.enums import DifficultyLevel, HistoryResultType, ResultType
 from pydantic import BaseModel, ConfigDict
-
-from app.models.enums import DifficultyLevel, ResultType, HistoryResultType
 
 
 class GameResponse(BaseModel):

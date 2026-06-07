@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, Column, DateTime, Integer, String
+
 from app.config import Base
+from sqlalchemy import Boolean, Column, DateTime, Integer, String
 
 
 class PasswordReset(Base):

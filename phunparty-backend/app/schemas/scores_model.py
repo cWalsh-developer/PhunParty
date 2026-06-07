@@ -1,6 +1,8 @@
-from sqlalchemy import Column, ForeignKey, Integer, String, Enum as SAEnum
 from app.config import Base
 from app.models.enums import ResultType
+from sqlalchemy import Column
+from sqlalchemy import Enum as SAEnum
+from sqlalchemy import ForeignKey, Integer, String
 
 
 class Scores(Base):

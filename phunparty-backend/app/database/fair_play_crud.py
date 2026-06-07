@@ -1,13 +1,13 @@
 from datetime import UTC, datetime
 from typing import Optional
 
-from sqlalchemy.orm import Session
-
 from app.database.dbCRUD import get_game_session_state
-from app.schemas.fair_play_models import FairPlayViolation, SessionPlayerFairPlay
+from app.schemas.fair_play_models import (FairPlayViolation,
+                                          SessionPlayerFairPlay)
 from app.schemas.game_state_models import PlayerResponse
 from app.schemas.scores_model import Scores
 from app.schemas.session_player_assignment_model import SessionAssignment
+from sqlalchemy.orm import Session
 
 DEFAULT_MAX_FAIR_PLAY_STRIKES = 3
 

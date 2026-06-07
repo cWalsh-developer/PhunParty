@@ -1,20 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy.orm import Session
-
 from app.database.dbCRUD import get_current_question_details
 from app.dependencies import get_current_player, get_db
-from app.logic.game_logic import (
-    get_current_question_for_session,
-    submit_player_answer,
-    updateGameStartStatus,
-)
+from app.logic.game_logic import (get_current_question_for_session,
+                                  submit_player_answer, updateGameStartStatus)
 from app.models.response_models import GameStatusResponse, SubmitAnswerRequest
 from app.schemas.players_model import Players
-from app.security.ownership import (
-    assert_session_member_or_owner,
-    assert_session_owner,
-)
+from app.security.ownership import (assert_session_member_or_owner,
+                                    assert_session_owner)
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.orm import Session
 
 router = APIRouter()
 

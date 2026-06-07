@@ -2,24 +2,20 @@
 Simple debug script to test the game advancement logic directly
 """
 
-import sys
 import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from sqlalchemy.orm import sessionmaker
 from app.config import engine
-from app.logic.game_logic import (
-    check_and_advance_game,
-    submit_player_answer,
-    get_question_with_randomized_options,
-)
-from app.database.dbCRUD import (
-    get_game_session_state,
-    get_number_of_players_in_session,
-    count_responses_for_question,
-    get_question_by_id,
-)
+from app.database.dbCRUD import (count_responses_for_question,
+                                 get_game_session_state,
+                                 get_number_of_players_in_session,
+                                 get_question_by_id)
+from app.logic.game_logic import (check_and_advance_game,
+                                  get_question_with_randomized_options,
+                                  submit_player_answer)
+from sqlalchemy.orm import sessionmaker
 
 # Use the existing engine from config
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

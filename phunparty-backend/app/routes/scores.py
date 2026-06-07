@@ -1,13 +1,12 @@
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-
 from app.database.dbCRUD import *
 from app.dependencies import get_current_player, get_db
 from app.models.response_models import ScoresResponseModel
 from app.schemas.players_model import Players
 from app.security.ownership import assert_session_member_or_owner
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 
 router = APIRouter()
 

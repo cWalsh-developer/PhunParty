@@ -4,10 +4,9 @@ import json
 import logging
 from typing import Any, Optional
 
-from sqlalchemy.orm import Session
-
 from app.database.dbCRUD import get_game_by_code, get_session_by_code
 from app.websockets.manager import manager
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 

@@ -1,7 +1,5 @@
-from sqlalchemy import text
-
 from app.config import SessionLocal
-
+from sqlalchemy import text
 
 NORMALIZED_MOBILE_SQL = """
 CASE

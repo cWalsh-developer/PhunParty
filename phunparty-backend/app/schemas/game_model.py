@@ -1,5 +1,5 @@
-from sqlalchemy import Column, String
 from app.config import Base
+from sqlalchemy import Column, String
 
 
 class Game(Base):

@@ -1,5 +1,5 @@
-from sqlalchemy import Column, ForeignKey, String
 from app.config import Base
+from sqlalchemy import Column, ForeignKey, String
 
 
 class SessionQuestionAssignment(Base):

@@ -43,10 +43,10 @@ sys.modules.setdefault("passlib", passlib_module)
 sys.modules.setdefault("passlib.context", passlib_context_module)
 
 from app.database import dbCRUD
-from app.logic import answer_validation
-from app.logic import game_logic
+from app.logic import answer_validation, game_logic
 from app.schemas.game_state_models import GameSessionState
-from app.websockets import game_handlers, game_lifecycle, game_modes, routes, scheduler
+from app.websockets import (game_handlers, game_lifecycle, game_modes, routes,
+                            scheduler)
 from app.websockets.manager import SessionPhase, manager
 
 sqlalchemy.create_engine = _real_create_engine

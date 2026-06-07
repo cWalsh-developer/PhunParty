@@ -111,9 +111,8 @@ def test_app_imports_successfully(mock_base, mock_engine):
     mock_base.metadata.create_all = MagicMock()
 
     try:
-        from fastapi import Depends, FastAPI
-
         from app.main import app
+        from fastapi import Depends, FastAPI
 
         assert app is not None
         assert isinstance(app, FastAPI)

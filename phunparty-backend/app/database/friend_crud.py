@@ -1,15 +1,13 @@
 from datetime import UTC, datetime
 from typing import Optional
 
-from sqlalchemy import and_, or_
-from sqlalchemy.orm import Session
-
 from app.database.dbCRUD import generate_unique_friend_code
 from app.database.notification_crud import create_notification
 from app.schemas.players_model import Players
 from app.schemas.social_models import FriendRequest, Friendship
 from app.utils.friend_codes import normalize_friend_code
-
+from sqlalchemy import and_, or_
+from sqlalchemy.orm import Session
 
 PENDING = "pending"
 ACCEPTED = "accepted"

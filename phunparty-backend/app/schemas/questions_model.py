@@ -1,6 +1,8 @@
-from sqlalchemy import JSON, Column, String, Enum as SAEnum, inspect
 from app.config import Base, engine
 from app.models.enums import DifficultyLevel
+from sqlalchemy import JSON, Column
+from sqlalchemy import Enum as SAEnum
+from sqlalchemy import String, inspect
 
 
 def _questions_table_has_column(column_name: str) -> bool:

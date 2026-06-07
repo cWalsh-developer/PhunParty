@@ -1,5 +1,5 @@
-from pydantic import BaseModel
 from app.models.enums import DifficultyLevel
+from pydantic import BaseModel
 
 
 class Question(BaseModel):

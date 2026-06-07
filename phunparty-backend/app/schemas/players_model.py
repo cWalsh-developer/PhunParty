@@ -1,5 +1,5 @@
-from sqlalchemy import Column, ForeignKey, String, Boolean
 from app.config import Base
+from sqlalchemy import Boolean, Column, ForeignKey, String
 
 
 class Players(Base):

@@ -1,10 +1,9 @@
 from datetime import UTC, datetime
 from typing import Optional
 
-from sqlalchemy.orm import Session
-
 from app.schemas.players_model import Players
 from app.schemas.social_models import Notification, UserPushToken
+from sqlalchemy.orm import Session
 
 
 def utc_now() -> datetime:

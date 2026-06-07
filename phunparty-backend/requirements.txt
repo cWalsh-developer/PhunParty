@@ -66,3 +66,4 @@ websockets==15.0.1
 redis>=5.0,<6.0
 wheel==0.46.3
 yarl==1.20.1
+isort==5.12.0

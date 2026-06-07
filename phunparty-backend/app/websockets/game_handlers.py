@@ -3,33 +3,23 @@ Game event handlers for different game types
 Handles the business logic for different game modes
 """
 
-from app.security.loggingUtils import safe_player_ref
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict
 
-from sqlalchemy.orm import Session
-
-from app.database.dbCRUD import (
-    get_current_question_details,
-    get_player_by_ID,
-    get_question_by_id,
-)
+from app.database.dbCRUD import (get_current_question_details,
+                                 get_player_by_ID, get_question_by_id)
+from app.database.fair_play_crud import (is_player_frozen_for_question,
+                                         is_player_kicked)
 from app.logic.answer_validation import validate_answer_against_question
+from app.security.loggingUtils import safe_player_ref
 from app.security.roster_identity import make_roster_player_id
 from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.manager import SessionPhase, manager
-from app.websockets.scheduler import (
-    NEXT_QUESTION_REVEAL_DELAY_MS,
-    advance_or_end_current_question,
-    iso_utc,
-    reveal_current_question,
-    utc_now,
-)
-from app.database.fair_play_crud import (
-    is_player_frozen_for_question,
-    is_player_kicked,
-)
+from app.websockets.scheduler import (NEXT_QUESTION_REVEAL_DELAY_MS,
+                                      advance_or_end_current_question, iso_utc,
+                                      reveal_current_question, utc_now)
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
