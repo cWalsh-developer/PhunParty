@@ -33,7 +33,15 @@ async def send_expo_push(
                         response_text,
                     )
                     return False
-                return True
+                logger.warning(
+                    "Expo push response: status=%s body=%s",
+                    response.status,
+                    response_text,
+                )
+                return (
+                    '"status":"ok"' in response_text
+                    or '"status": "ok"' in response_text
+                )
     except Exception:
         logger.exception("Expo push failed for token %s", token)
         return False
@@ -43,4 +51,5 @@ async def send_expo_push_to_tokens(
     tokens: list[str], title: str, body: str, data: Optional[dict] = None
 ) -> None:
     for token in tokens:
-        await send_expo_push(token, title, body, data)
+        success = await send_expo_push(token, title, body, data)
+        logger.warning("Expo push send completed successfully=%s", success)

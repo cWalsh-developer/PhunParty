@@ -6,6 +6,10 @@ from app.schemas.social_models import Notification, UserPushToken
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
@@ -124,7 +128,11 @@ def register_push_token(
 
 def get_active_push_tokens(db: Session, player_id: str) -> list[str]:
     """Return active Expo push tokens for notification delivery."""
-    return list(
+    current_player = db.execute(
+        text("SELECT current_setting('app.current_player_id', true)")
+    ).scalar_one_or_none()
+
+    tokens = list(
         db.execute(
             text("""
                 SELECT expo_push_token
@@ -133,6 +141,15 @@ def get_active_push_tokens(db: Session, player_id: str) -> list[str]:
             {"player_id": player_id},
         ).scalars()
     )
+
+    logger.warning(
+        "get_active_push_tokens current_player=%s target_player=%s token_count=%s",
+        current_player,
+        player_id,
+        len(tokens),
+    )
+
+    return tokens
 
 
 def update_notification_settings(
