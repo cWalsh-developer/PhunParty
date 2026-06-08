@@ -245,7 +245,7 @@ class JoinQueueManager:
 
             try:
                 # Use the existing join_game function which handles all the logic
-                result = join_game(db, session_code, int(player_id))
+                result = join_game(db, session_code, player_id)
 
                 return {
                     "success": True,

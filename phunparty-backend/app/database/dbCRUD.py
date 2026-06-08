@@ -189,10 +189,7 @@ def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
 
         if active_session:
             # Player is in a real active session
-            if active_session.session_code == session_code:
-                # Player is trying to join the same session they're already in
-                return gameSession
-            else:
+            if active_session.session_code != session_code:
                 # Player is in a different active session
                 raise ValueError(
                     f"Player is already in a game session: {player.active_game_code}"
@@ -200,11 +197,12 @@ def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
         else:
             # Player's active_game_code points to an inactive session, clear it
             player.active_game_code = None
-            db.commit()
+            db.flush()
 
     update_player_game_code(db, player_id, gameSession.session_code)
     assign_player_to_session(db, player_id, session_code)
     create_score(db, session_code, player_id)
+    db.commit()
     return gameSession
 
 
@@ -380,7 +378,7 @@ def update_player_game_code(db: Session, player_id: str, game_code: str) -> Play
     if not player:
         raise ValueError(f"Player {player_id} not found")
     player.active_game_code = game_code
-    db.commit()
+    db.flush()
     return player
 
 
@@ -603,6 +601,19 @@ def get_game_history_for_player(db: Session, player_id: str) -> list:
 
 def assign_player_to_session(db: Session, player_id: str, session_code: str) -> None:
     """Assign a player to a game session."""
+    existing_assignment = (
+        db.query(SessionAssignment)
+        .filter(SessionAssignment.player_id == player_id)
+        .filter(SessionAssignment.session_code == session_code)
+        .first()
+    )
+
+    if existing_assignment:
+        existing_assignment.session_end = None
+        existing_assignment.session_start = datetime.now()
+        db.flush()
+        return
+
     assignment_id = generate_assignment_id()
     assignment = SessionAssignment(
         assignment_id=assignment_id,
@@ -613,7 +624,6 @@ def assign_player_to_session(db: Session, player_id: str, session_code: str) -> 
     )
     db.add(assignment)
     db.flush()
-    db.commit()
 
     # Session Questions Assignment CRUD operations --------------------------------------------------------------------------------------------------------------
 
@@ -754,6 +764,16 @@ def update_scores(db: Session, session_code: str, player_id: str) -> Scores:
 
 def create_score(db: Session, session_code: str, player_id: str) -> Scores:
     """Create a new score entry for a player in a game session."""
+    existing_score = (
+        db.query(Scores)
+        .filter(Scores.session_code == session_code)
+        .filter(Scores.player_id == player_id)
+        .first()
+    )
+
+    if existing_score:
+        return existing_score
+
     score_id = generate_score_id()
 
     player = get_player_by_ID(db, player_id)
@@ -771,7 +791,6 @@ def create_score(db: Session, session_code: str, player_id: str) -> Scores:
 
     db.add(new_score)
     db.flush()
-    db.commit()
     return new_score
 
 

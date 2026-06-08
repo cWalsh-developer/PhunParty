@@ -1,3 +1,4 @@
+import logging
 from typing import List
 
 from app.database.dbCRUD import create_game as cg
@@ -34,6 +35,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/", tags=["Game"])
@@ -188,8 +190,13 @@ async def join_game_route(
     except ValueError as e:
         # Handle specific business logic errors
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+    except Exception:
         # Handle unexpected errors
+        logger.exception(
+            "Unexpected error joining game session=%s player=%s",
+            req.session_code,
+            current_player.player_id,
+        )
         raise HTTPException(
             status_code=500, detail="Unable to join game - internal error"
         )
