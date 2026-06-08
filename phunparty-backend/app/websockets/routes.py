@@ -925,20 +925,73 @@ async def handle_websocket_message(
         )
 
     elif message_type == "submit_answer" and client_type == "mobile":
-        # Player submitting an answer
         raw_answer = data.get("answer")
         question_id = data.get("question_id")
 
+        phase_state = manager.get_session_phase_state(session_code)
+        current_phase = phase_state.get("phase")
+        current_question_id = phase_state.get("current_question_id")
+
         logger.warning(
-            "SUBMIT ANSWER WS HIT session=%s player=%s question=%s raw_answer=%r data=%s",
+            "SUBMIT ANSWER WS HIT session=%s player=%s question=%s current_question=%s phase=%s raw_answer=%r data=%s",
             session_code,
             player_id,
             question_id,
+            current_question_id,
+            current_phase,
             raw_answer,
             data,
         )
 
-        if raw_answer is None or question_id is None or not player_id:
+        if current_phase != SessionPhase.QUESTION.value:
+            logger.warning(
+                "STALE ANSWER REJECTED phase mismatch session=%s player=%s incoming_question=%s phase=%s",
+                session_code,
+                player_id,
+                question_id,
+                current_phase,
+            )
+            await manager.send_personal_message(
+                {
+                    "type": "answer_rejected",
+                    "data": {
+                        "reason": "question_not_active",
+                        "message": "This question is no longer active.",
+                        "question_id": question_id,
+                        "current_question_id": current_question_id,
+                    },
+                },
+                websocket,
+            )
+            return
+
+        if not question_id or question_id != current_question_id:
+            logger.warning(
+                "STALE ANSWER REJECTED question mismatch session=%s player=%s incoming_question=%s current_question=%s",
+                session_code,
+                player_id,
+                question_id,
+                current_question_id,
+            )
+            await manager.send_personal_message(
+                {
+                    "type": "answer_rejected",
+                    "data": {
+                        "reason": "stale_question",
+                        "message": "That question has already moved on.",
+                        "question_id": question_id,
+                        "current_question_id": current_question_id,
+                    },
+                },
+                websocket,
+            )
+
+            if hasattr(game_handler, "update_mobile_buzzer_ui"):
+                await game_handler.update_mobile_buzzer_ui(db)
+
+            return
+
+        if raw_answer is None or not player_id:
             logger.warning(
                 "SUBMIT ANSWER REJECTED missing data session=%s player=%s question=%s raw_answer=%r",
                 session_code,
@@ -946,7 +999,6 @@ async def handle_websocket_message(
                 question_id,
                 raw_answer,
             )
-
             await manager.send_personal_message(
                 {
                     "type": "answer_rejected",
@@ -970,7 +1022,6 @@ async def handle_websocket_message(
                 question_id,
                 raw_answer,
             )
-
             await manager.send_personal_message(
                 {
                     "type": "answer_rejected",

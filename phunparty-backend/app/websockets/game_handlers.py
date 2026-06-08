@@ -484,6 +484,42 @@ class BuzzerGameHandler(GameEventHandler):
     ):
         """Handle buzzer game answer submission"""
         state = self.buzzer_state
+        phase_state = manager.get_session_phase_state(self.session_code)
+        current_phase_question_id = phase_state.get("current_question_id")
+        state_question_id = state.get("current_question_id")
+
+        if question_id != current_phase_question_id or question_id != state_question_id:
+            logger.warning(
+                "STALE BUZZER ANSWER REJECTED session=%s player=%s incoming_question=%s phase_question=%s state_question=%s",
+                self.session_code,
+                player_id,
+                question_id,
+                current_phase_question_id,
+                state_question_id,
+            )
+
+            for connection_info in manager.get_player_connections(
+                self.session_code,
+                player_id,
+            ).values():
+                websocket = connection_info.get("websocket")
+                if websocket:
+                    await manager.send_personal_message(
+                        {
+                            "type": "answer_rejected",
+                            "data": {
+                                "reason": "stale_question",
+                                "message": "That question has already moved on.",
+                                "question_id": question_id,
+                                "current_question_id": current_phase_question_id,
+                            },
+                        },
+                        websocket,
+                    )
+
+            await manager.broadcast_buzzer_state_update(self.session_code)
+            await self.update_mobile_buzzer_ui(db)
+            return
         # Only the current buzzer winner can answer
         if state["current_buzzer_winner"] != player_id:
             return
