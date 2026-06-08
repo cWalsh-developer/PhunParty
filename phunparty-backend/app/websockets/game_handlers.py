@@ -668,14 +668,80 @@ class BuzzerGameHandler(GameEventHandler):
     async def update_mobile_buzzer_ui(
         self, db: Session = None, message_override: str = None
     ):
-        """Update mobile UI based on current buzzer state"""
+        """Update mobile UI based on the authoritative buzzer state."""
         mobile_connections = manager.get_session_connections(self.session_code)
         state = self.buzzer_state
+        phase_state = manager.get_session_phase_state(self.session_code)
+
+        expected_question_id = state.get("current_question_id") or phase_state.get(
+            "current_question_id"
+        )
+
+        def question_model_to_dict(question_model):
+            if not question_model:
+                return None
+
+            difficulty = getattr(question_model, "difficulty", None)
+            if hasattr(difficulty, "value"):
+                difficulty = difficulty.value
+
+            options = getattr(question_model, "question_options", None) or []
+
+            return {
+                "question_id": getattr(question_model, "question_id", None),
+                "question": getattr(question_model, "question", None),
+                "answer": getattr(question_model, "answer", None),
+                "genre": getattr(question_model, "genre", None),
+                "difficulty": difficulty,
+                "display_options": options,
+                "options": options,
+                "game_type": "buzzer",
+            }
+
         current_question = None
+
         if db and state.get("current_buzzer_winner"):
             question_status = get_current_question_details(db, self.session_code)
-            current_question = (
+            candidate_question = (
                 question_status.get("current_question") if question_status else None
+            )
+            candidate_question_id = (
+                candidate_question.get("question_id")
+                if isinstance(candidate_question, dict)
+                else None
+            )
+
+            if (
+                expected_question_id
+                and candidate_question_id
+                and candidate_question_id != expected_question_id
+            ):
+                logger.warning(
+                    "BUZZER UI QUESTION MISMATCH session=%s expected=%s candidate=%s; fetching expected question directly",
+                    self.session_code,
+                    expected_question_id,
+                    candidate_question_id,
+                )
+                question_model = get_question_by_id(db, expected_question_id)
+                current_question = question_model_to_dict(question_model)
+            elif candidate_question:
+                current_question = candidate_question
+            elif expected_question_id:
+                logger.warning(
+                    "BUZZER UI QUESTION MISSING session=%s expected=%s; fetching expected question directly",
+                    self.session_code,
+                    expected_question_id,
+                )
+                question_model = get_question_by_id(db, expected_question_id)
+                current_question = question_model_to_dict(question_model)
+
+            logger.warning(
+                "BUZZER UI ANSWER PAYLOAD SOURCE session=%s winner=%s expected_question=%s payload_question=%s question_text=%s",
+                self.session_code,
+                state.get("current_buzzer_winner"),
+                expected_question_id,
+                current_question.get("question_id") if current_question else None,
+                current_question.get("question") if current_question else None,
             )
 
         winner_name = None
@@ -692,7 +758,7 @@ class BuzzerGameHandler(GameEventHandler):
             ui_state = {
                 "game_type": "buzzer",
                 "ui_mode": "buzzer",
-                "question_id": state.get("current_question_id"),
+                "question_id": expected_question_id,
                 "transitioning": state.get("transitioning", False),
                 "accepting_buzzes": state.get("accepting_buzzes", False),
                 "is_current_player": False,
@@ -706,18 +772,35 @@ class BuzzerGameHandler(GameEventHandler):
                 ui_state["message"] = (
                     message_override or "Waiting for the next question..."
                 )
+
             elif player_id in state["frozen_players"]:
                 ui_state["button_state"] = "frozen"
                 ui_state["is_current_player"] = False
                 ui_state["message"] = "You're frozen out this round!"
+
             elif state["current_buzzer_winner"] == player_id:
-                answer_payload = self.format_buzzer_answer_payload(current_question)
-                ui_state.update(answer_payload)
-                ui_state["button_state"] = "answer_mode"
-                ui_state["is_current_player"] = True
-                ui_state["message"] = answer_payload.get(
-                    "message", "You buzzed first. Choose your answer."
-                )
+                if not current_question:
+                    logger.warning(
+                        "BUZZER WINNER UI CANNOT LOAD QUESTION session=%s player=%s expected_question=%s",
+                        self.session_code,
+                        safe_player_ref(player_id),
+                        expected_question_id,
+                    )
+                    ui_state["button_state"] = "waiting"
+                    ui_state["is_current_player"] = False
+                    ui_state["message"] = "Syncing question..."
+                else:
+                    answer_payload = self.format_buzzer_answer_payload(current_question)
+                    ui_state.update(answer_payload)
+                    ui_state["question_id"] = expected_question_id
+                    ui_state["button_state"] = "answer_mode"
+                    ui_state["is_current_player"] = True
+                    ui_state["transitioning"] = False
+                    ui_state["accepting_buzzes"] = False
+                    ui_state["message"] = answer_payload.get(
+                        "message", "You buzzed first. Choose your answer."
+                    )
+
             elif state["current_buzzer_winner"]:
                 ui_state["button_state"] = "waiting"
                 ui_state["is_current_player"] = False
@@ -725,16 +808,28 @@ class BuzzerGameHandler(GameEventHandler):
                 ui_state["message"] = (
                     f"Waiting for {winner_name or 'the current player'} to answer..."
                 )
+
             elif not state["question_active"]:
                 ui_state["button_state"] = "waiting"
                 ui_state["is_current_player"] = False
                 ui_state["message"] = "Waiting for the next question..."
+
             else:
                 ui_state["button_state"] = "active"
                 ui_state["is_current_player"] = False
                 ui_state["transitioning"] = False
                 ui_state["accepting_buzzes"] = True
                 ui_state["message"] = "Press to buzz in!"
+
+            logger.warning(
+                "BUZZER UI SEND session=%s player=%s button=%s is_current=%s question_id=%s message=%s",
+                self.session_code,
+                safe_player_ref(player_id),
+                ui_state.get("button_state"),
+                ui_state.get("is_current_player"),
+                ui_state.get("question_id"),
+                ui_state.get("message"),
+            )
 
             await manager.send_personal_message(
                 {"type": "ui_update", "data": ui_state}, connection_info["websocket"]
