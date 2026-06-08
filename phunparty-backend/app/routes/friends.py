@@ -1,3 +1,4 @@
+from app.security.rls import set_rls_current_player
 from app.database.friend_crud import (
     accept_friend_request,
     ensure_player_friend_code,
@@ -112,12 +113,15 @@ async def create_friend_request(
         current_player.player_id,
         request.friend_code,
     )
+
     try:
         friend_request = send_friend_request(
             db, current_player, request.friend_code, request.message
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    set_rls_current_player(db, current_player.player_id)
 
     receiver = get_player_public_profile(db, friend_request.receiver_player_id)
 
@@ -182,10 +186,13 @@ async def accept_request(
         current_player.player_id,
         request_id,
     )
+
     try:
         friend_request = accept_friend_request(db, current_player, request_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+    set_rls_current_player(db, current_player.player_id)
 
     sender = get_player_public_profile(db, friend_request.sender_player_id)
 
