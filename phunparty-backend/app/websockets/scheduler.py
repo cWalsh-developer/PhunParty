@@ -117,6 +117,30 @@ async def advance_or_end_current_question(
     acting_player_id: Optional[str] = None,
 ) -> bool:
     """Advance the DB question pointer and broadcast the next authoritative state."""
+
+    # Advancing/ending mutates session-owned state, so use the session owner for RLS.
+    # The acting player may simply be the buzzer winner or the last player to answer.
+    owner_player_id = get_session_owner_id(db, session_code)
+    progression_actor_id = owner_player_id or acting_player_id
+
+    if progression_actor_id:
+        logger.warning(
+            "ADVANCE RLS CONTEXT session=%s reason=%s acting_player=%s owner=%s using=%s",
+            session_code,
+            reason,
+            acting_player_id,
+            owner_player_id,
+            progression_actor_id,
+        )
+        set_rls_current_player(db, progression_actor_id)
+    else:
+        logger.warning(
+            "ADVANCE RLS CONTEXT MISSING session=%s reason=%s acting_player=%s",
+            session_code,
+            reason,
+            acting_player_id,
+        )
+
     result = advance_to_next_question(db, session_code)
     action = result.get("action")
 
@@ -125,7 +149,9 @@ async def advance_or_end_current_question(
         current_question = game_status.get("current_question") if game_status else None
         if not current_question:
             logger.warning(
-                f"Could not reveal next question for {session_code}; no current question after {reason}"
+                "Could not reveal next question for %s; no current question after %s",
+                session_code,
+                reason,
             )
             return False
 
@@ -137,18 +163,23 @@ async def advance_or_end_current_question(
             session_code,
             db,
             iso_utc(question_start_at),
-            acting_player_id=acting_player_id,
+            acting_player_id=progression_actor_id,
         )
 
     if action == "game_ended":
         from app.websockets.game_lifecycle import handle_game_end
 
         return await handle_game_end(
-            session_code, db, acting_player_id=acting_player_id
+            session_code,
+            db,
+            acting_player_id=progression_actor_id,
         )
 
     logger.warning(
-        f"Unexpected advance result for {session_code} after {reason}: {result}"
+        "Unexpected advance result for %s after %s: %s",
+        session_code,
+        reason,
+        result,
     )
     return False
 
