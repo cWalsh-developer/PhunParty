@@ -85,12 +85,14 @@ def register_push_token(
 ) -> UserPushToken:
     token = (
         db.query(UserPushToken)
+        .filter(UserPushToken.player_id == player_id)
         .filter(UserPushToken.expo_push_token == expo_push_token)
         .first()
     )
+
     now = utc_now()
+
     if token:
-        token.player_id = player_id
         token.device_id = device_id
         token.platform = platform
         token.is_active = True
@@ -101,13 +103,27 @@ def register_push_token(
             expo_push_token=expo_push_token,
             device_id=device_id,
             platform=platform,
+            is_active=True,
             updated_at=now,
         )
         db.add(token)
 
+    db.flush()
+
+    response_token = UserPushToken(
+        id=token.id,
+        player_id=token.player_id,
+        expo_push_token=token.expo_push_token,
+        device_id=token.device_id,
+        platform=token.platform,
+        is_active=token.is_active,
+        created_at=token.created_at,
+        updated_at=token.updated_at,
+    )
+
     db.commit()
-    db.refresh(token)
-    return token
+
+    return response_token
 
 
 def get_active_push_tokens(db: Session, player_id: str) -> list[str]:
