@@ -139,6 +139,19 @@ async def advance_or_end_current_question(
             acting_player_id,
         )
 
+    # CRITICAL:
+    # submit_player_answer() commits and changes RLS context before this function
+    # is called. The SQLAlchemy Session can still hold an old game_session_states
+    # object in its identity map. Expire it BEFORE reading or advancing.
+    try:
+        db.expire_all()
+    except Exception:
+        logger.exception(
+            "ADVANCE PRE-REFRESH FAILED session=%s reason=%s",
+            session_code,
+            reason,
+        )
+
     before_state = get_game_session_state(db, session_code)
     logger.warning(
         "ADVANCE BEFORE session=%s reason=%s index=%s current_question=%s total=%s",
@@ -165,7 +178,7 @@ async def advance_or_end_current_question(
         db.expire_all()
     except Exception:
         logger.exception(
-            "ADVANCE DB REFRESH FAILED session=%s reason=%s",
+            "ADVANCE POST-REFRESH FAILED session=%s reason=%s",
             session_code,
             reason,
         )
