@@ -713,19 +713,20 @@ class BuzzerGameHandler(GameEventHandler):
                 acting_player_id=player_id,
             )
 
-        logger.warning(
-            "BUZZER CORRECT ADVANCE COMPLETE session=%s player=%s question=%s advanced=%s",
-            self.session_code,
-            safe_player_ref(player_id),
-            question_id,
-            advanced,
-        )
-
-        if not advanced:
-            await self.update_mobile_buzzer_ui(
-                db,
-                message_override="Still syncing the next question...",
+            logger.warning(
+                "BUZZER CORRECT ADVANCE COMPLETE session=%s player=%s question=%s advanced=%s",
+                self.session_code,
+                safe_player_ref(player_id),
+                question_id,
+                advanced,
             )
+
+            if not advanced:
+                await self.update_mobile_buzzer_ui(
+                    db,
+                    message_override="Still syncing the next question...",
+                )
+
             return
 
         # Wrong answer.
@@ -763,6 +764,9 @@ class BuzzerGameHandler(GameEventHandler):
             critical=True,
         )
 
+        active_players = len(manager.get_mobile_players(self.session_code))
+        frozen_count = len(state["frozen_players"])
+
         if action == "game_ended":
             await self.lock_buzzer_until_next_question("Waiting for final scores...")
             await handle_game_end(
@@ -783,9 +787,6 @@ class BuzzerGameHandler(GameEventHandler):
             )
             return
 
-        active_players = len(manager.get_mobile_players(self.session_code))
-        frozen_count = len(state["frozen_players"])
-
         if active_players and frozen_count >= active_players:
             await manager.broadcast_to_session(
                 self.session_code,
@@ -803,12 +804,26 @@ class BuzzerGameHandler(GameEventHandler):
                 "Waiting for the next question..."
             )
 
-            await advance_or_end_current_question(
+            advanced = await advance_or_end_current_question(
                 self.session_code,
                 db,
                 reason="buzzer_all_wrong",
                 acting_player_id=player_id,
             )
+
+            logger.warning(
+                "BUZZER ALL WRONG ADVANCE COMPLETE session=%s question=%s advanced=%s",
+                self.session_code,
+                question_id,
+                advanced,
+            )
+
+            if not advanced:
+                await self.update_mobile_buzzer_ui(
+                    db,
+                    message_override="Still syncing the next question...",
+                )
+
             return
 
         # Wrong answer, but at least one other player can still buzz.
