@@ -27,6 +27,10 @@ from app.utils.expo_push import send_expo_push_to_tokens
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 
@@ -111,9 +115,19 @@ async def create_friend_request(
         raise HTTPException(status_code=400, detail=str(exc))
 
     receiver = get_player_public_profile(db, friend_request.receiver_player_id)
-    if receiver and receiver.friend_request_notifications_enabled:
+
+    if receiver:
         tokens = get_active_push_tokens(db, receiver.player_id)
-        if tokens:
+
+        logger.info(
+            "Friend request push lookup sender=%s receiver=%s notifications_enabled=%s token_count=%s",
+            current_player.player_id,
+            receiver.player_id,
+            receiver.friend_request_notifications_enabled,
+            len(tokens),
+        )
+
+        if receiver.friend_request_notifications_enabled and tokens:
             background_tasks.add_task(
                 send_expo_push_to_tokens,
                 tokens,
@@ -164,9 +178,19 @@ async def accept_request(
         raise HTTPException(status_code=404, detail=str(exc))
 
     sender = get_player_public_profile(db, friend_request.sender_player_id)
-    if sender and sender.friend_request_notifications_enabled:
+
+    if sender:
         tokens = get_active_push_tokens(db, sender.player_id)
-        if tokens:
+
+        logger.info(
+            "Friend accept push lookup accepter=%s sender=%s notifications_enabled=%s token_count=%s",
+            current_player.player_id,
+            sender.player_id,
+            sender.friend_request_notifications_enabled,
+            len(tokens),
+        )
+
+        if sender.friend_request_notifications_enabled and tokens:
             background_tasks.add_task(
                 send_expo_push_to_tokens,
                 tokens,

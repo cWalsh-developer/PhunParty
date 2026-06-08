@@ -87,7 +87,7 @@ def submit_player_answer(
 
     # Update score if correct
     if is_correct:
-        update_scores(db, session_code, player_id, question_id)
+        update_scores(db, session_code, player_id)
 
     # Check if all players have answered this question
     game_progression = check_and_advance_game(db, session_code, question_id)
