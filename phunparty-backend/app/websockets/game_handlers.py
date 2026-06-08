@@ -12,6 +12,8 @@ from app.database.dbCRUD import (
     get_player_by_ID,
     get_question_by_id,
 )
+from app.logic.game_logic import get_game_session_state
+from app.security.rls import set_rls_current_player
 from app.database.fair_play_crud import is_player_frozen_for_question, is_player_kicked
 from app.logic.answer_validation import validate_answer_against_question
 from app.security.loggingUtils import safe_player_ref
@@ -699,11 +701,26 @@ class BuzzerGameHandler(GameEventHandler):
                 return
 
             if action == "next_question":
-                await self.reveal_current_db_question(
+                revealed = await self.reveal_current_db_question(
                     db,
                     "buzzer_correct_answer",
                     acting_player_id=player_id,
                 )
+
+                logger.warning(
+                    "BUZZER CORRECT EXISTING ADVANCE REVEAL COMPLETE session=%s player=%s question=%s revealed=%s",
+                    self.session_code,
+                    safe_player_ref(player_id),
+                    question_id,
+                    revealed,
+                )
+
+                if not revealed:
+                    await self.update_mobile_buzzer_ui(
+                        db,
+                        message_override="Still syncing the next question...",
+                    )
+
                 return
 
             advanced = await advance_or_end_current_question(
@@ -780,11 +797,27 @@ class BuzzerGameHandler(GameEventHandler):
             await self.lock_buzzer_until_next_question(
                 "Waiting for the next question..."
             )
-            await self.reveal_current_db_question(
+
+            revealed = await self.reveal_current_db_question(
                 db,
                 "buzzer_all_answered",
                 acting_player_id=player_id,
             )
+
+            logger.warning(
+                "BUZZER ALL ANSWERED EXISTING ADVANCE REVEAL COMPLETE session=%s player=%s question=%s revealed=%s",
+                self.session_code,
+                safe_player_ref(player_id),
+                question_id,
+                revealed,
+            )
+
+            if not revealed:
+                await self.update_mobile_buzzer_ui(
+                    db,
+                    message_override="Still syncing the next question...",
+                )
+
             return
 
         if active_players and frozen_count >= active_players:
@@ -1105,25 +1138,62 @@ class BuzzerGameHandler(GameEventHandler):
         acting_player_id: Optional[str] = None,
     ) -> bool:
         """Reveal the DB's current question after answer logic has already advanced it."""
-        from app.logic.game_logic import get_game_session_state
+
+        if acting_player_id:
+            set_rls_current_player(db, acting_player_id)
+
+        try:
+            db.flush()
+            db.expire_all()
+        except Exception:
+            logger.exception(
+                "Could not refresh DB session before buzzer reveal session=%s reason=%s",
+                self.session_code,
+                reason,
+            )
 
         game_state = get_game_session_state(db, self.session_code)
+
+        logger.warning(
+            "BUZZER REVEAL CURRENT DB QUESTION session=%s reason=%s index=%s question=%s total=%s acting_player=%s",
+            self.session_code,
+            reason,
+            getattr(game_state, "current_question_index", None),
+            getattr(game_state, "current_question_id", None),
+            getattr(game_state, "total_questions", None),
+            acting_player_id,
+        )
+
         if not game_state or not game_state.current_question_id:
             logger.warning(
-                f"No current question to reveal for {self.session_code} after {reason}"
+                "No current question to reveal for %s after %s",
+                self.session_code,
+                reason,
             )
             return False
 
         manager.clear_question_queue(self.session_code)
+
         question_start_at = utc_now() + timedelta(
             milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
         )
-        return await reveal_current_question(
+
+        revealed = await reveal_current_question(
             self.session_code,
             db,
             iso_utc(question_start_at),
             acting_player_id=acting_player_id,
         )
+
+        logger.warning(
+            "BUZZER REVEAL CURRENT DB QUESTION RESULT session=%s reason=%s question=%s revealed=%s",
+            self.session_code,
+            reason,
+            game_state.current_question_id,
+            revealed,
+        )
+
+        return revealed
 
     async def reset_buzzer_state(self):
         """Reset buzzer state for next question"""
