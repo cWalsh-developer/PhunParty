@@ -126,7 +126,8 @@ def test_update_game_start_status_sets_started_at():
 
     assert game_state.isstarted is True
     assert game_state.started_at is not None
-    mock_db.commit.assert_called_once()
+    mock_db.flush.assert_called_once()
+    mock_db.commit.assert_not_called()
 
 
 def test_question_fallback_without_options_does_not_expose_answer():

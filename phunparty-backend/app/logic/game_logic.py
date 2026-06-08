@@ -94,6 +94,10 @@ def submit_player_answer(
 
     # Check if all players have answered this question
     game_progression = check_and_advance_game(db, session_code, question_id)
+    if "error" in game_progression:
+        db.rollback()
+    else:
+        db.commit()
 
     return {
         "player_answer": player_answer,
@@ -270,11 +274,11 @@ def get_current_question_for_session(db: Session, session_code: str) -> dict:
 
 def build_question_with_randomized_options(question) -> dict:
     """Build randomized display options from an already-loaded question."""
+    question_id = getattr(question, "question_id", None) or "unknown"
     try:
         if not question:
             raise ValueError("Question not found")
 
-        question_id = question.question_id
         raw_options = getattr(question, "question_options", None)
 
         # Handle questions that might not have options yet
@@ -393,14 +397,16 @@ def build_question_with_randomized_options(question) -> dict:
         return result
 
     except Exception as e:
-        logger.error(f"Error getting question with options for {question_id}: {e}")
+        logger.error("Error getting question with options for %s: %s", question_id, e)
+        difficulty = getattr(question, "difficulty", None)
+        difficulty_value = getattr(difficulty, "value", difficulty) or "easy"
         # Return a minimal fallback response instead of raising
         return {
             "question_id": question_id,
-            "question": "Question unavailable",
-            "answer": "Unknown",
-            "genre": "Trivia",
-            "difficulty": "easy",
+            "question": getattr(question, "question", "Question unavailable"),
+            "answer": getattr(question, "answer", "Unknown"),
+            "genre": getattr(question, "genre", "Trivia"),
+            "difficulty": difficulty_value,
             "question_options": [],
             "display_options": [],
             "correct_index": None,

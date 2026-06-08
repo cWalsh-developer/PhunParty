@@ -757,8 +757,11 @@ def get_scores_by_session_and_player(db: Session, session_code: str, player_id: 
 def update_scores(db: Session, session_code: str, player_id: str) -> Scores:
     """Update the scores for a specific player in a game session."""
     existing_score = get_scores_by_session_and_player(db, session_code, player_id)
+    if not existing_score:
+        raise ValueError("Score not found")
+
     existing_score.score += 1
-    db.commit()
+    db.flush()
     return existing_score
 
 
@@ -1162,7 +1165,6 @@ def create_player_response(
 
     db.add(response)
     db.flush()
-    db.commit()
     return response
 
 
@@ -1223,7 +1225,7 @@ def advance_to_next_question(db: Session, session_code: str) -> dict:
             game_state.current_question_id = next_question.question_id
             game_state.is_waiting_for_players = True
 
-            db.commit()
+            db.flush()
 
             return {
                 "action": "next_question",
@@ -1245,7 +1247,7 @@ def update_game_state_waiting_status(
     game_state = get_game_session_state(db, session_code)
     if game_state:
         game_state.is_waiting_for_players = is_waiting
-        db.commit()
+        db.flush()
 
 
 def get_current_question_details(db: Session, session_code: str) -> dict:
