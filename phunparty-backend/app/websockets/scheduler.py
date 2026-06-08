@@ -143,7 +143,9 @@ async def advance_or_end_current_question(
     if action == "game_ended":
         from app.websockets.game_lifecycle import handle_game_end
 
-        return await handle_game_end(session_code, db)
+        return await handle_game_end(
+            session_code, db, acting_player_id=acting_player_id
+        )
 
     logger.warning(
         f"Unexpected advance result for {session_code} after {reason}: {result}"

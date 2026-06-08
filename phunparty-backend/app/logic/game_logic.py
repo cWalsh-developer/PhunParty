@@ -225,16 +225,18 @@ def check_and_advance_game(
                         result["playersAnswered"] = 0  # Reset for new question
             else:
                 logger.info(
-                    f"Game ending. No more questions after index {game_state.current_question_index}"
+                    "Game ending. No more questions after index %s",
+                    game_state.current_question_index,
                 )
-                # No more questions, end the game
-                from app.database.dbCRUD import end_game_session
 
-                advancement_result = end_game_session(db, session_code)
-                result.update(advancement_result)
-
-                # Update frontend-compatible data for game end
-                result["game_state"] = "ended"
+                result.update(
+                    {
+                        "action": "game_ended",
+                        "game_state": "ended",
+                        "current_question_index": game_state.current_question_index,
+                        "total_questions": game_state.total_questions,
+                    }
+                )
         else:
             logger.info(
                 f"Waiting for more players to answer. {responses_to_question}/{players_in_session} have answered"

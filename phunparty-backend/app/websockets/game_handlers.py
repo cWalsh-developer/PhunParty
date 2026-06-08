@@ -223,7 +223,7 @@ class TriviaGameHandler(GameEventHandler):
             # If game ended, broadcast game end
             elif action == "game_ended":
                 logger.info(f"Game ended for session {self.session_code}")
-                await handle_game_end(self.session_code, db)
+                await handle_game_end(self.session_code, db, acting_player_id=player_id)
             elif action is None:
                 logger.info(
                     f" No action needed - waiting for more players or other conditions"
@@ -499,7 +499,7 @@ class BuzzerGameHandler(GameEventHandler):
                     acting_player_id=player_id,
                 )
             elif action == "game_ended":
-                await handle_game_end(self.session_code, db)
+                await handle_game_end(self.session_code, db, acting_player_id=player_id)
             else:
                 await advance_or_end_current_question(
                     self.session_code, db, reason="buzzer_correct_answer"
@@ -520,7 +520,7 @@ class BuzzerGameHandler(GameEventHandler):
                 await self.lock_buzzer_until_next_question(
                     "Waiting for final scores..."
                 )
-                await handle_game_end(self.session_code, db)
+                await handle_game_end(self.session_code, db, acting_player_id=player_id)
                 return
 
             # Wrong answer - freeze this player and reset buzzer

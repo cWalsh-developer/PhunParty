@@ -806,23 +806,22 @@ def get_scores_by_session(db: Session, session_code: str) -> list[Scores]:
 
 
 def calculate_game_results(db: Session, session_code: str):
-    """Determine the game results (win, lose, draw) for a session and update the DB."""
-
+    """Determine the game results for a session and update the DB."""
     session_scores = db.query(Scores).filter(Scores.session_code == session_code).all()
+
     if not session_scores:
         raise ValueError("No scores found for session")
 
     max_score = max(score.score for score in session_scores)
-
     top_scorers = [s for s in session_scores if s.score == max_score]
 
-    for s in session_scores:
-        if s.score == max_score:
-            s.result = "draw" if len(top_scorers) > 1 else "win"
+    for score in session_scores:
+        if score.score == max_score:
+            score.result = "draw" if len(top_scorers) > 1 else "win"
         else:
-            s.result = "lose"
-    db.commit()
+            score.result = "lose"
 
+    db.flush()
     return session_scores
 
 
@@ -1234,8 +1233,11 @@ def advance_to_next_question(db: Session, session_code: str) -> dict:
                 "waiting_for_players": True,
             }
         else:
-            # No more questions, end the game using the comprehensive end_game_session
-            return end_game_session(db, session_code)
+            return {
+                "action": "game_ended",
+                "current_question_index": game_state.current_question_index,
+                "total_questions": game_state.total_questions,
+            }
     except Exception as e:
         db.rollback()
         return {"error": str(e)}
@@ -1436,39 +1438,42 @@ def update_password(db: Session, phone: str, new_password: str) -> bool:
 def update_game_session_ended(db: Session, session_code: str) -> bool:
     """
     Mark a game session as ended by setting ended_at timestamp and is_active to False.
-    Also calculates final game results (win/lose/draw) for all players.
-
-    Args:
-        db: Database session
-        session_code: The session code to end
-
-    Returns:
-        bool: True if successfully ended, False otherwise
+    Also calculates final game results.
     """
     try:
-        # Get the game session state
-        game_state = get_game_session_state(db, session_code)
+        game_state = (
+            db.query(GameSessionState)
+            .filter(GameSessionState.session_code == session_code)
+            .first()
+        )
+
         if not game_state:
-            logger.warning(f"Game session state not found for {session_code}")
+            logger.warning("Game session state not found for %s", session_code)
             return False
 
-        # Update game state to mark as ended
-        game_state.is_active = False
-        game_state.ended_at = utc_now()
+        if not game_state.ended_at:
+            game_state.ended_at = utc_now()
 
-        # Calculate game results (win/lose/draw) for all players
+        game_state.is_active = False
+        game_state.isstarted = False
+        game_state.is_waiting_for_players = False
+
         try:
             calculate_game_results(db, session_code)
         except ValueError as e:
-            logger.warning(f"Could not calculate game results for {session_code}: {e}")
+            logger.warning(
+                "Could not calculate game results for %s: %s",
+                session_code,
+                e,
+            )
 
         db.commit()
 
-        logger.info(f"Game session {session_code} ended at {game_state.ended_at}")
+        logger.info("Game session %s ended at %s", session_code, game_state.ended_at)
         return True
 
     except Exception as e:
-        logger.error(f"Error ending game session {session_code}: {e}")
+        logger.error("Error ending game session %s: %s", session_code, e)
         db.rollback()
         return False
 
