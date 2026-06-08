@@ -475,9 +475,10 @@ class BuzzerGameHandler(GameEventHandler):
             },
         )
 
-        # Update mobile UI - winner can now answer, others wait
-        await manager.broadcast_buzzer_state_update(self.session_code)
+        # Update mobile UI - winner can now answer, others wait.
+        # Send the per-player UI update first because it is authoritative.
         await self.update_mobile_buzzer_ui(db)
+        await manager.broadcast_buzzer_state_update(self.session_code)
 
     async def handle_player_answer(
         self, player_id: str, answer: str, question_id: str, db: Session
@@ -681,22 +682,57 @@ class BuzzerGameHandler(GameEventHandler):
             if not question_model:
                 return None
 
-            difficulty = getattr(question_model, "difficulty", None)
-            if hasattr(difficulty, "value"):
-                difficulty = difficulty.value
+            try:
+                from app.logic.game_logic import build_question_with_randomized_options
 
-            options = getattr(question_model, "question_options", None) or []
+                question_details = build_question_with_randomized_options(
+                    question_model
+                )
 
-            return {
-                "question_id": getattr(question_model, "question_id", None),
-                "question": getattr(question_model, "question", None),
-                "answer": getattr(question_model, "answer", None),
-                "genre": getattr(question_model, "genre", None),
-                "difficulty": difficulty,
-                "display_options": options,
-                "options": options,
-                "game_type": "buzzer",
-            }
+                difficulty = question_details.get("difficulty")
+                if hasattr(difficulty, "value"):
+                    difficulty = difficulty.value
+
+                return {
+                    "question_id": question_details.get("question_id"),
+                    "question": question_details.get("question"),
+                    "answer": question_details.get("answer"),
+                    "genre": question_details.get("genre"),
+                    "difficulty": difficulty or "easy",
+                    "display_options": question_details.get("display_options", []),
+                    "options": question_details.get("display_options", []),
+                    "correct_index": question_details.get("correct_index"),
+                    "game_type": "buzzer",
+                }
+
+            except Exception:
+                logger.exception(
+                    "Could not build randomized buzzer fallback options for question=%s",
+                    getattr(question_model, "question_id", None),
+                )
+
+                difficulty = getattr(question_model, "difficulty", None)
+                if hasattr(difficulty, "value"):
+                    difficulty = difficulty.value
+
+                raw_options = getattr(question_model, "question_options", None) or []
+                correct_answer = getattr(question_model, "answer", None)
+
+                options = list(raw_options) if isinstance(raw_options, list) else []
+
+                if correct_answer and correct_answer not in options:
+                    options.append(correct_answer)
+
+                return {
+                    "question_id": getattr(question_model, "question_id", None),
+                    "question": getattr(question_model, "question", None),
+                    "answer": correct_answer,
+                    "genre": getattr(question_model, "genre", None),
+                    "difficulty": difficulty or "easy",
+                    "display_options": options,
+                    "options": options,
+                    "game_type": "buzzer",
+                }
 
         current_question = None
 
