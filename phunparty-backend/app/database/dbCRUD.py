@@ -629,8 +629,8 @@ def add_question_to_session(
 
     db.execute(text("SELECT set_config('app.question_bank_read', 'on', true)"))
     # Build query with genre filter
-    query = (
-        db.query(Questions).filter(func.lower(Questions.genre)) == game.genre.lower()
+    query = db.query(Questions).filter(
+        func.lower(Questions.genre) == game.genre.lower()
     )
 
     # Add difficulty filter if specified
