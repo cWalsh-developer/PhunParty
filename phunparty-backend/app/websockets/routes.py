@@ -1354,6 +1354,41 @@ async def handle_fair_play_focus_lost(
         reason=reason,
         lost_at=lost_at,
     )
+    pending_status_payload = {
+        "player_id": player_id,
+        "roster_player_id": make_roster_player_id(session_code, player_id),
+        "question_id": question_id,
+        "is_frozen": True,
+        "frozen_question_id": question_id,
+        "is_pending_grace": True,
+        "answer_status": "fair_play_grace",
+        "reason": reason,
+        "fair_play_reason": reason,
+        "message": "Fair Play warning: return to the question immediately.",
+        "grace_period_ms": FAIR_PLAY_GRACE_PERIOD_MS,
+    }
+
+    manager.update_fair_play_status(
+        session_code,
+        player_id,
+        is_frozen=True,
+        frozen_question_id=question_id,
+        is_pending_grace=True,
+        answer_status="fair_play_grace",
+        reason=reason,
+        fair_play_reason=reason,
+        message="Fair Play warning: return to the question immediately.",
+    )
+
+    await manager.send_personal_critical_message(
+        session_code,
+        {
+            "type": "fair_play_status_update",
+            "data": pending_status_payload,
+        },
+        websocket,
+    )
+
     asyncio.create_task(
         finalize_focus_loss_after_grace(
             session_code=session_code,
@@ -1529,9 +1564,15 @@ async def handle_fair_play_focus_returned(
     if cleared:
         manager.update_fair_play_status(
             session_code,
-            safe_player_ref(player_id),
+            player_id,
             connection_state="connected",
+            is_frozen=False,
+            frozen_question_id=None,
+            is_pending_grace=False,
             answer_status=None,
+            reason=None,
+            fair_play_reason=None,
+            message=None,
         )
 
         await manager.broadcast_player_roster_update(session_code)
@@ -1549,10 +1590,18 @@ async def handle_fair_play_focus_returned(
 
         await manager.send_personal_message(
             {
-                "type": "fair_play_focus_grace_cleared",
+                "type": "fair_play_status_update",
                 "data": {
-                    **cleared,
-                    "returned_at": data.get("returned_at") or iso_utc(utc_now()),
+                    "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(session_code, player_id),
+                    "question_id": cleared.get("question_id"),
+                    "is_frozen": False,
+                    "frozen_question_id": None,
+                    "is_pending_grace": False,
+                    "answer_status": None,
+                    "reason": None,
+                    "fair_play_reason": None,
+                    "message": None,
                 },
             },
             websocket,
@@ -1677,7 +1726,11 @@ async def advance_after_fair_play_if_ready(
     db: Session,
     acting_player_id: Optional[str] = None,
 ):
+    if acting_player_id:
+        set_rls_current_player(db, acting_player_id)
+
     game_progression = check_and_advance_game(db, session_code, question_id)
+
     await manager.broadcast_to_session(
         session_code,
         {
@@ -1688,21 +1741,37 @@ async def advance_after_fair_play_if_ready(
     )
 
     action = game_progression.get("action")
+
     if action == "next_question":
         updated_game_state = get_game_session_state(db, session_code)
+
         if updated_game_state and updated_game_state.current_question_id:
             manager.clear_question_queue(session_code)
+
             question_start_at = utc_now() + timedelta(
                 milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
             )
+
             await reveal_current_question(
                 session_code,
                 db,
                 iso_utc(question_start_at),
                 acting_player_id=acting_player_id,
             )
+        else:
+            logger.warning(
+                "Fair Play progression could not reveal next question: session=%s question=%s progression=%s",
+                session_code,
+                question_id,
+                game_progression,
+            )
+
     elif action == "game_ended":
-        await handle_game_end(session_code, db)
+        await handle_game_end(
+            session_code,
+            db,
+            acting_player_id=acting_player_id,
+        )
 
     return game_progression
 
