@@ -1237,6 +1237,7 @@ def advance_to_next_question(db: Session, session_code: str) -> dict:
             # No more questions, end the game using the comprehensive end_game_session
             return end_game_session(db, session_code)
     except Exception as e:
+        db.rollback()
         return {"error": str(e)}
 
 
@@ -1394,6 +1395,7 @@ def verify_otp(db: Session, phone: str, otp: str) -> bool:
             PasswordReset.used == False,
             PasswordReset.expires_at > datetime.now(timezone.utc),
         )
+        .with_for_update(skip_locked=True)
         .first()
     )
     if record:

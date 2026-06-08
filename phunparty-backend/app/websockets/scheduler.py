@@ -12,6 +12,7 @@ from app.database.dbCRUD import (
     get_session_by_code,
 )
 from app.dependencies import get_db
+from app.security.question_payload import sanitize_question_for_client
 from app.security.rls import set_rls_current_player
 from app.websockets.game_modes import BUZZER_GAME_TYPE, resolve_session_game_type
 from app.websockets.manager import SessionPhase, manager
@@ -157,6 +158,9 @@ async def reveal_current_question(
     acting_player_id: Optional[str] = None,
 ) -> bool:
     """Move the server-owned phase to QUESTION and broadcast exactly once."""
+    if acting_player_id:
+        set_rls_current_player(db, acting_player_id)
+
     game_status = get_current_question_details(db, session_code)
     if not game_status or not game_status.get("current_question"):
         game_state = get_game_session_state(db, session_code)
@@ -237,6 +241,7 @@ async def reveal_current_question(
     question_data["phase"] = phase_state["phase"]
     question_data["server_time_ms"] = phase_state["server_time_ms"]
     question_data["game_type"] = game_type
+    client_question_data = sanitize_question_for_client(question_data)
 
     manager.reset_all_players_answered(session_code)
     if question_id:
@@ -257,13 +262,13 @@ async def reveal_current_question(
         )
     if game_type == BUZZER_GAME_TYPE:
         manager.start_buzzer_question(session_code, question_id)
-        mobile_question_data = format_buzzer_question_for_mobile(question_data)
+        mobile_question_data = format_buzzer_question_for_mobile(client_question_data)
         manager.queue_question(session_code, mobile_question_data)
         await manager.broadcast_to_session(
             session_code,
             {
                 "type": "question_started",
-                "data": question_data,
+                "data": client_question_data,
             },
             only_client_types=["web"],
             critical=True,
@@ -282,12 +287,12 @@ async def reveal_current_question(
         await manager.broadcast_buzzer_state_update(session_code)
     else:
         manager.reset_buzzer_state(session_code)
-        manager.queue_question(session_code, question_data)
+        manager.queue_question(session_code, client_question_data)
         await manager.broadcast_to_session(
             session_code,
             {
                 "type": "question_started",
-                "data": question_data,
+                "data": client_question_data,
             },
             critical=True,
             require_ack=True,

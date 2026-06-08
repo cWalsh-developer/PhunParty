@@ -1280,8 +1280,13 @@ def test_focus_violation_delays_progression_after_fair_play_kick():
                             )
 
     kick_player.assert_awaited_once_with("SESSION123", "P1", 3, db)
-    sleep.assert_awaited_once_with(0.5)
-    advance.assert_awaited_once_with("SESSION123", "Q1", db)
+    sleep.assert_awaited_once_with(0.75)
+    advance.assert_awaited_once_with(
+        "SESSION123",
+        "Q1",
+        db,
+        acting_player_id="P1",
+    )
 
 
 def test_fair_play_focus_lost_starts_backend_grace_period():
@@ -1448,6 +1453,7 @@ def test_fair_play_window_violation_defaults_to_multi_window_reason():
                 "SESSION123",
                 "mobile",
                 "P1",
+                "P1",
                 game_handler,
                 MagicMock(),
             )
@@ -1530,6 +1536,7 @@ def test_buzzer_ui_update_sends_answer_data_only_to_winner():
             "question_active": True,
             "current_question_id": "Q1",
             "attempts": [],
+            "accepting_buzzes": True,
         }
         mock_manager.get_session_connections.return_value = {
             "ws1": {

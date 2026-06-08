@@ -5,7 +5,7 @@ Handles the business logic for different game modes
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.database.dbCRUD import (
     get_current_question_details,
@@ -15,6 +15,7 @@ from app.database.dbCRUD import (
 from app.database.fair_play_crud import is_player_frozen_for_question, is_player_kicked
 from app.logic.answer_validation import validate_answer_against_question
 from app.security.loggingUtils import safe_player_ref
+from app.security.question_payload import sanitize_question_for_client
 from app.security.roster_identity import make_roster_player_id
 from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.manager import SessionPhase, manager
@@ -62,15 +63,19 @@ class GameEventHandler:
         question_data["start_at"] = start_at
         question_data["phase"] = phase_state["phase"]
         question_data["server_time_ms"] = phase_state["server_time_ms"]
+        client_question_data = sanitize_question_for_client(question_data)
 
         logger.info(f"Broadcasting question to session {self.session_code}")
 
-        # Send full question to web clients with critical flag
+        # Send sanitized question to web clients with critical flag.
         await manager.broadcast_to_session(
             self.session_code,
             {
                 "type": "question_started",
-                "data": {"question": question_data, "game_type": self.game_type},
+                "data": {
+                    "question": client_question_data,
+                    "game_type": self.game_type,
+                },
             },
             only_client_types=["web"],
             critical=True,
@@ -78,7 +83,7 @@ class GameEventHandler:
         )
 
         # Send appropriate mobile UI data to mobile clients with critical flag
-        mobile_data = self.format_question_for_mobile(question_data)
+        mobile_data = self.format_question_for_mobile(client_question_data)
         await manager.broadcast_to_session(
             self.session_code,
             {"type": "question_started", "data": mobile_data},
@@ -210,6 +215,7 @@ class TriviaGameHandler(GameEventHandler):
                         self.session_code,
                         db,
                         iso_utc(question_start_at),
+                        acting_player_id=player_id,
                     )
                 else:
                     logger.warning("No current question ID found after auto-advance")
@@ -282,8 +288,6 @@ class TriviaGameHandler(GameEventHandler):
                 "display_options", question_data.get("options", [])
             ),  # Alias for compatibility
             "ui_mode": ui_mode,
-            "correct_index": question_data.get("correct_index"),
-            "answer": question_data.get("answer"),
         }
 
 
@@ -334,7 +338,7 @@ class BuzzerGameHandler(GameEventHandler):
         logger.info(
             "Rejected Fair Play locked buzzer press: session=%s player=%s question=%s",
             self.session_code,
-            player_id,
+            safe_player_ref(player_id),
             question_id,
         )
         for connection_info in manager.get_player_connections(
@@ -354,12 +358,13 @@ class BuzzerGameHandler(GameEventHandler):
                     },
                     websocket,
                 )
-            await manager.broadcast_buzzer_state_update(self.session_code)
-            await self.update_mobile_buzzer_ui(
-                db,
-                message_override="Another player was frozen by Fair Play. Buzzing is open again!",
-            )
-            return True
+
+        await manager.broadcast_buzzer_state_update(self.session_code)
+        await self.update_mobile_buzzer_ui(
+            db,
+            message_override="Another player was frozen by Fair Play. Buzzing is open again!",
+        )
+        return True
 
     async def handle_buzzer_press(
         self, player_id: str, db: Session, incoming_question_id: str = None
@@ -488,7 +493,11 @@ class BuzzerGameHandler(GameEventHandler):
 
             await self.lock_buzzer_until_next_question("Moving to the next question...")
             if action == "next_question":
-                await self.reveal_current_db_question(db, "buzzer_correct_answer")
+                await self.reveal_current_db_question(
+                    db,
+                    "buzzer_correct_answer",
+                    acting_player_id=player_id,
+                )
             elif action == "game_ended":
                 await handle_game_end(self.session_code, db)
             else:
@@ -501,7 +510,11 @@ class BuzzerGameHandler(GameEventHandler):
                 await self.lock_buzzer_until_next_question(
                     "Waiting for the next question..."
                 )
-                await self.reveal_current_db_question(db, "buzzer_all_answered")
+                await self.reveal_current_db_question(
+                    db,
+                    "buzzer_all_answered",
+                    acting_player_id=player_id,
+                )
                 return
             if action == "game_ended":
                 await self.lock_buzzer_until_next_question(
@@ -682,7 +695,12 @@ class BuzzerGameHandler(GameEventHandler):
             ),
         }
 
-    async def reveal_current_db_question(self, db: Session, reason: str) -> bool:
+    async def reveal_current_db_question(
+        self,
+        db: Session,
+        reason: str,
+        acting_player_id: Optional[str] = None,
+    ) -> bool:
         """Reveal the DB's current question after answer logic has already advanced it."""
         from app.logic.game_logic import get_game_session_state
 
@@ -701,6 +719,7 @@ class BuzzerGameHandler(GameEventHandler):
             self.session_code,
             db,
             iso_utc(question_start_at),
+            acting_player_id=acting_player_id,
         )
 
     async def reset_buzzer_state(self):

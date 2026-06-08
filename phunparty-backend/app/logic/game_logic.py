@@ -26,6 +26,7 @@ from app.database.fair_play_crud import (
     is_player_kicked,
 )
 from app.logic.answer_validation import validate_answer_against_question
+from app.security.question_payload import sanitize_question_for_client
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -464,8 +465,7 @@ async def broadcast_question_with_options(
             },
         }
 
-        # Create message for web host (with correct answer info AND display_options)
-        # Web gets extra fields for answer tracking
+        # Create message for web host with display metadata only.
         host_message = {
             "type": "question_started",
             "data": {
@@ -474,8 +474,6 @@ async def broadcast_question_with_options(
                 "question": question_data["question"],
                 "genre": question_data["genre"],
                 "difficulty": question_data["difficulty"],
-                "answer": question_data["answer"],
-                "correct_index": question_data["correct_index"],
                 "display_options": question_data[
                     "display_options"
                 ],  # Randomized options for display
@@ -488,6 +486,7 @@ async def broadcast_question_with_options(
                 "total_questions": None,
             },
         }
+        host_message["data"] = sanitize_question_for_client(host_message["data"])
 
         logger.info(
             f"📝 Broadcasting question {question_id} - display_options: {question_data['display_options']}, correct_index: {question_data.get('correct_index')}, ui_mode: {ui_mode}"
@@ -519,7 +518,7 @@ async def broadcast_question_with_options(
         logger.info(f"📱 MOBILE MESSAGE PAYLOAD: {player_message}")
         await manager.broadcast_to_mobile_players(session_code, player_message)
 
-        # Send to web host (with answer info and display_options)
+        # Send to web host with display_options.
         logger.info(
             f"💻 Sending question_started to WEB clients - question_id: {question_data['question_id']}, ui_mode: {ui_mode}, options: {len(question_data['display_options'])} items"
         )

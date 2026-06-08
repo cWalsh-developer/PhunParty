@@ -65,7 +65,6 @@ FAIR_PLAY_GRACE_PERIOD_MS = 2000
 IMMEDIATE_FAIR_PLAY_VIOLATION_REASONS = {
     "multi_window_mode",
     "picture_in_picture_mode",
-    "window_focus_lost",
 }
 
 
@@ -1673,7 +1672,10 @@ async def schedule_absent_player_fair_play_checks(
 
 
 async def advance_after_fair_play_if_ready(
-    session_code: str, question_id: str, db: Session
+    session_code: str,
+    question_id: str,
+    db: Session,
+    acting_player_id: Optional[str] = None,
 ):
     game_progression = check_and_advance_game(db, session_code, question_id)
     await manager.broadcast_to_session(
@@ -1697,6 +1699,7 @@ async def advance_after_fair_play_if_ready(
                 session_code,
                 db,
                 iso_utc(question_start_at),
+                acting_player_id=acting_player_id,
             )
     elif action == "game_ended":
         await handle_game_end(session_code, db)
@@ -1935,7 +1938,12 @@ async def handle_focus_violation(
     if record.is_kicked:
         await kick_player_for_fair_play(session_code, player_id, max_strikes, db)
         await asyncio.sleep(0.75)
-    await advance_after_fair_play_if_ready(session_code, question_id, db)
+    await advance_after_fair_play_if_ready(
+        session_code,
+        question_id,
+        db,
+        acting_player_id=player_id,
+    )
 
 
 async def kick_player_for_fair_play(
@@ -2258,43 +2266,42 @@ async def handle_game_start(
             game_state.started_at = utc_now()
         db.commit()
 
-        # Get first question data to include in game_started event
+        # Get first question data from the already-visible game status.
         first_question_data = None
-        if game_state and game_state.current_question_id:
-            try:
-                from app.logic.game_logic import get_question_with_randomized_options
+        current_question = game_status.get("current_question") if game_status else None
 
-                question_full = get_question_with_randomized_options(
-                    db, game_state.current_question_id
-                )
+        if current_question:
+            difficulty = str(current_question.get("difficulty", "easy")).lower()
+            display_options = (
+                current_question.get("display_options")
+                or current_question.get("options")
+                or []
+            )
 
-                # Determine ui_mode
-                difficulty = question_full.get("difficulty", "").lower()
-                ui_mode = "text_input"
-                if (
-                    question_full.get("display_options")
-                    and len(question_full["display_options"]) > 0
-                ):
-                    if difficulty in ["easy", "medium"]:
-                        ui_mode = "multiple_choice"
-                    elif difficulty == "hard":
-                        ui_mode = "text_input"
+            ui_mode = "text_input"
+            if display_options and difficulty in {"easy", "medium"}:
+                ui_mode = "multiple_choice"
 
-                first_question_data = {
-                    "game_type": "trivia",  # CRITICAL: Mobile needs this field!
-                    "question_id": question_full["question_id"],
-                    "question": question_full["question"],
-                    "genre": question_full["genre"],
-                    "difficulty": question_full["difficulty"],
-                    "display_options": question_full["display_options"],
-                    "options": question_full["display_options"],
-                    "ui_mode": ui_mode,
-                }
-                logger.info(
-                    f"ðŸ“ Including first question in game_started: {question_full['question_id']}, ui_mode={ui_mode}, game_type=trivia"
-                )
-            except Exception as e:
-                logger.error(f"Error getting first question for game_started: {e}")
+            first_question_data = {
+                "game_type": current_question.get("game_type", "trivia"),
+                "question_id": current_question.get("question_id"),
+                "question": current_question.get("question"),
+                "genre": current_question.get("genre"),
+                "difficulty": current_question.get("difficulty"),
+                "display_options": display_options,
+                "options": display_options,
+                "ui_mode": ui_mode,
+                "start_at": current_question.get("start_at"),
+                "phase": current_question.get("phase"),
+                "server_time_ms": current_question.get("server_time_ms"),
+            }
+            logger.info(
+                "Including first question in game_started preload: %s ui_mode=%s",
+                first_question_data["question_id"],
+                ui_mode,
+            )
+        else:
+            logger.warning("No question data available for preload.")
 
         # Step 1: Broadcast game_started event WITHOUT question data
         # This prevents mobiles from rendering early before intro completes

@@ -6,6 +6,7 @@ from app.schemas.fair_play_models import FairPlayViolation, SessionPlayerFairPla
 from app.schemas.game_state_models import PlayerResponse
 from app.schemas.scores_model import Scores
 from app.schemas.session_player_assignment_model import SessionAssignment
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 DEFAULT_MAX_FAIR_PLAY_STRIKES = 3
@@ -137,7 +138,11 @@ def record_focus_violation(
     if record.strike_count >= max_strikes:
         record.is_kicked = True
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise ValueError("Focus violation already recorded for this question")
     return record, violation, response_voided
 
 

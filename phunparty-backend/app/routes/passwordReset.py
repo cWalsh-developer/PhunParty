@@ -1,4 +1,4 @@
-import random
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from app.database.dbCRUD import get_player_by_phone, store_otp
@@ -13,6 +13,7 @@ from app.models.passwordResetModel import (
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
 from app.security.rls import set_rls_current_player, set_rls_reset_phone
 from app.utils.generateJWT import create_access_token
+from app.utils.phone_numbers import normalize_phone_number
 from app.utils.sendSMS import format_number_uk, send_sms
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -24,7 +25,16 @@ GENERIC_RESET_MESSAGE = "If that phone number is registered, a reset code will b
 
 def generate_otp():
     """Generate a 6-digit OTP"""
-    return str(random.randint(100000, 999999))
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def reset_rate_identifier(phone_number: str) -> str:
+    try:
+        normalized = normalize_phone_number(phone_number)
+    except ValueError:
+        normalized = None
+
+    return normalized or phone_number.strip().lower()
 
 
 def create_password_reset_token(player_id: str, phone_number: str) -> str:
@@ -84,6 +94,7 @@ async def request_password_reset(
     phone: PasswordResetRequest,
     db: Session = Depends(get_db),
 ):
+    phone_identifier = reset_rate_identifier(phone.phone_number)
     await enforce_rate_limit(
         request,
         scope="password-reset-ip",
@@ -94,7 +105,7 @@ async def request_password_reset(
     await enforce_rate_limit(
         request,
         scope="password-reset-phone",
-        identifier=phone.phone_number,
+        identifier=phone_identifier,
         limit=3,
         window_seconds=3600,
     )
@@ -133,6 +144,7 @@ async def verify_otp_route(
     phone: PasswordVerifyRequest,
     db: Session = Depends(get_db),
 ):
+    phone_identifier = reset_rate_identifier(phone.phone_number)
     await enforce_rate_limit(
         request,
         scope="password-verify-ip",
@@ -143,7 +155,7 @@ async def verify_otp_route(
     await enforce_rate_limit(
         request,
         scope="password-verify-phone",
-        identifier=phone.phone_number,
+        identifier=phone_identifier,
         limit=5,
         window_seconds=900,
     )
