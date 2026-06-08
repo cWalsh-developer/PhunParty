@@ -5,6 +5,8 @@ import inspect
 import logging
 from datetime import datetime
 
+from requests import session
+
 from app.database.dbCRUD import (
     get_final_scores,
     update_game_session_ended,
@@ -25,23 +27,28 @@ async def handle_game_end(
 ) -> bool:
     """Finalize a game session and broadcast the authoritative end state."""
     try:
-        # Ensure this DB session has an RLS context before reading/updating
-        # game_session_states, scores, assignments, etc.
-        if acting_player_id:
-            set_rls_current_player(db, acting_player_id)
-        else:
-            session = get_session_by_code(db, session_code)
-            owner_player_id = (
-                getattr(session, "owner_player_id", None) if session else None
-            )
+        # Ending a game mutates session-owner state, so always prefer the session owner
+        # for RLS. The acting player may simply be the last player who answered.
+        session = get_session_by_code(db, session_code)
+        owner_player_id = getattr(session, "owner_player_id", None) if session else None
 
-            if owner_player_id:
-                set_rls_current_player(db, owner_player_id)
-            else:
-                logger.warning(
-                    "Could not resolve owner RLS context while ending session=%s",
-                    session_code,
-                )
+        end_actor_id = owner_player_id or acting_player_id
+
+        if end_actor_id:
+            logger.warning(
+                "GAME END RLS CONTEXT session=%s acting_player=%s owner=%s using=%s",
+                session_code,
+                acting_player_id,
+                owner_player_id,
+                end_actor_id,
+            )
+            set_rls_current_player(db, end_actor_id)
+        else:
+            logger.warning(
+                "Could not resolve RLS context while ending session=%s acting_player=%s",
+                session_code,
+                acting_player_id,
+            )
 
         success = update_game_session_ended(db, session_code)
 
