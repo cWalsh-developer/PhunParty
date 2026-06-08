@@ -8,6 +8,8 @@ import logging
 import random
 from datetime import UTC, datetime
 
+from requests import session
+
 from app.database.dbCRUD import (
     advance_to_next_question,
     count_responses_for_question,
@@ -16,6 +18,7 @@ from app.database.dbCRUD import (
     get_number_of_players_in_session,
     get_player_response,
     get_question_by_id,
+    get_session_by_code,
     update_game_state_waiting_status,
     update_scores,
 )
@@ -27,6 +30,7 @@ from app.database.fair_play_crud import (
 )
 from app.logic.answer_validation import validate_answer_against_question
 from app.security.question_payload import sanitize_question_for_client
+from app.security.rls import set_rls_current_player
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -89,7 +93,23 @@ def submit_player_answer(
     if is_correct:
         update_scores(db, session_code, player_id)
 
-    # Check if all players have answered this question
+    # Game progression mutates session-owned state.
+    # The answer and score are recorded under the answering player's RLS context,
+    # but advancing/revealing/ending the session must run as the session owner.
+    session = get_session_by_code(db, session_code)
+    progression_actor_id = (
+        session.owner_player_id if session and session.owner_player_id else player_id
+    )
+
+    logger.warning(
+        "ANSWER PROGRESSION CONTEXT session=%s answering_player=%s progression_actor=%s",
+        session_code,
+        player_id,
+        progression_actor_id,
+    )
+
+    set_rls_current_player(db, progression_actor_id)
+
     game_progression = check_and_advance_game(db, session_code, question_id)
 
     if "error" in game_progression:
@@ -105,7 +125,11 @@ def submit_player_answer(
             "error": game_progression["error"],
             "question_id": question_id,
         }
+
     db.commit()
+
+    # Restore the original answering-player context for anything else this request does.
+    set_rls_current_player(db, player_id)
     return {
         "player_answer": player_answer,
         "is_correct": is_correct,
