@@ -926,29 +926,85 @@ async def handle_websocket_message(
 
     elif message_type == "submit_answer" and client_type == "mobile":
         # Player submitting an answer
-        answer = data.get("answer")
+        raw_answer = data.get("answer")
         question_id = data.get("question_id")
 
-        if answer and question_id and player_id:
-            if manager.is_player_frozen_for_question(
-                session_code, player_id, question_id
-            ) or is_player_kicked(db, session_code, player_id):
-                await manager.send_personal_message(
-                    {
-                        "type": "answer_rejected",
-                        "data": {
-                            "reason": "fair_play_restriction",
-                            "question_id": question_id,
-                            "is_frozen": manager.is_player_frozen_for_question(
-                                session_code, player_id, question_id
-                            ),
-                            "is_kicked": is_player_kicked(db, session_code, player_id),
-                        },
+        logger.warning(
+            "SUBMIT ANSWER WS HIT session=%s player=%s question=%s raw_answer=%r data=%s",
+            session_code,
+            player_id,
+            question_id,
+            raw_answer,
+            data,
+        )
+
+        if raw_answer is None or question_id is None or not player_id:
+            logger.warning(
+                "SUBMIT ANSWER REJECTED missing data session=%s player=%s question=%s raw_answer=%r",
+                session_code,
+                player_id,
+                question_id,
+                raw_answer,
+            )
+
+            await manager.send_personal_message(
+                {
+                    "type": "answer_rejected",
+                    "data": {
+                        "reason": "missing_answer_data",
+                        "message": "Your answer could not be submitted. Please try again.",
+                        "question_id": question_id,
                     },
-                    websocket,
-                )
-                return
-            await game_handler.handle_player_answer(player_id, answer, question_id, db)
+                },
+                websocket,
+            )
+            return
+
+        answer = str(raw_answer).strip()
+
+        if answer == "":
+            logger.warning(
+                "SUBMIT ANSWER REJECTED empty answer session=%s player=%s question=%s raw_answer=%r",
+                session_code,
+                player_id,
+                question_id,
+                raw_answer,
+            )
+
+            await manager.send_personal_message(
+                {
+                    "type": "answer_rejected",
+                    "data": {
+                        "reason": "empty_answer",
+                        "message": "Please select or enter an answer before submitting.",
+                        "question_id": question_id,
+                    },
+                },
+                websocket,
+            )
+            return
+
+        if manager.is_player_frozen_for_question(
+            session_code, player_id, question_id
+        ) or is_player_kicked(db, session_code, player_id):
+            await manager.send_personal_message(
+                {
+                    "type": "answer_rejected",
+                    "data": {
+                        "reason": "fair_play_restriction",
+                        "question_id": question_id,
+                        "is_frozen": manager.is_player_frozen_for_question(
+                            session_code, player_id, question_id
+                        ),
+                        "is_kicked": is_player_kicked(db, session_code, player_id),
+                    },
+                },
+                websocket,
+            )
+            return
+
+        await game_handler.handle_player_answer(player_id, answer, question_id, db)
+
     elif message_type == "player_announce" and client_type == "mobile":
         # Mobile client announcing presence after connection (backup mechanism)
         # Use authoritative roster sync to avoid duplicate/missed join states.
