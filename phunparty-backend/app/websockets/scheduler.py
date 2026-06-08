@@ -139,10 +139,6 @@ async def advance_or_end_current_question(
             acting_player_id,
         )
 
-    # CRITICAL:
-    # submit_player_answer() commits and changes RLS context before this function
-    # is called. The SQLAlchemy Session can still hold an old game_session_states
-    # object in its identity map. Expire it BEFORE reading or advancing.
     try:
         db.expire_all()
     except Exception:
@@ -173,27 +169,49 @@ async def advance_or_end_current_question(
         result,
     )
 
-    try:
-        db.flush()
-        db.expire_all()
-    except Exception:
-        logger.exception(
-            "ADVANCE POST-REFRESH FAILED session=%s reason=%s",
+    if action == "next_question":
+        try:
+            db.commit()
+            logger.warning(
+                "ADVANCE COMMITTED session=%s reason=%s next_question=%s index=%s",
+                session_code,
+                reason,
+                result.get("next_question_id"),
+                result.get("current_question_index"),
+            )
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "ADVANCE COMMIT FAILED session=%s reason=%s result=%s",
+                session_code,
+                reason,
+                result,
+            )
+            return False
+
+        # New transaction after commit. Re-apply RLS before reading/revealing.
+        if progression_actor_id:
+            set_rls_current_player(db, progression_actor_id)
+
+        try:
+            db.expire_all()
+        except Exception:
+            logger.exception(
+                "ADVANCE POST-COMMIT REFRESH FAILED session=%s reason=%s",
+                session_code,
+                reason,
+            )
+
+        after_state = get_game_session_state(db, session_code)
+        logger.warning(
+            "ADVANCE AFTER COMMIT session=%s reason=%s index=%s current_question=%s total=%s",
             session_code,
             reason,
+            getattr(after_state, "current_question_index", None),
+            getattr(after_state, "current_question_id", None),
+            getattr(after_state, "total_questions", None),
         )
 
-    after_state = get_game_session_state(db, session_code)
-    logger.warning(
-        "ADVANCE AFTER session=%s reason=%s index=%s current_question=%s total=%s",
-        session_code,
-        reason,
-        getattr(after_state, "current_question_index", None),
-        getattr(after_state, "current_question_id", None),
-        getattr(after_state, "total_questions", None),
-    )
-
-    if action == "next_question":
         manager.clear_question_queue(session_code)
 
         question_start_at = utc_now() + timedelta(
@@ -218,6 +236,21 @@ async def advance_or_end_current_question(
         return revealed
 
     if action == "game_ended":
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "ADVANCE END COMMIT FAILED session=%s reason=%s result=%s",
+                session_code,
+                reason,
+                result,
+            )
+            return False
+
+        if progression_actor_id:
+            set_rls_current_player(db, progression_actor_id)
+
         from app.websockets.game_lifecycle import handle_game_end
 
         logger.warning(
@@ -232,6 +265,9 @@ async def advance_or_end_current_question(
             db,
             acting_player_id=progression_actor_id,
         )
+
+    if "error" in result:
+        db.rollback()
 
     logger.warning(
         "ADVANCE UNEXPECTED RESULT session=%s reason=%s result=%s",
