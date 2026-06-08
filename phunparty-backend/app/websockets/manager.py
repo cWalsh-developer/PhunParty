@@ -1814,6 +1814,7 @@ class ConnectionManager:
                 if state.get("question_active")
                 and state.get("accepting_buzzes")
                 and not state.get("transitioning")
+                and not current_winner
                 else "waiting"
             ),
             "server_time_ms": self._utc_now_ms(),
