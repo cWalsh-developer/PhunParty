@@ -57,7 +57,6 @@ def mark_notification_read(
         notification.is_read = True
         notification.read_at = utc_now()
         db.commit()
-        db.refresh(notification)
     return notification
 
 
@@ -153,5 +152,4 @@ def update_notification_settings(
         player.allow_phone_discovery = allow_phone_discovery
 
     db.commit()
-    db.refresh(player)
     return player

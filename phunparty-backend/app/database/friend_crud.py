@@ -25,7 +25,6 @@ def ensure_player_friend_code(db: Session, player: Players) -> Players:
 
     player.friend_code = generate_unique_friend_code(db)
     db.commit()
-    db.refresh(player)
     return player
 
 
@@ -139,7 +138,6 @@ def send_friend_request(
         data={"friend_request_id": friend_request.id},
     )
     db.commit()
-    db.refresh(friend_request)
     return friend_request
 
 
@@ -186,7 +184,6 @@ def accept_friend_request(
         data={"friend_request_id": friend_request.id},
     )
     db.commit()
-    db.refresh(friend_request)
     return friend_request
 
 
@@ -206,7 +203,6 @@ def reject_friend_request(
     friend_request.status = REJECTED
     friend_request.responded_at = utc_now()
     db.commit()
-    db.refresh(friend_request)
     return friend_request
 
 

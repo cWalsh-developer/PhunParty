@@ -49,8 +49,8 @@ def create_game(db: Session, rules: str, genre: str) -> Game:
     game_code = generate_game_code()
     new_game = Game(game_code=game_code, rules=rules, genre=genre)
     db.add(new_game)
+    db.flush()
     db.commit()
-    db.refresh(new_game)
     return new_game
 
 
@@ -84,13 +84,11 @@ def create_game_session(
             owner_player_id=owner_player_id,
         )
         db.add(gameSession)
-        db.commit()
-        db.refresh(gameSession)
-        if not gameSession:
-            raise ValueError("Failed to create game session")
+        db.flush()
 
         add_question_to_session(db, session_code, difficulty)
         create_game_session_state(db, session_code, ispublic)
+
         return gameSession
     except Exception:
         db.rollback()
@@ -362,8 +360,8 @@ def create_player(
         friend_code=generate_unique_friend_code(db),
     )
     db.add(new_player)
+    db.flush()
     db.commit()
-    db.refresh(new_player)
     return new_player
 
 
@@ -374,7 +372,6 @@ def update_player_game_code(db: Session, player_id: str, game_code: str) -> Play
         raise ValueError(f"Player {player_id} not found")
     player.active_game_code = game_code
     db.commit()
-    db.refresh(player)
     return player
 
 
@@ -406,7 +403,6 @@ def deactivate_player(db: Session, player_id: str) -> dict:
     revoked_friend_requests = revoke_pending_friend_requests_for_player(db, player_id)
 
     db.commit()
-    db.refresh(player)
 
     # Calculate grace period expiration (30 days by default)
     from dateutil.relativedelta import relativedelta
@@ -445,7 +441,6 @@ def reactivate_player(db: Session, player: Players) -> Players:
     player.deactivated_at = None
 
     db.commit()
-    db.refresh(player)
 
     return player
 
@@ -487,7 +482,6 @@ def permanently_delete_player(db: Session, player_id: str) -> None:
     player.profile_photo_url = None  # DELETED
 
     db.commit()
-    db.refresh(player)
 
     # What remains: player_id (anonymized reference only), is_deleted flag, deleted_at timestamp
     # Game history (SessionAssignment, Scores, PlayerResponse) preserved for other players' records
@@ -560,7 +554,6 @@ def update_player(db: Session, player_id: str, player: Player) -> Players:
         ):
             new_player.profile_photo_url = player.profile_photo_url
         db.commit()
-        db.refresh(new_player)
     return new_player
 
 
@@ -572,7 +565,6 @@ def update_player_photo(db: Session, player_id: str, photo_url: str = None) -> P
 
     player.profile_photo_url = photo_url
     db.commit()
-    db.refresh(player)
     return player
 
 
@@ -611,8 +603,8 @@ def assign_player_to_session(db: Session, player_id: str, session_code: str) -> 
         session_end=None,
     )
     db.add(assignment)
+    db.flush()
     db.commit()
-    db.refresh(assignment)
 
     # Session Questions Assignment CRUD operations --------------------------------------------------------------------------------------------------------------
 
@@ -673,6 +665,7 @@ def add_question_to_session(
             session_code=session_code,
         )
         db.add(assignment)
+    db.flush()
     db.commit()
 
 
@@ -682,8 +675,8 @@ def submit_questions(db: Session, question: Questions) -> Questions:
     if not question.question_id:
         question.question_id = generate_question_id()
     db.add(question)
+    db.flush()
     db.commit()
-    db.refresh(question)
     return question
 
     # Questions CRUD operations --------------------------------------------------------------------------------------------------------------
@@ -740,7 +733,6 @@ def update_scores(db: Session, session_code: str, player_id: str) -> Scores:
     existing_score = get_scores_by_session_and_player(db, session_code, player_id)
     existing_score.score += 1
     db.commit()
-    db.refresh(existing_score)
     return existing_score
 
 
@@ -762,8 +754,8 @@ def create_score(db: Session, session_code: str, player_id: str) -> Scores:
     )
 
     db.add(new_score)
+    db.flush()
     db.commit()
-    db.refresh(new_score)
     return new_score
 
 
@@ -792,10 +784,6 @@ def calculate_game_results(db: Session, session_code: str):
         else:
             s.result = "lose"
     db.commit()
-
-    # Refresh each score object individually
-    for score in session_scores:
-        db.refresh(score)
 
     return session_scores
 
@@ -830,8 +818,8 @@ def create_game_session_state(
     )
 
     db.add(game_state)
+    db.flush()
     db.commit()
-    db.refresh(game_state)
     return game_state
 
 
@@ -1133,8 +1121,8 @@ def create_player_response(
     )
 
     db.add(response)
+    db.flush()
     db.commit()
-    db.refresh(response)
     return response
 
 
@@ -1196,7 +1184,6 @@ def advance_to_next_question(db: Session, session_code: str) -> dict:
             game_state.is_waiting_for_players = True
 
             db.commit()
-            db.refresh(game_state)
 
             return {
                 "action": "next_question",
@@ -1432,7 +1419,6 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
             logger.warning(f"Could not calculate game results for {session_code}: {e}")
 
         db.commit()
-        db.refresh(game_state)
 
         logger.info(f"Game session {session_code} ended at {game_state.ended_at}")
         return True

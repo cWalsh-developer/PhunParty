@@ -31,7 +31,6 @@ def update_fair_play_settings(
         game_state.max_fair_play_strikes = max(1, int(max_fair_play_strikes))
 
     db.commit()
-    db.refresh(game_state)
     return game_state
 
 
@@ -139,8 +138,6 @@ def record_focus_violation(
         record.is_kicked = True
 
     db.commit()
-    db.refresh(record)
-    db.refresh(violation)
     return record, violation, response_voided
 
 
