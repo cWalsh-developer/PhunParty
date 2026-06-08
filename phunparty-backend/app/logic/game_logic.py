@@ -87,11 +87,7 @@ def submit_player_answer(
 
     # Update score if correct
     if is_correct:
-        try:
-            update_scores(db, session_code, player_id)
-        except Exception:
-            # If score doesn't exist, this will be handled by the scores system
-            pass
+        update_scores(db, session_code, player_id, question_id)
 
     # Check if all players have answered this question
     game_progression = check_and_advance_game(db, session_code, question_id)

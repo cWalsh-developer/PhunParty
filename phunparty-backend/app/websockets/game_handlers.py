@@ -502,7 +502,10 @@ class BuzzerGameHandler(GameEventHandler):
                 await handle_game_end(self.session_code, db, acting_player_id=player_id)
             else:
                 await advance_or_end_current_question(
-                    self.session_code, db, reason="buzzer_correct_answer"
+                    self.session_code,
+                    db,
+                    reason="buzzer_correct_answer",
+                    acting_player_id=player_id,
                 )
 
         else:
@@ -576,7 +579,10 @@ class BuzzerGameHandler(GameEventHandler):
                     "Waiting for the next question..."
                 )
                 await advance_or_end_current_question(
-                    self.session_code, db, reason="buzzer_all_wrong"
+                    self.session_code,
+                    db,
+                    reason="buzzer_all_wrong",
+                    acting_player_id=player_id,
                 )
                 return
 

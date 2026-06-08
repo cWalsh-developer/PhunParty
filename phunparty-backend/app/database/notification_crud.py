@@ -123,13 +123,16 @@ def register_push_token(
 
 
 def get_active_push_tokens(db: Session, player_id: str) -> list[str]:
-    return [
-        token.expo_push_token
-        for token in db.query(UserPushToken)
-        .filter(UserPushToken.player_id == player_id)
-        .filter(UserPushToken.is_active == True)
-        .all()
-    ]
+    """Return active Expo push tokens for notification delivery."""
+    return list(
+        db.execute(
+            text("""
+                SELECT expo_push_token
+                FROM public.get_active_push_tokens_for_notification(:player_id)
+                """),
+            {"player_id": player_id},
+        ).scalars()
+    )
 
 
 def update_notification_settings(

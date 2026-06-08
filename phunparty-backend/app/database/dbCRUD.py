@@ -1248,16 +1248,17 @@ def update_game_state_waiting_status(
 ) -> None:
     """Update the waiting for players status"""
     game_state = get_game_session_state(db, session_code)
-    if game_state:
-        game_state.is_waiting_for_players = is_waiting
-        db.flush()
+    if not game_state:
+        raise ValueError("Game state not found")
+    game_state.is_waiting_for_players = is_waiting
+    db.flush()
 
 
 def get_current_question_details(db: Session, session_code: str) -> dict:
     """Get current question details for a session with full question data including options and ui_mode"""
     game_state = get_game_session_state(db, session_code)
     if not game_state:
-        return {"error": "Game session not found"}
+        raise ValueError("Game session not found")
 
     started_at = getattr(game_state, "started_at", None)
     ended_at = getattr(game_state, "ended_at", None)
