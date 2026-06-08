@@ -15,7 +15,7 @@ from app.models.notifications import (
     PushTokenResponse,
 )
 from app.schemas.players_model import Players
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, logger
 from sqlalchemy.orm import Session
 
 router = APIRouter()
@@ -36,6 +36,12 @@ def register_push_token_route(
             request.platform,
         )
     except Exception:
+        logger.exception(
+            "Unable to register push token for player=%s platform=%s device_id=%s",
+            current_player.player_id,
+            request.platform,
+            request.device_id,
+        )
         raise HTTPException(
             status_code=500,
             detail="Unable to register push token",
