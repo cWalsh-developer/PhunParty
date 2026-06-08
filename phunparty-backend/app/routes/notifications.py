@@ -27,13 +27,19 @@ def register_push_token_route(
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
-    return register_push_token(
-        db,
-        current_player.player_id,
-        request.expo_push_token,
-        request.device_id,
-        request.platform,
-    )
+    try:
+        return register_push_token(
+            db,
+            current_player.player_id,
+            request.expo_push_token,
+            request.device_id,
+            request.platform,
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to register push token",
+        )
 
 
 @router.get("", response_model=NotificationListResponse)

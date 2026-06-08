@@ -4,6 +4,7 @@ from typing import Optional
 from app.schemas.players_model import Players
 from app.schemas.social_models import Notification, UserPushToken
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 
 def utc_now() -> datetime:
@@ -82,47 +83,43 @@ def register_push_token(
     device_id: Optional[str] = None,
     platform: Optional[str] = None,
 ) -> UserPushToken:
-    token = (
-        db.query(UserPushToken)
-        .filter(UserPushToken.player_id == player_id)
-        .filter(UserPushToken.expo_push_token == expo_push_token)
-        .first()
-    )
+    """
+    Register or transfer an Expo push token to the current player.
 
-    now = utc_now()
-
-    if token:
-        token.device_id = device_id
-        token.platform = platform
-        token.is_active = True
-        token.updated_at = now
-    else:
-        token = UserPushToken(
-            player_id=player_id,
-            expo_push_token=expo_push_token,
-            device_id=device_id,
-            platform=platform,
-            is_active=True,
-            updated_at=now,
-        )
-        db.add(token)
-
-    db.flush()
-
-    response_token = UserPushToken(
-        id=token.id,
-        player_id=token.player_id,
-        expo_push_token=token.expo_push_token,
-        device_id=token.device_id,
-        platform=token.platform,
-        is_active=token.is_active,
-        created_at=token.created_at,
-        updated_at=token.updated_at,
-    )
+    The DB function is SECURITY DEFINER because RLS may hide the existing
+    token row if it currently belongs to a different player.
+    """
+    token_id = db.execute(
+        text("""
+            SELECT id
+            FROM public.register_user_push_token(
+                :player_id,
+                :expo_push_token,
+                :device_id,
+                :platform
+            )
+            """),
+        {
+            "player_id": player_id,
+            "expo_push_token": expo_push_token,
+            "device_id": device_id,
+            "platform": platform,
+        },
+    ).scalar_one()
 
     db.commit()
 
-    return response_token
+    token = (
+        db.query(UserPushToken)
+        .filter(UserPushToken.id == token_id)
+        .filter(UserPushToken.player_id == player_id)
+        .first()
+    )
+
+    if not token:
+        raise ValueError("Push token was registered but could not be loaded")
+
+    return token
 
 
 def get_active_push_tokens(db: Session, player_id: str) -> list[str]:
