@@ -393,9 +393,22 @@ def get_mobile_current_question_payload(
     expected_question_id = phase_state.get("current_question_id")
     if expected_question_id and question_id != expected_question_id:
         logger.warning(
-            f"Refusing current question fallback for {session_code}; DB question {question_id} != phase question {expected_question_id}"
+            "Synchronizing stale question phase for %s; DB question %s != phase question %s",
+            session_code,
+            question_id,
+            expected_question_id,
         )
-        return None
+
+    phase_state = manager.set_session_phase(
+        session_code,
+        SessionPhase.QUESTION,
+        start_at=phase_state.get("start_at") or iso_utc(utc_now()),
+        question_expires_at=phase_state.get("question_expires_at"),
+        question_duration_ms=phase_state.get("question_duration_ms"),
+        current_question_id=question_id,
+        current_question_index=game_status.get("current_question_index"),
+        total_questions=game_status.get("total_questions"),
+    )
 
     game_type = game_type or resolve_session_game_type(db, session_code)
     question_data = {
@@ -1726,10 +1739,38 @@ async def advance_after_fair_play_if_ready(
     db: Session,
     acting_player_id: Optional[str] = None,
 ):
+    """
+    After a Fair Play strike/freeze, check whether the current question is now
+    resolved. If it is, advance and reveal the next authoritative question.
+    """
     if acting_player_id:
         set_rls_current_player(db, acting_player_id)
 
     game_progression = check_and_advance_game(db, session_code, question_id)
+
+    if "error" in game_progression:
+        logger.warning(
+            "Fair Play progression failed: session=%s question=%s progression=%s",
+            session_code,
+            question_id,
+            game_progression,
+        )
+        db.rollback()
+        return game_progression
+
+    # Important: if check_and_advance_game only flushed changes, commit the DB
+    # move before trying to reveal/recover the new question.
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Failed to commit Fair Play progression: session=%s question=%s progression=%s",
+            session_code,
+            question_id,
+            game_progression,
+        )
+        return {"error": "Failed to commit Fair Play progression"}
 
     await manager.broadcast_to_session(
         session_code,
@@ -1743,26 +1784,48 @@ async def advance_after_fair_play_if_ready(
     action = game_progression.get("action")
 
     if action == "next_question":
+        if acting_player_id:
+            set_rls_current_player(db, acting_player_id)
+
         updated_game_state = get_game_session_state(db, session_code)
 
-        if updated_game_state and updated_game_state.current_question_id:
-            manager.clear_question_queue(session_code)
-
-            question_start_at = utc_now() + timedelta(
-                milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
-            )
-
-            await reveal_current_question(
-                session_code,
-                db,
-                iso_utc(question_start_at),
-                acting_player_id=acting_player_id,
-            )
-        else:
+        if not updated_game_state or not updated_game_state.current_question_id:
             logger.warning(
-                "Fair Play progression could not reveal next question: session=%s question=%s progression=%s",
+                "Fair Play progression advanced but no current question exists: "
+                "session=%s old_question=%s progression=%s",
                 session_code,
                 question_id,
+                game_progression,
+            )
+            return game_progression
+
+        logger.info(
+            "Fair Play progression revealing next question: session=%s old_question=%s new_question=%s",
+            session_code,
+            question_id,
+            updated_game_state.current_question_id,
+        )
+
+        manager.clear_question_queue(session_code)
+
+        question_start_at = utc_now() + timedelta(
+            milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
+        )
+
+        revealed = await reveal_current_question(
+            session_code,
+            db,
+            iso_utc(question_start_at),
+            acting_player_id=acting_player_id,
+        )
+
+        if not revealed:
+            logger.warning(
+                "Fair Play progression failed to reveal next question: "
+                "session=%s old_question=%s new_question=%s progression=%s",
+                session_code,
+                question_id,
+                updated_game_state.current_question_id,
                 game_progression,
             )
 
@@ -1976,7 +2039,9 @@ async def handle_focus_violation(
         session_code, player_id
     ).values():
         player_websocket = connection_info.get("websocket")
-        if player_websocket:
+        if not player_websocket:
+            continue
+        try:
             await manager.send_personal_critical_message(
                 session_code,
                 {
@@ -1985,6 +2050,13 @@ async def handle_focus_violation(
                 },
                 player_websocket,
             )
+        except Exception:
+            logger.info(
+                "Removing stale Fair Play websocket for session=%s player=%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+            manager.disconnect_player_by_id(session_code, player_id)
     await manager.broadcast_to_session(
         session_code,
         {
