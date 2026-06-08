@@ -107,6 +107,11 @@ async def create_friend_request(
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
+    logger.warning(
+        "Creating friend request sender=%s receiver_code=%s",
+        current_player.player_id,
+        request.friend_code,
+    )
     try:
         friend_request = send_friend_request(
             db, current_player, request.friend_code, request.message
@@ -119,7 +124,7 @@ async def create_friend_request(
     if receiver:
         tokens = get_active_push_tokens(db, receiver.player_id)
 
-        logger.info(
+        logger.warning(
             "Friend request push lookup sender=%s receiver=%s notifications_enabled=%s token_count=%s",
             current_player.player_id,
             receiver.player_id,
@@ -172,6 +177,11 @@ async def accept_request(
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
+    logger.warning(
+        "Accepting friend request receiver=%s request_id=%s",
+        current_player.player_id,
+        request_id,
+    )
     try:
         friend_request = accept_friend_request(db, current_player, request_id)
     except ValueError as exc:
@@ -182,7 +192,7 @@ async def accept_request(
     if sender:
         tokens = get_active_push_tokens(db, sender.player_id)
 
-        logger.info(
+        logger.warning(
             "Friend accept push lookup accepter=%s sender=%s notifications_enabled=%s token_count=%s",
             current_player.player_id,
             sender.player_id,
