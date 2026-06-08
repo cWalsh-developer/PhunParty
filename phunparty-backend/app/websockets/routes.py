@@ -2151,6 +2151,9 @@ async def handle_game_start(
     try:
         logger.info(f"ðŸŽ® Starting game for session {session_code}")
 
+        if acting_player_id:
+            set_rls_current_player(db, acting_player_id)
+
         # Emit an authoritative roster snapshot at game-start boundary.
         await manager.broadcast_player_roster_update(session_code)
 
@@ -2188,38 +2191,19 @@ async def handle_game_start(
                 f"ðŸ“Š After roster sync - WebSocket: {ws_player_count}, Database: {db_player_count}"
             )
 
-        # Update game state in database to mark as started
-        from app.logic.game_logic import get_game_session_state, updateGameStartStatus
+        # Validate the first question before committing the started state.
+        from app.logic.game_logic import get_game_session_state
 
-        updateGameStartStatus(db, session_code, True)
-
-        # Get current game state to get the current question ID
         game_state = get_game_session_state(db, session_code)
-        current_question = None
-
-        game_status = (
-            get_current_question_details(db, session_code)
-            if game_state and game_state.current_question_id
-            else None
-        )
-        if (
-            not game_state
-            or not game_state.current_question_id
-            or not game_status
-            or not game_status.get("current_question")
-        ):
+        if not game_state or not game_state.current_question_id:
             logger.error(
-                "Cannot start game for %s; current question is not visible. "
-                "game_state_exists=%s current_question_id=%s game_status=%s",
+                "Cannot start game for %s; missing game state or current question id. "
+                "game_state_exists=%s current_question_id=%s acting_player_id=%s",
                 session_code,
                 bool(game_state),
                 getattr(game_state, "current_question_id", None),
-                game_status,
+                acting_player_id,
             )
-            if game_state:
-                game_state.isstarted = False
-                game_state.is_waiting_for_players = True
-                db.commit()
             manager.set_session_phase(session_code, SessionPhase.LOBBY)
             await manager.broadcast_to_session(
                 session_code,
@@ -2233,6 +2217,46 @@ async def handle_game_start(
                 critical=True,
             )
             return
+
+        game_status = get_current_question_details(db, session_code)
+
+        logger.warning(
+            "GAME START QUESTION CHECK session=%s actor=%s current_question_id=%s has_question=%s players_total=%s",
+            session_code,
+            acting_player_id,
+            game_state.current_question_id,
+            bool(game_status and game_status.get("current_question")),
+            (game_status.get("players", {}).get("total") if game_status else None),
+        )
+
+        if not game_status or not game_status.get("current_question"):
+            logger.error(
+                "Cannot start game for %s; current question is not visible. "
+                "game_state_exists=%s current_question_id=%s game_status=%s",
+                session_code,
+                bool(game_state),
+                getattr(game_state, "current_question_id", None),
+                game_status,
+            )
+            manager.set_session_phase(session_code, SessionPhase.LOBBY)
+            await manager.broadcast_to_session(
+                session_code,
+                {
+                    "type": "error",
+                    "data": {
+                        "message": "The first question could not be loaded. Please restart the session.",
+                        "reason": "current_question_not_visible",
+                    },
+                },
+                critical=True,
+            )
+            return
+
+        game_state.isstarted = True
+        game_state.is_waiting_for_players = True
+        if not game_state.started_at:
+            game_state.started_at = utc_now()
+        db.commit()
 
         # Get first question data to include in game_started event
         first_question_data = None

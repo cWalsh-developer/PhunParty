@@ -120,6 +120,7 @@ def start_game(
     try:
         assert_session_owner(db, current_player, session_code)
         updateGameStartStatus(db, session_code, True)
+        db.commit()
         return {"message": "Game started successfully"}
     except HTTPException:
         raise

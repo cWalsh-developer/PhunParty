@@ -118,7 +118,7 @@ def updateGameStartStatus(db: Session, session_code: str, is_started: bool) -> N
     game_state.isstarted = is_started
     if is_started and not game_state.started_at:
         game_state.started_at = datetime.now(UTC).replace(tzinfo=None)
-    db.commit()
+    db.flush()
 
 
 def check_and_advance_game(
