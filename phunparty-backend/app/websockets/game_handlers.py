@@ -722,7 +722,7 @@ class BuzzerGameHandler(GameEventHandler):
                     expected_question_id,
                     candidate_question_id,
                 )
-                question_model = get_question_by_id(db, expected_question_id)
+                question_model = get_question_by_id(expected_question_id, db)
                 current_question = question_model_to_dict(question_model)
             elif candidate_question:
                 current_question = candidate_question
@@ -732,7 +732,7 @@ class BuzzerGameHandler(GameEventHandler):
                     self.session_code,
                     expected_question_id,
                 )
-                question_model = get_question_by_id(db, expected_question_id)
+                question_model = get_question_by_id(expected_question_id, db)
                 current_question = question_model_to_dict(question_model)
 
             logger.warning(
