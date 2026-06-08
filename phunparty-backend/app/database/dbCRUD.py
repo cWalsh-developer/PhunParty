@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -627,8 +627,11 @@ def add_question_to_session(
     if not game:
         raise ValueError("Game not found")
 
+    db.execute(text("SELECT set_config('app.question_bank_read', 'on', true)"))
     # Build query with genre filter
-    query = db.query(Questions).filter(Questions.genre == game.genre)
+    query = (
+        db.query(Questions).filter(func.lower(Questions.genre)) == game.genre.lower()
+    )
 
     # Add difficulty filter if specified
     if difficulty:
