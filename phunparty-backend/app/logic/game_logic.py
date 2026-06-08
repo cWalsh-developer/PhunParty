@@ -91,11 +91,21 @@ def submit_player_answer(
 
     # Check if all players have answered this question
     game_progression = check_and_advance_game(db, session_code, question_id)
+
     if "error" in game_progression:
         db.rollback()
-    else:
-        db.commit()
-
+        logger.warning(
+            "ANSWER SUBMIT ROLLED BACK session=%s player=%s question=%s reason=%s",
+            session_code,
+            player_id,
+            question_id,
+            game_progression["error"],
+        )
+        return {
+            "error": game_progression["error"],
+            "question_id": question_id,
+        }
+    db.commit()
     return {
         "player_answer": player_answer,
         "is_correct": is_correct,
@@ -241,6 +251,11 @@ def check_and_advance_game(
         logger.info(f"Final check_and_advance_game result: {result}")
         return result
     except Exception as e:
+        logger.exception(
+            "CHECK AND ADVANCE FAILED session=%s question=%s",
+            session_code,
+            current_question_id,
+        )
         return {"error": str(e)}
 
 

@@ -146,7 +146,33 @@ class TriviaGameHandler(GameEventHandler):
 
             # Check if there was an error
             if "error" in result:
-                logger.error(f"Error submitting answer: {result['error']}")
+                logger.warning(
+                    "ANSWER REJECTED session=%s player=%s question=%s error=%s",
+                    self.session_code,
+                    player_id,
+                    question_id,
+                    result["error"],
+                )
+
+                for connection_info in manager.get_session_connections(
+                    self.session_code
+                ).values():
+                    if (
+                        connection_info.get("player_id") == player_id
+                        and connection_info.get("client_type") == "mobile"
+                    ):
+                        await manager.send_personal_message(
+                            {
+                                "type": "answer_rejected",
+                                "data": {
+                                    "message": result["error"],
+                                    "question_id": question_id,
+                                },
+                            },
+                            connection_info["websocket"],
+                        )
+                    break
+
                 return
 
             # Log the result for debugging
@@ -250,8 +276,13 @@ class TriviaGameHandler(GameEventHandler):
                     )
                     break
 
-        except Exception as e:
-            logger.error(f"Error handling trivia answer: {e}")
+        except Exception:
+            logger.exception(
+                "Error handling trivia answer session=%s player=%s question=%s",
+                self.session_code,
+                player_id,
+                question_id,
+            )
 
     def format_question_for_mobile(
         self, question_data: Dict[str, Any]
