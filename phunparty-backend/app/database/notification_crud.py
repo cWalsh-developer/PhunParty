@@ -107,8 +107,6 @@ def register_push_token(
         },
     ).scalar_one()
 
-    db.commit()
-
     token = (
         db.query(UserPushToken)
         .filter(UserPushToken.id == token_id)
@@ -117,8 +115,10 @@ def register_push_token(
     )
 
     if not token:
+        db.rollback()
         raise ValueError("Push token was registered but could not be loaded")
 
+    db.commit()
     return token
 
 
