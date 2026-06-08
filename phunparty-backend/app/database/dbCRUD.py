@@ -86,8 +86,17 @@ def create_game_session(
         db.add(gameSession)
         db.flush()
 
-        add_question_to_session(db, session_code, difficulty)
-        create_game_session_state(db, session_code, ispublic)
+        first_question_id = add_question_to_session(
+            db, session_code, difficulty, session=gameSession
+        )
+        create_game_session_state(
+            db,
+            session_code,
+            ispublic,
+            session=gameSession,
+            first_question_id=first_question_id,
+        )
+        db.commit()
 
         return gameSession
     except Exception:
@@ -611,8 +620,11 @@ def assign_player_to_session(db: Session, player_id: str, session_code: str) -> 
 
 # Rebooting
 def add_question_to_session(
-    db: Session, session_code: str, difficulty: str = None
-) -> None:
+    db: Session,
+    session_code: str,
+    difficulty: str = None,
+    session: GameSession = None,
+) -> str | None:
     """Add randomly selected questions to a game session.
 
     Args:
@@ -620,7 +632,7 @@ def add_question_to_session(
         session_code: The session code to add questions to
         difficulty: Optional difficulty level ('easy', 'medium', 'hard'). If None, questions of any difficulty will be selected.
     """
-    session = _get_session_by_code_internal(db, session_code)
+    session = session or _get_session_by_code_internal(db, session_code)
     if not session:
         raise ValueError("Session not found")
     game = get_game_by_code(db, session.game_code)
@@ -661,6 +673,7 @@ def add_question_to_session(
             f"for genre '{game.genre}'{difficulty_msg}"
         )
 
+    first_question_id = questions[0].question_id if questions else None
     for question in questions:
         assignment = SessionQuestionAssignment(
             assignment_id=generate_question_id(),
@@ -669,7 +682,7 @@ def add_question_to_session(
         )
         db.add(assignment)
     db.flush()
-    db.commit()
+    return first_question_id
 
 
 def submit_questions(db: Session, question: Questions) -> Questions:
@@ -795,24 +808,30 @@ def calculate_game_results(db: Session, session_code: str):
 
 
 def create_game_session_state(
-    db: Session, session_code: str, ispublic: bool
+    db: Session,
+    session_code: str,
+    ispublic: bool,
+    session: GameSession = None,
+    first_question_id: str = None,
 ) -> GameSessionState:
     """Initialize the game state when a session is created"""
-    session = _get_session_by_code_internal(db, session_code)
+    session = session or _get_session_by_code_internal(db, session_code)
     if not session:
         raise ValueError("Session not found")
 
-    # Get the first question for this session
-    first_question = (
-        db.query(SessionQuestionAssignment)
-        .filter(SessionQuestionAssignment.session_code == session_code)
-        .first()
-    )
+    if first_question_id is None:
+        # Existing callers can still derive the first question from persisted assignments.
+        first_question = (
+            db.query(SessionQuestionAssignment)
+            .filter(SessionQuestionAssignment.session_code == session_code)
+            .first()
+        )
+        first_question_id = first_question.question_id if first_question else None
 
     game_state = GameSessionState(
         session_code=session_code,
         current_question_index=0,
-        current_question_id=first_question.question_id if first_question else None,
+        current_question_id=first_question_id,
         is_active=True,
         ispublic=ispublic,
         isstarted=False,
@@ -822,7 +841,6 @@ def create_game_session_state(
 
     db.add(game_state)
     db.flush()
-    db.commit()
     return game_state
 
 
