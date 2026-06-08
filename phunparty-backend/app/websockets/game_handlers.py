@@ -133,156 +133,241 @@ class TriviaGameHandler(GameEventHandler):
     async def handle_player_answer(
         self, player_id: str, answer: str, question_id: str, db: Session
     ):
-        """Handle trivia answer submission"""
-        # Use the same logic as the REST API to ensure game advancement
-        from app.logic.game_logic import submit_player_answer
+        """Handle buzzer game answer submission."""
+        state = self.buzzer_state
+        phase_state = manager.get_session_phase_state(self.session_code)
+        current_phase_question_id = phase_state.get("current_question_id")
+        state_question_id = state.get("current_question_id")
 
-        try:
-            # This includes all the logic for checking correctness, updating scores,
-            # and automatically advancing the game when all players have answered
-            result = submit_player_answer(
-                db, self.session_code, player_id, question_id, answer
+        if question_id != current_phase_question_id or question_id != state_question_id:
+            logger.warning(
+                "STALE BUZZER ANSWER REJECTED session=%s player=%s incoming_question=%s phase_question=%s state_question=%s",
+                self.session_code,
+                safe_player_ref(player_id),
+                question_id,
+                current_phase_question_id,
+                state_question_id,
             )
 
-            # Check if there was an error
-            if "error" in result:
-                logger.warning(
-                    "ANSWER REJECTED session=%s player=%s question=%s error=%s",
-                    self.session_code,
-                    player_id,
-                    question_id,
-                    result["error"],
-                )
-
-                for connection_info in manager.get_session_connections(
-                    self.session_code
-                ).values():
-                    if (
-                        connection_info.get("player_id") == player_id
-                        and connection_info.get("client_type") == "mobile"
-                    ):
-                        await manager.send_personal_message(
-                            {
-                                "type": "answer_rejected",
-                                "data": {
-                                    "message": result["error"],
-                                    "question_id": question_id,
-                                },
+            for connection_info in manager.get_player_connections(
+                self.session_code,
+                player_id,
+            ).values():
+                websocket = connection_info.get("websocket")
+                if websocket:
+                    await manager.send_personal_message(
+                        {
+                            "type": "answer_rejected",
+                            "data": {
+                                "reason": "stale_question",
+                                "message": "That question has already moved on.",
+                                "question_id": question_id,
+                                "current_question_id": current_phase_question_id,
                             },
-                            connection_info["websocket"],
-                        )
-                    break
+                        },
+                        websocket,
+                    )
 
-                return
+            await manager.broadcast_buzzer_state_update(self.session_code)
+            await self.update_mobile_buzzer_ui(db)
+            return
 
-            # Log the result for debugging
-            logger.info(f"Answer submission result for player {player_id}: {result}")
+        if state.get("current_buzzer_winner") != player_id:
+            logger.warning(
+                "BUZZER ANSWER REJECTED non-winner session=%s player=%s winner=%s question=%s",
+                self.session_code,
+                safe_player_ref(player_id),
+                safe_player_ref(state.get("current_buzzer_winner")),
+                question_id,
+            )
+            await self.update_mobile_buzzer_ui(db)
+            return
 
-            # Mark player as having answered in WebSocket connection info
-            manager.set_player_answered(self.session_code, player_id, True)
+        from app.logic.game_logic import submit_player_answer
 
-            # Get player info for broadcasting
-            player = get_player_by_ID(db, player_id)
-            player_name = player.player_name if player else "Unknown Player"
+        submission_result = submit_player_answer(
+            db,
+            self.session_code,
+            player_id,
+            question_id,
+            answer,
+        )
 
-            # Broadcast to all clients that player answered (with game state update)
+        if "error" in submission_result:
+            logger.warning(
+                "Could not record buzzer answer session=%s player=%s question=%s error=%s",
+                self.session_code,
+                safe_player_ref(player_id),
+                question_id,
+                submission_result["error"],
+            )
+            return
+
+        action = submission_result.get("action") or submission_result.get(
+            "game_state", {}
+        ).get("action")
+        is_correct = bool(submission_result.get("is_correct", False))
+
+        player = get_player_by_ID(db, player_id)
+        player_name = player.player_name if player else "Unknown Player"
+
+        logger.warning(
+            "BUZZER ANSWER RESULT session=%s player=%s question=%s answer=%r is_correct=%s action=%s",
+            self.session_code,
+            safe_player_ref(player_id),
+            question_id,
+            answer,
+            is_correct,
+            action,
+        )
+
+        if is_correct:
             await manager.broadcast_to_session(
                 self.session_code,
                 {
-                    "type": "player_answered",
+                    "type": "correct_answer",
                     "data": {
                         "player_id": player_id,
                         "roster_player_id": make_roster_player_id(
                             self.session_code, player_id
                         ),
                         "player_name": player_name,
-                        "answered_at": datetime.now().isoformat(),
-                        "is_correct": result.get("is_correct", False),
-                        "game_state": result.get("game_state", {}),
+                        "answer": answer,
+                        "correct": True,
+                        "question_id": question_id,
                     },
                 },
                 critical=True,
             )
 
-            # Also broadcast game status update to ensure frontend stays in sync
-            game_status_data = result.get("game_state", {})
+            await self.lock_buzzer_until_next_question("Moving to the next question...")
 
-            # Add real-time WebSocket-based answered count
-            ws_answered_count = manager.get_answered_count(self.session_code)
-            game_status_data["playersAnswered"] = ws_answered_count
+            if action == "game_ended":
+                await handle_game_end(
+                    self.session_code,
+                    db,
+                    acting_player_id=player_id,
+                )
+                return
 
-            logger.info(f"Broadcasting game_status_update: {game_status_data}")
+            if action == "next_question":
+                await self.reveal_current_db_question(
+                    db,
+                    "buzzer_correct_answer",
+                    acting_player_id=player_id,
+                )
+                return
+
+            await advance_or_end_current_question(
+                self.session_code,
+                db,
+                reason="buzzer_correct_answer",
+                acting_player_id=player_id,
+            )
+            return
+
+        # Wrong answer.
+        state.setdefault("frozen_players", set()).add(player_id)
+        state["current_buzzer_winner"] = None
+        state.setdefault("attempts", []).append(
+            {
+                "player_id": player_id,
+                "answer": answer,
+                "correct": False,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
+        await manager.broadcast_to_session(
+            self.session_code,
+            {
+                "type": "incorrect_answer",
+                "data": {
+                    "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(
+                        self.session_code, player_id
+                    ),
+                    "player_name": player_name,
+                    "answer": answer,
+                    "correct": False,
+                    "question_id": question_id,
+                    "frozen_players": list(state["frozen_players"]),
+                    "frozen_roster_player_ids": [
+                        make_roster_player_id(self.session_code, frozen_id)
+                        for frozen_id in state["frozen_players"]
+                    ],
+                },
+            },
+            critical=True,
+        )
+
+        # If submit_player_answer has already advanced or ended the game, do not
+        # reopen the buzzer. This was the bug causing the same question to become
+        # active again after progression.
+        if action == "game_ended":
+            await self.lock_buzzer_until_next_question("Waiting for final scores...")
+            await handle_game_end(
+                self.session_code,
+                db,
+                acting_player_id=player_id,
+            )
+            return
+
+        if action == "next_question":
+            await self.lock_buzzer_until_next_question(
+                "Waiting for the next question..."
+            )
+            await self.reveal_current_db_question(
+                db,
+                "buzzer_all_answered",
+                acting_player_id=player_id,
+            )
+            return
+
+        active_players = len(manager.get_mobile_players(self.session_code))
+        frozen_count = len(state["frozen_players"])
+
+        if active_players and frozen_count >= active_players:
             await manager.broadcast_to_session(
                 self.session_code,
                 {
-                    "type": "game_status_update",
-                    "data": game_status_data,
+                    "type": "question_failed",
+                    "data": {
+                        "question_id": question_id,
+                        "reason": "all_players_frozen",
+                    },
                 },
                 critical=True,
             )
 
-            # If game advanced to next question, broadcast it
-            # Check both possible locations for the action (top level or nested in game_state)
-            action = result.get("action") or result.get("game_state", {}).get("action")
-            logger.info(f"Detected action after answer submission: {action}")
-            logger.info(f"Full answer submission result: {result}")
-
-            if action == "next_question":
-                logger.info(f"Revealing next question for session {self.session_code}")
-                from app.logic.game_logic import get_game_session_state
-
-                game_state = get_game_session_state(db, self.session_code)
-                if game_state and game_state.current_question_id:
-                    manager.clear_question_queue(self.session_code)
-                    question_start_at = utc_now() + timedelta(
-                        milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
-                    )
-                    await reveal_current_question(
-                        self.session_code,
-                        db,
-                        iso_utc(question_start_at),
-                        acting_player_id=player_id,
-                    )
-                else:
-                    logger.warning("No current question ID found after auto-advance")
-
-            # If game ended, broadcast game end
-            elif action == "game_ended":
-                logger.info(f"Game ended for session {self.session_code}")
-                await handle_game_end(self.session_code, db, acting_player_id=player_id)
-            elif action is None:
-                logger.info(
-                    f" No action needed - waiting for more players or other conditions"
-                )
-
-            # Send confirmation to the specific mobile player
-            mobile_players = manager.get_mobile_players(self.session_code)
-            for connection_id, connection_info in manager.get_session_connections(
-                self.session_code
-            ).items():
-                if (
-                    connection_info.get("player_id") == player_id
-                    and connection_info.get("client_type") == "mobile"
-                ):
-                    await manager.send_personal_message(
-                        {
-                            "type": "answer_submitted",
-                            "data": {
-                                "message": "Answer submitted successfully!",
-                                "can_change_answer": False,
-                            },
-                        },
-                        connection_info["websocket"],
-                    )
-                    break
-
-        except Exception:
-            logger.exception(
-                "Error handling trivia answer session=%s player=%s question=%s",
-                self.session_code,
-                player_id,
-                question_id,
+            await self.lock_buzzer_until_next_question(
+                "Waiting for the next question..."
             )
+
+            await advance_or_end_current_question(
+                self.session_code,
+                db,
+                reason="buzzer_all_wrong",
+                acting_player_id=player_id,
+            )
+            return
+
+        # Wrong answer, but at least one other player can still buzz.
+        state["question_active"] = True
+        state["transitioning"] = False
+        state["accepting_buzzes"] = True
+
+        logger.warning(
+            "BUZZER REOPENED AFTER WRONG ANSWER session=%s question=%s frozen_count=%s active_players=%s",
+            self.session_code,
+            question_id,
+            frozen_count,
+            active_players,
+        )
+
+        await manager.broadcast_buzzer_state_update(self.session_code)
+        await self.update_mobile_buzzer_ui(db)
+        return
 
     def format_question_for_mobile(
         self, question_data: Dict[str, Any]
