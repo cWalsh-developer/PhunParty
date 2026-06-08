@@ -688,9 +688,7 @@ class BuzzerGameHandler(GameEventHandler):
                 critical=True,
             )
 
-            await self.lock_buzzer_until_next_question(
-                "Moving to the next question..."
-            )
+            await self.lock_buzzer_until_next_question("Moving to the next question...")
 
             if action == "game_ended":
                 await handle_game_end(
@@ -708,11 +706,25 @@ class BuzzerGameHandler(GameEventHandler):
                 )
                 return
 
-            await advance_or_end_current_question(
+            advanced = await advance_or_end_current_question(
                 self.session_code,
                 db,
                 reason="buzzer_correct_answer",
                 acting_player_id=player_id,
+            )
+
+        logger.warning(
+            "BUZZER CORRECT ADVANCE COMPLETE session=%s player=%s question=%s advanced=%s",
+            self.session_code,
+            safe_player_ref(player_id),
+            question_id,
+            advanced,
+        )
+
+        if not advanced:
+            await self.update_mobile_buzzer_ui(
+                db,
+                message_override="Still syncing the next question...",
             )
             return
 
@@ -752,9 +764,7 @@ class BuzzerGameHandler(GameEventHandler):
         )
 
         if action == "game_ended":
-            await self.lock_buzzer_until_next_question(
-                "Waiting for final scores..."
-            )
+            await self.lock_buzzer_until_next_question("Waiting for final scores...")
             await handle_game_end(
                 self.session_code,
                 db,
@@ -817,7 +827,6 @@ class BuzzerGameHandler(GameEventHandler):
         await manager.broadcast_buzzer_state_update(self.session_code)
         await self.update_mobile_buzzer_ui(db)
         return
-
 
     async def start_question(self, question_data: Dict[str, Any]):
         """Start a new buzzer question"""

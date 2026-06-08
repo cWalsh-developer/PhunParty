@@ -118,8 +118,6 @@ async def advance_or_end_current_question(
 ) -> bool:
     """Advance the DB question pointer and broadcast the next authoritative state."""
 
-    # Advancing/ending mutates session-owned state, so use the session owner for RLS.
-    # The acting player may simply be the buzzer winner or the last player to answer.
     owner_player_id = get_session_owner_id(db, session_code)
     progression_actor_id = owner_player_id or acting_player_id
 
@@ -141,33 +139,80 @@ async def advance_or_end_current_question(
             acting_player_id,
         )
 
+    before_state = get_game_session_state(db, session_code)
+    logger.warning(
+        "ADVANCE BEFORE session=%s reason=%s index=%s current_question=%s total=%s",
+        session_code,
+        reason,
+        getattr(before_state, "current_question_index", None),
+        getattr(before_state, "current_question_id", None),
+        getattr(before_state, "total_questions", None),
+    )
+
     result = advance_to_next_question(db, session_code)
     action = result.get("action")
 
-    if action == "next_question":
-        game_status = get_current_question_details(db, session_code)
-        current_question = game_status.get("current_question") if game_status else None
-        if not current_question:
-            logger.warning(
-                "Could not reveal next question for %s; no current question after %s",
-                session_code,
-                reason,
-            )
-            return False
+    logger.warning(
+        "ADVANCE RESULT session=%s reason=%s action=%s result=%s",
+        session_code,
+        reason,
+        action,
+        result,
+    )
 
+    try:
+        db.flush()
+        db.expire_all()
+    except Exception:
+        logger.exception(
+            "ADVANCE DB REFRESH FAILED session=%s reason=%s",
+            session_code,
+            reason,
+        )
+
+    after_state = get_game_session_state(db, session_code)
+    logger.warning(
+        "ADVANCE AFTER session=%s reason=%s index=%s current_question=%s total=%s",
+        session_code,
+        reason,
+        getattr(after_state, "current_question_index", None),
+        getattr(after_state, "current_question_id", None),
+        getattr(after_state, "total_questions", None),
+    )
+
+    if action == "next_question":
         manager.clear_question_queue(session_code)
+
         question_start_at = utc_now() + timedelta(
             milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
         )
-        return await reveal_current_question(
+
+        revealed = await reveal_current_question(
             session_code,
             db,
             iso_utc(question_start_at),
             acting_player_id=progression_actor_id,
         )
 
+        logger.warning(
+            "ADVANCE REVEAL RESULT session=%s reason=%s next_question=%s revealed=%s",
+            session_code,
+            reason,
+            result.get("next_question_id"),
+            revealed,
+        )
+
+        return revealed
+
     if action == "game_ended":
         from app.websockets.game_lifecycle import handle_game_end
+
+        logger.warning(
+            "ADVANCE ENDING GAME session=%s reason=%s result=%s",
+            session_code,
+            reason,
+            result,
+        )
 
         return await handle_game_end(
             session_code,
@@ -176,7 +221,7 @@ async def advance_or_end_current_question(
         )
 
     logger.warning(
-        "Unexpected advance result for %s after %s: %s",
+        "ADVANCE UNEXPECTED RESULT session=%s reason=%s result=%s",
         session_code,
         reason,
         result,
@@ -221,6 +266,14 @@ async def reveal_current_question(
 
     question_data = game_status["current_question"]
     game_type = resolve_session_game_type(db, session_code)
+    logger.warning(
+        "REVEAL CURRENT QUESTION session=%s question_id=%s index=%s total=%s game_type=%s",
+        session_code,
+        question_data.get("question_id") if question_data else None,
+        game_status.get("current_question_index") if game_status else None,
+        game_status.get("total_questions") if game_status else None,
+        game_type,
+    )
     scheduled_player_id = acting_player_id or get_session_owner_id(db, session_code)
     question_id = question_data.get("question_id")
     phase_state = manager.get_session_phase_state(session_code)
