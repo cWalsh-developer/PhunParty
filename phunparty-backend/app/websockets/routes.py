@@ -658,6 +658,7 @@ async def websocket_endpoint(
                         session_code=session_code,
                         player_id=player_id,
                         db=disconnect_db,
+                        websocket=websocket,
                     )
                 finally:
                     close_db_session(disconnect_db_generator)
@@ -1339,14 +1340,16 @@ async def handle_mobile_disconnect_during_fair_play(
     session_code: str,
     player_id: str,
     db: Session,
+    websocket: Optional[WebSocket] = None,
 ):
-    """Treat an ungraceful mobile disconnect during a Fair Play question as focus loss."""
+    """Treat a genuine ungraceful mobile disconnect during a Fair Play question as focus loss."""
     if manager._player_task_key(session_code, player_id) in manager.intentional_leaves:
         return
 
     game_state = get_game_session_state(db, session_code)
     if not game_state or not getattr(game_state, "fair_play_enabled", False):
         return
+
     if is_player_kicked(db, session_code, player_id):
         return
 
@@ -1358,10 +1361,42 @@ async def handle_mobile_disconnect_during_fair_play(
     if not question_id:
         return
 
+    # Important:
+    # If this socket is closing because the same player already has another live
+    # mobile connection, do not treat it as leaving the app.
+    other_live_connections = []
+    for connection_info in manager.get_player_connections(
+        session_code, player_id
+    ).values():
+        if websocket is not None and connection_info.get("websocket") is websocket:
+            continue
+
+        if connection_info.get("client_type") != "mobile":
+            continue
+
+        if connection_info.get("connection_state") in {
+            "fair_play_focus_lost",
+            "disconnected",
+        }:
+            continue
+
+        other_live_connections.append(connection_info)
+
+    if other_live_connections:
+        logger.info(
+            "Ignoring Fair Play mobile disconnect because player has another live connection: session=%s player=%s question=%s live_connections=%s",
+            session_code,
+            safe_player_ref(player_id),
+            question_id,
+            len(other_live_connections),
+        )
+        return
+
     if manager.get_pending_focus_loss(session_code, player_id):
         return
 
     lost_at = iso_utc(utc_now())
+
     manager.record_pending_focus_loss(
         session_code=session_code,
         player_id=player_id,
@@ -1369,6 +1404,7 @@ async def handle_mobile_disconnect_during_fair_play(
         reason="mobile_disconnected_during_question",
         lost_at=lost_at,
     )
+
     logger.info(
         "FAIR PLAY DISCONNECT LOSS session=%s player=%s question=%s lost_at=%s",
         session_code,
@@ -1376,6 +1412,7 @@ async def handle_mobile_disconnect_during_fair_play(
         question_id,
         lost_at,
     )
+
     asyncio.create_task(
         finalize_focus_loss_after_grace(
             session_code=session_code,
@@ -1765,6 +1802,40 @@ async def finalize_focus_loss_after_grace(
             pending,
         )
         return
+    if pending.get("reason") == "mobile_disconnected_during_question":
+        live_connections = [
+            connection_info
+            for connection_info in manager.get_player_connections(
+                session_code, player_id
+            ).values()
+            if connection_info.get("client_type") == "mobile"
+            and connection_info.get("connection_state")
+            not in {"fair_play_focus_lost", "disconnected"}
+        ]
+
+        if live_connections:
+            logger.info(
+                "FAIR PLAY DISCONNECT STRIKE CANCELLED; player reconnected before grace ended: session=%s player=%s question=%s live_connections=%s",
+                session_code,
+                safe_player_ref(player_id),
+                question_id,
+                len(live_connections),
+            )
+
+            manager.clear_pending_focus_loss(session_code, player_id)
+            manager.update_fair_play_status(
+                session_code,
+                player_id,
+                connection_state="connected",
+                is_pending_grace=False,
+                answer_status=None,
+                reason=None,
+                fair_play_reason=None,
+                message=None,
+            )
+
+            await manager.broadcast_player_roster_update(session_code)
+            return
 
     logger.warning(
         "FAIR PLAY GRACE FINALIZER AWARDING STRIKE session=%s player=%s question=%s reason=%s lost_at=%s pending=%s",
