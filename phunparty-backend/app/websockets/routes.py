@@ -1598,10 +1598,27 @@ async def resync_buzzer_ui_after_fair_play_return(
 
         buzzer_handler = create_game_handler(session_code, BUZZER_GAME_TYPE)
 
-        await manager.broadcast_buzzer_state_update(session_code)
-
+        # Do not broadcast the generic buzzer_state_update here.
+        # A player returning during Fair Play grace may already be the current buzzer winner.
+        # The generic update can temporarily reset everyone to waiting/grey.
+        # update_mobile_buzzer_ui is the authoritative per-player state:
+        # winner -> answer_mode, others -> waiting/frozen/active as appropriate.
         if hasattr(buzzer_handler, "update_mobile_buzzer_ui"):
-            await buzzer_handler.update_mobile_buzzer_ui(db)
+            state = manager.get_buzzer_state(session_code)
+
+            logger.warning(
+                "FAIR PLAY RETURN BUZZER RESYNC session=%s player=%s question=%s current_winner=%s accepting_buzzes=%s transitioning=%s",
+                session_code,
+                safe_player_ref(player_id),
+                current_question_id,
+                safe_player_ref(state.get("current_buzzer_winner")),
+                state.get("accepting_buzzes"),
+                state.get("transitioning"),
+            )
+            await buzzer_handler.update_mobile_buzzer_ui(
+                db,
+                message_override=None,
+            )
 
         logger.info(
             "Resynced buzzer UI after Fair Play return: session=%s player=%s question=%s",
@@ -1734,6 +1751,28 @@ async def handle_fair_play_focus_returned(
 
         await manager.broadcast_player_roster_update(session_code)
 
+        # First clear the Fair Play pending UI on the returning player's device.
+        await manager.send_personal_message(
+            {
+                "type": "fair_play_status_update",
+                "data": {
+                    "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(session_code, player_id),
+                    "question_id": cleared.get("question_id"),
+                    "is_frozen": False,
+                    "frozen_question_id": None,
+                    "is_pending_grace": False,
+                    "answer_status": None,
+                    "reason": None,
+                    "fair_play_reason": None,
+                    "message": None,
+                },
+            },
+            websocket,
+        )
+
+        # Then resync buzzer UI last.
+        # If this player was already the buzzer winner, this should restore answer_mode.
         db, db_generator = open_db_session(player_id)
         try:
             await resync_buzzer_ui_after_fair_play_return(
