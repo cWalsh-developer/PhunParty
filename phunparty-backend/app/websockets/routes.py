@@ -735,21 +735,37 @@ async def send_initial_session_state(
 
         if client_type == "mobile":
             authoritative_phase = authoritative_state.get("phase")
-            queued_question = get_mobile_current_question_payload(
-                session_code, db, game_type
-            )
-            if authoritative_phase == SessionPhase.QUESTION.value and queued_question:
-                logger.info(
-                    f"Sending queued current question to reconnecting mobile in session {session_code}"
-                )
-                await manager.send_personal_critical_message(
-                    session_code,
-                    {
-                        "type": "question_started",
-                        "data": queued_question,
-                    },
-                    websocket,
-                )
+
+            if authoritative_phase == SessionPhase.QUESTION.value:
+                if game_type == BUZZER_GAME_TYPE:
+                    logger.warning(
+                        "Mobile reconnected during buzzer question; sending authoritative buzzer UI instead of generic question_started: session=%s player=%s",
+                        session_code,
+                        safe_player_ref(player_id),
+                    )
+
+                    buzzer_handler = create_game_handler(session_code, BUZZER_GAME_TYPE)
+
+                    if hasattr(buzzer_handler, "update_mobile_buzzer_ui"):
+                        await buzzer_handler.update_mobile_buzzer_ui(db)
+
+                else:
+                    queued_question = get_mobile_current_question_payload(
+                        session_code, db, game_type
+                    )
+
+                    if queued_question:
+                        logger.info(
+                            f"Sending queued current question to reconnecting mobile in session {session_code}"
+                        )
+                        await manager.send_personal_critical_message(
+                            session_code,
+                            {
+                                "type": "question_started",
+                                "data": queued_question,
+                            },
+                            websocket,
+                        )
 
         # For host clients, send an immediate follow-up roster update after initial state
         # This ensures the web UI has the most current roster in case players joined
@@ -841,15 +857,33 @@ async def handle_websocket_message(
         )
 
     elif message_type == "request_current_question" and client_type == "mobile":
-        # Mobile client requesting current question from queue
         logger.info(
-            f"ðŸ“² Mobile client requesting current question for session {session_code}"
+            "Mobile client requesting current question for session %s",
+            session_code,
         )
+
+        game_type = resolve_session_game_type(db, session_code)
+
+        if game_type == BUZZER_GAME_TYPE:
+            logger.warning(
+                "Mobile requested current question during buzzer game; sending authoritative buzzer UI: session=%s player=%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+
+            buzzer_handler = create_game_handler(session_code, BUZZER_GAME_TYPE)
+
+            if hasattr(buzzer_handler, "update_mobile_buzzer_ui"):
+                await buzzer_handler.update_mobile_buzzer_ui(db)
+
+            return
+
         current_question = get_mobile_current_question_payload(session_code, db)
 
         if current_question:
             logger.info(
-                f"ðŸ“¤ Sending queued question {current_question.get('question_id')} to mobile client"
+                "Sending queued question %s to mobile client",
+                current_question.get("question_id"),
             )
             await manager.send_personal_critical_message(
                 session_code,
@@ -861,7 +895,8 @@ async def handle_websocket_message(
             )
         else:
             logger.warning(
-                f"âš ï¸ No queued question available for session {session_code}"
+                "No queued question available for session %s",
+                session_code,
             )
             # The DB fallback above only runs once the authoritative server phase
             # is already question, so unanswered pre-reveal questions stay hidden.
