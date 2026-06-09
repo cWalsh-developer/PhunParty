@@ -1850,8 +1850,31 @@ async def advance_after_fair_play_if_ready(
     After a Fair Play strike/freeze, check whether the current question is now
     resolved. If it is, advance and reveal the next authoritative question.
     """
-    if acting_player_id:
-        set_rls_current_player(db, acting_player_id)
+
+    session = get_session_by_code(db, session_code)
+    owner_player_id = getattr(session, "owner_player_id", None) if session else None
+    progression_actor_id = owner_player_id or acting_player_id
+
+    if progression_actor_id:
+        set_rls_current_player(db, progression_actor_id)
+
+    try:
+        db.expire_all()
+    except Exception:
+        logger.exception(
+            "Fair Play progression pre-refresh failed: session=%s question=%s",
+            session_code,
+            question_id,
+        )
+
+    logger.warning(
+        "FAIR PLAY ADVANCE CHECK session=%s question=%s acting_player=%s owner=%s using=%s",
+        session_code,
+        question_id,
+        acting_player_id,
+        owner_player_id,
+        progression_actor_id,
+    )
 
     game_progression = check_and_advance_game(db, session_code, question_id)
 
@@ -1865,10 +1888,17 @@ async def advance_after_fair_play_if_ready(
         db.rollback()
         return game_progression
 
-    # Important: if check_and_advance_game only flushed changes, commit the DB
-    # move before trying to reveal/recover the new question.
+    action = game_progression.get("action")
+
     try:
         db.commit()
+        logger.warning(
+            "FAIR PLAY PROGRESSION COMMITTED session=%s question=%s action=%s progression=%s",
+            session_code,
+            question_id,
+            action,
+            game_progression,
+        )
     except Exception:
         db.rollback()
         logger.exception(
@@ -1879,6 +1909,18 @@ async def advance_after_fair_play_if_ready(
         )
         return {"error": "Failed to commit Fair Play progression"}
 
+    if progression_actor_id:
+        set_rls_current_player(db, progression_actor_id)
+
+    try:
+        db.expire_all()
+    except Exception:
+        logger.exception(
+            "Fair Play progression post-commit refresh failed: session=%s question=%s",
+            session_code,
+            question_id,
+        )
+
     await manager.broadcast_to_session(
         session_code,
         {
@@ -1888,12 +1930,7 @@ async def advance_after_fair_play_if_ready(
         critical=True,
     )
 
-    action = game_progression.get("action")
-
     if action == "next_question":
-        if acting_player_id:
-            set_rls_current_player(db, acting_player_id)
-
         updated_game_state = get_game_session_state(db, session_code)
 
         if not updated_game_state or not updated_game_state.current_question_id:
@@ -1906,11 +1943,13 @@ async def advance_after_fair_play_if_ready(
             )
             return game_progression
 
-        logger.info(
-            "Fair Play progression revealing next question: session=%s old_question=%s new_question=%s",
+        logger.warning(
+            "FAIR PLAY REVEAL NEXT QUESTION session=%s old_question=%s new_question=%s index=%s total=%s",
             session_code,
             question_id,
             updated_game_state.current_question_id,
+            updated_game_state.current_question_index,
+            updated_game_state.total_questions,
         )
 
         manager.clear_question_queue(session_code)
@@ -1923,7 +1962,15 @@ async def advance_after_fair_play_if_ready(
             session_code,
             db,
             iso_utc(question_start_at),
-            acting_player_id=acting_player_id,
+            acting_player_id=progression_actor_id,
+        )
+
+        logger.warning(
+            "FAIR PLAY REVEAL RESULT session=%s old_question=%s new_question=%s revealed=%s",
+            session_code,
+            question_id,
+            updated_game_state.current_question_id,
+            revealed,
         )
 
         if not revealed:
@@ -1940,7 +1987,7 @@ async def advance_after_fair_play_if_ready(
         await handle_game_end(
             session_code,
             db,
-            acting_player_id=acting_player_id,
+            acting_player_id=progression_actor_id,
         )
 
     return game_progression
