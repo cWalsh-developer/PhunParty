@@ -460,6 +460,11 @@ class BuzzerGameHandler(GameEventHandler):
         state["transitioning"] = False
         state["accepting_buzzes"] = False
 
+        answer_payload_cache = state.setdefault("answer_payload_cache", {})
+
+        if answer_payload_cache.get("question_id") != current_question_id:
+            answer_payload_cache.clear()
+
         logger.warning(
             "BUZZER WINNER LOCKED session=%s player=%s question=%s accepting_buzzes=%s",
             self.session_code,
@@ -963,7 +968,49 @@ class BuzzerGameHandler(GameEventHandler):
                     ui_state["accepting_buzzes"] = False
                     ui_state["message"] = "Syncing question..."
                 else:
-                    answer_payload = self.format_buzzer_answer_payload(current_question)
+                    answer_payload_cache = state.setdefault("answer_payload_cache", {})
+
+                    cached_question_id = answer_payload_cache.get("question_id")
+                    cached_payload = answer_payload_cache.get("payload")
+
+                    if cached_question_id == expected_question_id and cached_payload:
+                        answer_payload = dict(cached_payload)
+
+                        # Copy lists so later mutation cannot accidentally alter the cache.
+                        if isinstance(answer_payload.get("display_options"), list):
+                            answer_payload["display_options"] = list(
+                                answer_payload["display_options"]
+                            )
+                        if isinstance(answer_payload.get("options"), list):
+                            answer_payload["options"] = list(answer_payload["options"])
+
+                        logger.info(
+                            "BUZZER UI USING CACHED ANSWER PAYLOAD session=%s question=%s",
+                            self.session_code,
+                            expected_question_id,
+                        )
+                    else:
+                        answer_payload = self.format_buzzer_answer_payload(
+                            current_question
+                        )
+
+                        answer_payload_cache.clear()
+                        answer_payload_cache["question_id"] = expected_question_id
+                        answer_payload_cache["payload"] = {
+                            **answer_payload,
+                            "display_options": list(
+                                answer_payload.get("display_options", [])
+                            ),
+                            "options": list(answer_payload.get("options", [])),
+                        }
+
+                        logger.info(
+                            "BUZZER UI CACHED ANSWER PAYLOAD session=%s question=%s options=%s",
+                            self.session_code,
+                            expected_question_id,
+                            answer_payload.get("display_options"),
+                        )
+
                     ui_state.update(answer_payload)
                     ui_state["question_id"] = expected_question_id
                     ui_state["button_state"] = "answer_mode"
