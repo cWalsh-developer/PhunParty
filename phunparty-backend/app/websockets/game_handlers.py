@@ -133,156 +133,154 @@ class TriviaGameHandler(GameEventHandler):
     def __init__(self, session_code: str):
         super().__init__(session_code, "trivia")
 
-        async def handle_player_answer(
-            self, player_id: str, answer: str, question_id: str, db: Session
-        ):
-            """Handle trivia answer submission."""
-            try:
-                result = submit_player_answer(
-                    db,
-                    self.session_code,
-                    player_id,
-                    question_id,
-                    answer,
-                )
+    async def handle_player_answer(
+        self, player_id: str, answer: str, question_id: str, db: Session
+    ):
+        """Handle trivia answer submission."""
+        try:
+            result = submit_player_answer(
+                db,
+                self.session_code,
+                player_id,
+                question_id,
+                answer,
+            )
 
-                if "error" in result:
-                    logger.warning(
-                        "TRIVIA ANSWER REJECTED session=%s player=%s question=%s error=%s",
-                        self.session_code,
-                        safe_player_ref(player_id),
-                        question_id,
-                        result["error"],
-                    )
-                    return
-
-                logger.info(
-                    "TRIVIA ANSWER RESULT session=%s player=%s question=%s result=%s",
+            if "error" in result:
+                logger.warning(
+                    "TRIVIA ANSWER REJECTED session=%s player=%s question=%s error=%s",
                     self.session_code,
                     safe_player_ref(player_id),
                     question_id,
-                    result,
+                    result["error"],
                 )
+                return
 
-                manager.set_player_answered(self.session_code, player_id, True)
+            logger.info(
+                "TRIVIA ANSWER RESULT session=%s player=%s question=%s result=%s",
+                self.session_code,
+                safe_player_ref(player_id),
+                question_id,
+                result,
+            )
 
-                player = get_player_by_ID(db, player_id)
-                player_name = player.player_name if player else "Unknown Player"
+            manager.set_player_answered(self.session_code, player_id, True)
 
-                await manager.broadcast_to_session(
-                    self.session_code,
-                    {
-                        "type": "player_answered",
-                        "data": {
-                            "player_id": player_id,
-                            "roster_player_id": make_roster_player_id(
-                                self.session_code, player_id
-                            ),
-                            "player_name": player_name,
-                            "answered_at": datetime.now().isoformat(),
-                            "is_correct": result.get("is_correct", False),
-                            "game_state": result.get("game_state", {}),
-                        },
+            player = get_player_by_ID(db, player_id)
+            player_name = player.player_name if player else "Unknown Player"
+
+            await manager.broadcast_to_session(
+                self.session_code,
+                {
+                    "type": "player_answered",
+                    "data": {
+                        "player_id": player_id,
+                        "roster_player_id": make_roster_player_id(
+                            self.session_code, player_id
+                        ),
+                        "player_name": player_name,
+                        "answered_at": datetime.now().isoformat(),
+                        "is_correct": result.get("is_correct", False),
+                        "game_state": result.get("game_state", {}),
                     },
-                    critical=True,
+                },
+                critical=True,
+            )
+
+            game_status_data = result.get("game_state", {})
+            game_status_data["playersAnswered"] = manager.get_answered_count(
+                self.session_code
+            )
+
+            await manager.broadcast_to_session(
+                self.session_code,
+                {
+                    "type": "game_status_update",
+                    "data": game_status_data,
+                },
+                critical=True,
+            )
+
+            action = result.get("action") or result.get("game_state", {}).get("action")
+
+            logger.warning(
+                "TRIVIA ANSWER ACTION session=%s player=%s question=%s action=%s",
+                self.session_code,
+                safe_player_ref(player_id),
+                question_id,
+                action,
+            )
+
+            if action == "next_question":
+                try:
+                    db.expire_all()
+                except Exception:
+                    logger.exception(
+                        "Could not refresh DB session before trivia reveal session=%s",
+                        self.session_code,
+                    )
+
+                manager.clear_question_queue(self.session_code)
+
+                question_start_at = utc_now() + timedelta(
+                    milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
                 )
 
-                game_status_data = result.get("game_state", {})
-                game_status_data["playersAnswered"] = manager.get_answered_count(
-                    self.session_code
-                )
-
-                await manager.broadcast_to_session(
+                revealed = await reveal_current_question(
                     self.session_code,
-                    {
-                        "type": "game_status_update",
-                        "data": game_status_data,
-                    },
-                    critical=True,
-                )
-
-                action = result.get("action") or result.get("game_state", {}).get(
-                    "action"
+                    db,
+                    iso_utc(question_start_at),
+                    acting_player_id=player_id,
                 )
 
                 logger.warning(
-                    "TRIVIA ANSWER ACTION session=%s player=%s question=%s action=%s",
+                    "TRIVIA NEXT QUESTION REVEAL session=%s old_question=%s revealed=%s",
                     self.session_code,
-                    safe_player_ref(player_id),
+                    question_id,
+                    revealed,
+                )
+
+            elif action == "game_ended":
+                await handle_game_end(
+                    self.session_code,
+                    db,
+                    acting_player_id=player_id,
+                )
+
+            else:
+                logger.info(
+                    "TRIVIA WAITING session=%s question=%s action=%s",
+                    self.session_code,
                     question_id,
                     action,
                 )
 
-                if action == "next_question":
-                    try:
-                        db.expire_all()
-                    except Exception:
-                        logger.exception(
-                            "Could not refresh DB session before trivia reveal session=%s",
-                            self.session_code,
-                        )
-
-                    manager.clear_question_queue(self.session_code)
-
-                    question_start_at = utc_now() + timedelta(
-                        milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
-                    )
-
-                    revealed = await reveal_current_question(
-                        self.session_code,
-                        db,
-                        iso_utc(question_start_at),
-                        acting_player_id=player_id,
-                    )
-
-                    logger.warning(
-                        "TRIVIA NEXT QUESTION REVEAL session=%s old_question=%s revealed=%s",
-                        self.session_code,
-                        question_id,
-                        revealed,
-                    )
-
-                elif action == "game_ended":
-                    await handle_game_end(
-                        self.session_code,
-                        db,
-                        acting_player_id=player_id,
-                    )
-
-                else:
-                    logger.info(
-                        "TRIVIA WAITING session=%s question=%s action=%s",
-                        self.session_code,
-                        question_id,
-                        action,
-                    )
-
-                for connection_id, connection_info in manager.get_session_connections(
-                    self.session_code
-                ).items():
-                    if (
-                        connection_info.get("player_id") == player_id
-                        and connection_info.get("client_type") == "mobile"
-                    ):
-                        await manager.send_personal_message(
-                            {
-                                "type": "answer_submitted",
-                                "data": {
-                                    "message": "Answer submitted successfully!",
-                                    "can_change_answer": False,
-                                },
+            for connection_id, connection_info in manager.get_session_connections(
+                self.session_code
+            ).items():
+                if (
+                    connection_info.get("player_id") == player_id
+                    and connection_info.get("client_type") == "mobile"
+                ):
+                    await manager.send_personal_message(
+                        {
+                            "type": "answer_submitted",
+                            "data": {
+                                "message": "Answer submitted successfully!",
+                                "can_change_answer": False,
                             },
-                            connection_info["websocket"],
-                        )
-                        break
+                        },
+                        connection_info["websocket"],
+                    )
+                    break
 
-            except Exception:
-                logger.exception(
-                    "Error handling trivia answer session=%s player=%s question=%s",
-                    self.session_code,
-                    safe_player_ref(player_id),
-                    question_id,
-                )
+        except Exception:
+            logger.exception(
+                "Error handling trivia answer session=%s player=%s question=%s",
+                self.session_code,
+                safe_player_ref(player_id),
+                question_id,
+            )
 
     def format_question_for_mobile(
         self, question_data: Dict[str, Any]
