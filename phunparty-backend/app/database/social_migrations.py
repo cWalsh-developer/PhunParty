@@ -27,7 +27,7 @@ def ensure_social_player_columns() -> None:
         """,
         """
         ALTER TABLE players
-        ADD COLUMN IF NOT EXISTS profile_visibility VARCHAR NOT NULL DEFAULT 'public'
+        ADD COLUMN IF NOT EXISTS profile_visibility VARCHAR NOT NULL DEFAULT 'friends'
         """,
         """
         ALTER TABLE players
@@ -75,6 +75,9 @@ def ensure_social_player_columns() -> None:
         )
         connection.execute(
             text("ALTER TABLE players ALTER COLUMN friend_code SET NOT NULL")
+        )
+        connection.execute(
+            text("ALTER TABLE players ALTER COLUMN profile_visibility SET DEFAULT 'friends'")
         )
         connection.execute(
             text(
