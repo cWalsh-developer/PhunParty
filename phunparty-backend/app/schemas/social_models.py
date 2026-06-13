@@ -102,3 +102,14 @@ class UserPushToken(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=utc_now, nullable=False)
     updated_at = Column(DateTime, default=utc_now, nullable=False)
+
+
+class PlayerPresence(Base):
+    __tablename__ = "player_presence"
+
+    player_id = Column(
+        String, ForeignKey("players.player_id"), primary_key=True, nullable=False
+    )
+    is_online = Column(Boolean, default=False, nullable=False, index=True)
+    last_seen_at = Column(DateTime, default=utc_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=utc_now, nullable=False)

@@ -23,9 +23,16 @@ class FriendRequestCreate(BaseModel):
 class FriendProfileResponse(BaseModel):
     player_id: str
     player_name: Optional[str] = None
+    player_email: Optional[str] = None
+    player_mobile: Optional[str] = None
     profile_photo_url: Optional[str] = None
     friend_code: str
     relationship_status: str = "none"
+    profile_visibility: Optional[str] = None
+    can_view_profile: Optional[bool] = None
+    show_online_status: Optional[bool] = None
+    is_online: Optional[bool] = None
+    last_seen_at: Optional[datetime] = None
 
 
 class FriendRequestResponse(BaseModel):

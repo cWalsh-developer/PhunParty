@@ -13,6 +13,7 @@ from app.database.friend_crud import (
     send_friend_request,
 )
 from app.database.notification_crud import get_active_push_tokens
+from app.database.presence_crud import get_presence_map, visible_presence_for_player
 from app.dependencies import get_current_player, get_db
 from app.models.friends import (
     FriendCodeResponse,
@@ -22,6 +23,7 @@ from app.models.friends import (
     FriendSearchRequest,
     FriendsListResponse,
 )
+from app.models.presence import FriendsPresenceResponse, PresenceResponse
 from app.schemas.players_model import Players
 from app.schemas.social_models import FriendRequest
 from app.utils.expo_push import send_expo_push_to_tokens
@@ -259,3 +261,30 @@ def get_friends(
         for friend in list_friends(db, current_player.player_id)
     ]
     return FriendsListResponse(friends=friends)
+
+
+@router.get("/presence", response_model=FriendsPresenceResponse)
+def get_friends_presence(
+    current_player: Players = Depends(get_current_player),
+    db: Session = Depends(get_db),
+):
+    friends = list_friends(db, current_player.player_id)
+    presence_by_player_id = get_presence_map(
+        db, [friend.player_id for friend in friends]
+    )
+    presence = []
+
+    for friend in friends:
+        is_online, last_seen_at = visible_presence_for_player(
+            friend, presence_by_player_id.get(friend.player_id)
+        )
+        presence.append(
+            PresenceResponse(
+                player_id=friend.player_id,
+                is_online=is_online,
+                show_online_status=friend.show_online_status,
+                last_seen_at=last_seen_at,
+            )
+        )
+
+    return FriendsPresenceResponse(presence=presence)

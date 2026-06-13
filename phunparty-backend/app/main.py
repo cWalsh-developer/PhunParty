@@ -14,6 +14,9 @@ from app.routes import (
     passwordReset,
     photos,
     players,
+    presence,
+    privacy,
+    profiles,
     questions,
     scores,
 )
@@ -31,6 +34,7 @@ from app.schemas.social_models import (
     FriendRequest,
     Friendship,
     Notification,
+    PlayerPresence,
     UserPushToken,
 )
 from app.security.rate_limit import enforce_rate_limit, get_client_ip, rate_limiter
@@ -231,6 +235,39 @@ app.include_router(
         {
             "name": "Notifications",
             "description": "In-app notifications and push notification settings",
+        }
+    ],
+)
+
+app.include_router(
+    privacy.router,
+    prefix="/privacy",
+    tags=[
+        {
+            "name": "Privacy",
+            "description": "Profile privacy and visibility settings",
+        }
+    ],
+)
+
+app.include_router(
+    profiles.router,
+    prefix="/profiles",
+    tags=[
+        {
+            "name": "Profiles",
+            "description": "Permission-gated player profile views",
+        }
+    ],
+)
+
+app.include_router(
+    presence.router,
+    prefix="/presence",
+    tags=[
+        {
+            "name": "Presence",
+            "description": "Live player online status",
         }
     ],
 )

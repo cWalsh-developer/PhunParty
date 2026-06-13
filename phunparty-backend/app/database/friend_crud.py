@@ -115,6 +115,8 @@ def send_friend_request(
         raise ValueError("No player found with that friend code")
     if receiver.player_id == sender.player_id:
         raise ValueError("You cannot send a friend request to yourself")
+    if not receiver.allow_friend_requests:
+        raise ValueError("This player is not accepting friend requests")
     if are_friends(db, sender.player_id, receiver.player_id):
         raise ValueError("You are already friends with this player")
     if get_pending_request_between(db, sender.player_id, receiver.player_id):

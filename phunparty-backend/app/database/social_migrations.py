@@ -25,6 +25,30 @@ def ensure_social_player_columns() -> None:
         ADD COLUMN IF NOT EXISTS friend_request_notifications_enabled
         BOOLEAN NOT NULL DEFAULT TRUE
         """,
+        """
+        ALTER TABLE players
+        ADD COLUMN IF NOT EXISTS profile_visibility VARCHAR NOT NULL DEFAULT 'public'
+        """,
+        """
+        ALTER TABLE players
+        ADD COLUMN IF NOT EXISTS show_online_status BOOLEAN NOT NULL DEFAULT TRUE
+        """,
+        """
+        ALTER TABLE players
+        ADD COLUMN IF NOT EXISTS allow_friend_requests BOOLEAN NOT NULL DEFAULT TRUE
+        """,
+        """
+        ALTER TABLE players
+        ADD COLUMN IF NOT EXISTS share_game_stats BOOLEAN NOT NULL DEFAULT TRUE
+        """,
+        """
+        ALTER TABLE players
+        ADD COLUMN IF NOT EXISTS data_collection BOOLEAN NOT NULL DEFAULT TRUE
+        """,
+        """
+        ALTER TABLE players
+        ADD COLUMN IF NOT EXISTS crash_reporting BOOLEAN NOT NULL DEFAULT TRUE
+        """,
     ]
 
     with engine.begin() as connection:
@@ -51,6 +75,53 @@ def ensure_social_player_columns() -> None:
         )
         connection.execute(
             text("ALTER TABLE players ALTER COLUMN friend_code SET NOT NULL")
+        )
+        connection.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'players_profile_visibility_check'
+                    ) THEN
+                        ALTER TABLE players
+                        ADD CONSTRAINT players_profile_visibility_check
+                        CHECK (profile_visibility IN ('public', 'friends', 'private'));
+                    END IF;
+                END $$;
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS player_presence (
+                    player_id VARCHAR PRIMARY KEY
+                        REFERENCES players(player_id) ON DELETE CASCADE,
+                    is_online BOOLEAN NOT NULL DEFAULT FALSE,
+                    last_seen_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_player_presence_is_online
+                ON player_presence(is_online)
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_player_presence_last_seen_at
+                ON player_presence(last_seen_at)
+                """
+            )
         )
 
     try:
