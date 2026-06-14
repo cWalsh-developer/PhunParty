@@ -10,6 +10,7 @@ from app.database.dbCRUD import (
     get_current_question_details,
     get_game_session_state,
     get_session_by_code,
+    get_session_questions_ordered,
 )
 from app.dependencies import get_db
 from app.security.question_payload import sanitize_question_for_client
@@ -29,6 +30,24 @@ NEXT_QUESTION_REVEAL_DELAY_MS = 2000
 QUESTION_BROADCAST_LEAD_MS = 2000
 QUESTION_DURATION_MS = 30000
 TIMED_QUESTION_DIFFICULTIES = {"medium", "hard"}
+
+
+def session_looks_like_beat_clock(db: Session, session_code: str) -> bool:
+    try:
+        assignments = get_session_questions_ordered(db, session_code)
+    except Exception:
+        logger.exception(
+            "Unable to inspect session questions for Beat the Clock detection: %s",
+            session_code,
+        )
+        return False
+
+    return any(
+        str(getattr(assignment, "question_id", "") or "")
+        .upper()
+        .startswith("BTC")
+        for assignment in assignments
+    )
 
 
 def utc_now() -> datetime:
@@ -552,6 +571,16 @@ async def scheduled_question_reveal(
     try:
         apply_scheduled_rls_context(db, session_code, acting_player_id)
         game_type = resolve_session_game_type(db, session_code)
+        if game_type != BEAT_THE_CLOCK_GAME_TYPE and session_looks_like_beat_clock(
+            db, session_code
+        ):
+            logger.warning(
+                "Forcing scheduled reveal to Beat the Clock for %s based on BTC question assignments",
+                session_code,
+            )
+            game_type = BEAT_THE_CLOCK_GAME_TYPE
+            manager.set_session_game_type(session_code, BEAT_THE_CLOCK_GAME_TYPE)
+
         if game_type == BEAT_THE_CLOCK_GAME_TYPE:
             from app.websockets.game_handlers import create_game_handler
 
@@ -606,6 +635,16 @@ async def scheduled_countdown_watchdog(
     try:
         apply_scheduled_rls_context(db, session_code, acting_player_id)
         game_type = resolve_session_game_type(db, session_code)
+        if game_type != BEAT_THE_CLOCK_GAME_TYPE and session_looks_like_beat_clock(
+            db, session_code
+        ):
+            logger.warning(
+                "Forcing countdown watchdog to Beat the Clock for %s based on BTC question assignments",
+                session_code,
+            )
+            game_type = BEAT_THE_CLOCK_GAME_TYPE
+            manager.set_session_game_type(session_code, BEAT_THE_CLOCK_GAME_TYPE)
+
         if game_type == BEAT_THE_CLOCK_GAME_TYPE:
             from app.websockets.game_handlers import create_game_handler
 

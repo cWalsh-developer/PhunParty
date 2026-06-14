@@ -484,12 +484,20 @@ async def broadcast_question_with_options(
             elif difficulty == "hard":
                 ui_mode = "text_input"
 
+        game_type = (
+            "beat_the_clock"
+            if str(question_data.get("question_id") or question_id)
+            .upper()
+            .startswith("BTC")
+            else "trivia"
+        )
+
         # Create message for mobile players (without correct answer info)
         # MUST match the format from TriviaGameHandler.format_question_for_mobile()
         player_message = {
             "type": "question_started",
             "data": {
-                "game_type": "trivia",  # CRITICAL: Mobile needs this to identify game mode
+                "game_type": game_type,  # CRITICAL: Mobile needs this to identify game mode
                 "question_id": question_data["question_id"],
                 "question": question_data["question"],
                 "genre": question_data["genre"],
@@ -506,7 +514,7 @@ async def broadcast_question_with_options(
         host_message = {
             "type": "question_started",
             "data": {
-                "game_type": "trivia",  # Include for consistency
+                "game_type": game_type,  # Include for consistency
                 "question_id": question_data["question_id"],
                 "question": question_data["question"],
                 "genre": question_data["genre"],
