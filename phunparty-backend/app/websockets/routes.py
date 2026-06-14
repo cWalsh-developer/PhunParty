@@ -1011,28 +1011,36 @@ async def handle_websocket_message(
         current_phase = phase_state.get("phase")
         current_question_id = phase_state.get("current_question_id")
         resolved_submit_game_type = resolve_session_game_type(db, session_code)
-        if (
+        beat_clock_state = manager.get_beat_clock_state(session_code)
+        is_beat_clock_submission = (
             resolved_submit_game_type == BEAT_THE_CLOCK_GAME_TYPE
+            or bool(beat_clock_state.get("active"))
+            or str(question_id or "").upper().startswith("BTC")
+        )
+        if (
+            is_beat_clock_submission
             and getattr(game_handler, "game_type", None) != BEAT_THE_CLOCK_GAME_TYPE
         ):
             game_handler = create_game_handler(
                 session_code,
                 BEAT_THE_CLOCK_GAME_TYPE,
             )
+            manager.set_session_game_type(session_code, BEAT_THE_CLOCK_GAME_TYPE)
 
         logger.warning(
-            "SUBMIT ANSWER WS HIT session=%s player=%s question=%s current_question=%s phase=%s raw_answer=%r data=%s",
+            "SUBMIT ANSWER WS HIT session=%s player=%s question=%s current_question=%s phase=%s game_type=%s beat_submission=%s raw_answer=%r data=%s",
             session_code,
             player_id,
             question_id,
             current_question_id,
             current_phase,
+            resolved_submit_game_type,
+            is_beat_clock_submission,
             raw_answer,
             data,
         )
 
-        if resolved_submit_game_type == BEAT_THE_CLOCK_GAME_TYPE:
-            beat_clock_state = manager.get_beat_clock_state(session_code)
+        if is_beat_clock_submission:
             beat_clock_active = bool(beat_clock_state.get("active"))
             beat_clock_ends_at_dt = beat_clock_state.get("ends_at_dt")
             beat_clock_time_remaining = (
