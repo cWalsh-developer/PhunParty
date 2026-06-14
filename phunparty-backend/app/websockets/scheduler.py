@@ -348,6 +348,22 @@ async def reveal_current_question(
     )
     scheduled_player_id = acting_player_id or get_session_owner_id(db, session_code)
     question_id = question_data.get("question_id")
+    if str(question_id or "").upper().startswith("BTC"):
+        logger.warning(
+            "Preventing standard reveal for Beat the Clock question %s in session %s",
+            question_id,
+            session_code,
+        )
+        manager.set_session_game_type(session_code, BEAT_THE_CLOCK_GAME_TYPE)
+        from app.websockets.game_handlers import create_game_handler
+
+        beat_clock_handler = create_game_handler(
+            session_code,
+            BEAT_THE_CLOCK_GAME_TYPE,
+        )
+        await beat_clock_handler.handle_game_start(db)
+        return True
+
     phase_state = manager.get_session_phase_state(session_code)
     if (
         phase_state.get("phase") == SessionPhase.QUESTION.value

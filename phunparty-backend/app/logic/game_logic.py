@@ -471,6 +471,25 @@ async def broadcast_question_with_options(
 
         # Get question with randomized options
         question_data = get_question_with_randomized_options(db, question_id)
+        if str(question_data.get("question_id") or question_id).upper().startswith(
+            "BTC"
+        ):
+            logger.warning(
+                "Preventing standard question broadcast for Beat the Clock question %s in session %s",
+                question_id,
+                session_code,
+            )
+            from app.websockets.game_handlers import create_game_handler
+            from app.websockets.game_modes import BEAT_THE_CLOCK_GAME_TYPE
+            from app.websockets.manager import manager
+
+            manager.set_session_game_type(session_code, BEAT_THE_CLOCK_GAME_TYPE)
+            beat_clock_handler = create_game_handler(
+                session_code,
+                BEAT_THE_CLOCK_GAME_TYPE,
+            )
+            await beat_clock_handler.handle_game_start(db)
+            return
 
         # Determine ui_mode based on difficulty
         difficulty = question_data.get("difficulty", "").lower()
