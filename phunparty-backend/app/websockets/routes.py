@@ -39,6 +39,7 @@ from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.game_modes import (
     BEAT_THE_CLOCK_GAME_TYPE,
     BUZZER_GAME_TYPE,
+    normalize_game_type,
     resolve_session_game_type,
 )
 from app.websockets.manager import SessionPhase, manager
@@ -1261,6 +1262,16 @@ async def handle_websocket_message(
             await game_handler.handle_buzzer_press(player_id, db, incoming_question_id)
 
     elif message_type == "start_game" and client_type == "web":
+        requested_game_type = normalize_game_type(
+            data.get("game_type") if isinstance(data, dict) else None,
+            data.get("gameType") if isinstance(data, dict) else None,
+            data,
+        )
+        if requested_game_type and requested_game_type != getattr(
+            game_handler, "game_type", None
+        ):
+            manager.set_session_game_type(session_code, requested_game_type)
+            game_handler = create_game_handler(session_code, requested_game_type)
         # Web client starting the game
         await handle_game_start(
             session_code,

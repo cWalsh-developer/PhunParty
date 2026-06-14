@@ -63,6 +63,9 @@ class SubmitAnswerRequest(BaseModel):
 
 class GameStatusResponse(BaseModel):
     session_code: str
+    game_type: Optional[str] = None
+    game_code: Optional[str] = None
+    genre: Optional[str] = None
     is_active: bool
     is_waiting_for_players: bool
     isstarted: bool

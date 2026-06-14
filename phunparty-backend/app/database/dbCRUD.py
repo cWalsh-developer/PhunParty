@@ -768,7 +768,14 @@ def add_question_to_session(
             f"No questions available for genre '{game.genre}'{difficulty_msg}"
         )
 
-    if len(questions) < session.number_of_questions:
+    if is_beat_clock and len(questions) < session.number_of_questions:
+        logger.info(
+            "Beat the Clock session %s requested a pool of %s questions; using all %s available questions.",
+            session_code,
+            session.number_of_questions,
+            len(questions),
+        )
+    elif len(questions) < session.number_of_questions:
         difficulty_msg = (
             " with mixed difficulties"
             if is_beat_clock
@@ -1358,6 +1365,13 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
     if not game_state:
         raise ValueError("Game session not found")
 
+    session = _get_session_by_code_internal(db, session_code)
+    game = get_game_by_code(db, session.game_code) if session else None
+    session_game_type = (
+        "beat_the_clock"
+        if game and (_is_beat_clock_text(game.genre) or _is_beat_clock_text(game.rules))
+        else "trivia"
+    )
     started_at = getattr(game_state, "started_at", None)
     ended_at = getattr(game_state, "ended_at", None)
 
@@ -1415,7 +1429,7 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
     current_question_data = None
     if question_details:
         current_question_data = {
-            "game_type": "trivia",  # CRITICAL: Mobile needs this field to recognize questions!
+            "game_type": session_game_type,
             "question_id": question_details.get("question_id"),
             "question": question_details.get("question"),
             "genre": question_details.get("genre"),
@@ -1431,7 +1445,7 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
     elif current_question:
         # Minimal fallback if question_details failed
         current_question_data = {
-            "game_type": "trivia",  # CRITICAL: Mobile needs this field!
+            "game_type": session_game_type,
             "question_id": current_question.question_id,
             "question": current_question.question,
             "genre": current_question.genre,
@@ -1440,6 +1454,9 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
 
     return {
         "session_code": session_code,
+        "game_type": session_game_type,
+        "game_code": session.game_code if session else None,
+        "genre": game.genre if game else None,
         "is_active": game_state.is_active,
         "is_waiting_for_players": game_state.is_waiting_for_players,
         "isstarted": game_state.isstarted,
