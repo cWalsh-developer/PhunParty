@@ -743,23 +743,30 @@ class BeatTheClockGameHandler(GameEventHandler):
 
         player_state = state.get("players", {}).get(player_id)
         if not player_state or player_state.get("current_question_id") != question_id:
+            score_row = get_scores_by_session_and_player(
+                db,
+                self.session_code,
+                player_id,
+            )
+            duplicate_payload = {
+                "game_type": self.game_type,
+                "question_id": question_id,
+                "ignored": True,
+                "reason": "stale_question",
+                "score": score_row.score if score_row else 0,
+                "answered_count": (player_state or {}).get("answered_count", 0),
+                "correct_count": (player_state or {}).get("correct_count", 0),
+                "duration_seconds": state.get("duration_seconds"),
+                "ends_at": state.get("ends_at"),
+                "server_time_ms": manager._utc_now_ms(),
+            }
             for connection_info in manager.get_player_connections(
                 self.session_code, player_id
             ).values():
                 websocket = connection_info.get("websocket")
                 if websocket:
                     await manager.send_personal_message(
-                        {
-                            "type": "answer_rejected",
-                            "data": {
-                                "reason": "stale_question",
-                                "message": "That question has already moved on.",
-                                "question_id": question_id,
-                                "current_question_id": (
-                                    player_state or {}
-                                ).get("current_question_id"),
-                            },
-                        },
+                        {"type": "beat_clock_answer_result", "data": duplicate_payload},
                         websocket,
                     )
             return
