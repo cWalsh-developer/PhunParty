@@ -106,6 +106,25 @@ def session_looks_like_beat_clock(db: Session, session_code: str) -> bool:
     )
 
 
+def countdown_phase_has_elapsed(phase_state: dict) -> bool:
+    if phase_state.get("phase") != SessionPhase.COUNTDOWN.value:
+        return False
+
+    question_start_at = phase_state.get("question_start_at")
+    if not question_start_at:
+        return True
+
+    try:
+        question_start_at_dt = datetime.fromisoformat(
+            str(question_start_at).replace("Z", "")
+        )
+    except ValueError:
+        logger.warning("Invalid countdown question_start_at: %s", question_start_at)
+        return False
+
+    return question_start_at_dt <= utc_now() + timedelta(milliseconds=500)
+
+
 def open_db_session(
     current_player_id: Optional[str] = None,
 ) -> tuple[Session, Generator[Session, None, None]]:
@@ -1339,6 +1358,17 @@ async def handle_websocket_message(
         await handle_update_session_settings(session_code, data, db)
 
     elif message_type == "start_beat_clock_round" and client_type == "web":
+        phase_state = manager.get_session_phase_state(session_code)
+        if not countdown_phase_has_elapsed(phase_state):
+            logger.info(
+                "Ignoring start_beat_clock_round for %s; countdown has not completed. phase=%s question_start_at=%s",
+                session_code,
+                phase_state.get("phase"),
+                phase_state.get("question_start_at"),
+            )
+            manager.update_heartbeat(websocket)
+            return
+
         game_type = resolve_session_game_type(
             db,
             session_code,
@@ -1509,18 +1539,6 @@ async def handle_websocket_message(
         phase_state = manager.get_session_phase_state(session_code)
         current_phase = phase_state.get("phase")
         if current_phase != SessionPhase.COUNTDOWN.value:
-            game_type = resolve_session_game_type(db, session_code)
-            if (
-                game_type == BEAT_THE_CLOCK_GAME_TYPE
-                and current_phase != SessionPhase.ENDED.value
-            ):
-                beat_clock_handler = create_game_handler(
-                    session_code, BEAT_THE_CLOCK_GAME_TYPE
-                )
-                await beat_clock_handler.handle_game_start(db)
-                manager.update_heartbeat(websocket)
-                return
-
             logger.info(
                 "Ignoring countdown_complete for %s; current phase is %s",
                 session_code,
@@ -1529,26 +1547,14 @@ async def handle_websocket_message(
             manager.update_heartbeat(websocket)
             return
 
-        question_start_at = phase_state.get("question_start_at")
-        if question_start_at:
-            try:
-                question_start_at_dt = datetime.fromisoformat(
-                    str(question_start_at).replace("Z", "")
-                )
-                if question_start_at_dt > utc_now() + timedelta(milliseconds=500):
-                    logger.info(
-                        "Ignoring early countdown_complete for %s; question_start_at=%s",
-                        session_code,
-                        question_start_at,
-                    )
-                    manager.update_heartbeat(websocket)
-                    return
-            except ValueError:
-                logger.warning(
-                    "Invalid countdown question_start_at for %s: %s",
-                    session_code,
-                    question_start_at,
-                )
+        if not countdown_phase_has_elapsed(phase_state):
+            logger.info(
+                "Ignoring early countdown_complete for %s; question_start_at=%s",
+                session_code,
+                phase_state.get("question_start_at"),
+            )
+            manager.update_heartbeat(websocket)
+            return
 
         logger.info(
             "Recovering countdown_complete for %s by revealing current question",
@@ -1566,7 +1572,7 @@ async def handle_websocket_message(
         await reveal_current_question(
             session_code,
             db,
-            question_start_at or iso_utc(utc_now()),
+            phase_state.get("question_start_at") or iso_utc(utc_now()),
             acting_player_id=authenticated_player_id,
         )
         manager.update_heartbeat(websocket)
