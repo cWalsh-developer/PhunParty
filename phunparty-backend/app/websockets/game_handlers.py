@@ -399,10 +399,13 @@ class BeatTheClockGameHandler(GameEventHandler):
                 "question_order": order,
                 "question_index": 0,
                 "current_question_id": None,
+                "question_payloads": {},
                 "answered_count": 0,
                 "correct_count": 0,
             }
             players[player_id] = player_state
+
+        player_state.setdefault("question_payloads", {})
 
         if not player_state.get("question_order"):
             player_state["question_order"] = list(question_ids)
@@ -438,22 +441,34 @@ class BeatTheClockGameHandler(GameEventHandler):
         if not question:
             return None
 
-        question_data = build_question_with_randomized_options(question)
-        display_options = question_data.get("display_options") or []
-        difficulty = str(question_data.get("difficulty", "easy")).lower()
-        ui_mode = "multiple_choice" if display_options and difficulty != "hard" else "text_input"
         player_state = state.get("players", {}).get(player_id, {})
+        payloads = player_state.setdefault("question_payloads", {})
+        base_payload = payloads.get(question_id)
+        if not base_payload:
+            question_data = build_question_with_randomized_options(question)
+            display_options = question_data.get("display_options") or []
+            difficulty = str(question_data.get("difficulty", "easy")).lower()
+            ui_mode = (
+                "multiple_choice"
+                if display_options and difficulty != "hard"
+                else "text_input"
+            )
+            base_payload = {
+                "game_type": self.game_type,
+                "question_id": question_data.get("question_id"),
+                "question": question_data.get("question"),
+                "genre": question_data.get("genre"),
+                "difficulty": question_data.get("difficulty"),
+                "display_options": display_options,
+                "options": display_options,
+                "ui_mode": ui_mode,
+            }
+            payloads[question_id] = base_payload
+
         score_row = get_scores_by_session_and_player(db, self.session_code, player_id)
 
         return {
-            "game_type": self.game_type,
-            "question_id": question_data.get("question_id"),
-            "question": question_data.get("question"),
-            "genre": question_data.get("genre"),
-            "difficulty": question_data.get("difficulty"),
-            "display_options": display_options,
-            "options": display_options,
-            "ui_mode": ui_mode,
+            **base_payload,
             "score": score_row.score if score_row else 0,
             "answered_count": player_state.get("answered_count", 0),
             "correct_count": player_state.get("correct_count", 0),
@@ -743,6 +758,9 @@ class BeatTheClockGameHandler(GameEventHandler):
 
         player_state = state.get("players", {}).get(player_id)
         if not player_state or player_state.get("current_question_id") != question_id:
+            current_question_id = (
+                player_state or {}
+            ).get("current_question_id")
             score_row = get_scores_by_session_and_player(
                 db,
                 self.session_code,
@@ -760,6 +778,15 @@ class BeatTheClockGameHandler(GameEventHandler):
                 "ends_at": state.get("ends_at"),
                 "server_time_ms": manager._utc_now_ms(),
             }
+            current_payload = None
+            if current_question_id:
+                current_payload = self._question_payload(
+                    db,
+                    current_question_id,
+                    player_id,
+                    state,
+                )
+
             for connection_info in manager.get_player_connections(
                 self.session_code, player_id
             ).values():
@@ -769,6 +796,16 @@ class BeatTheClockGameHandler(GameEventHandler):
                         {"type": "beat_clock_answer_result", "data": duplicate_payload},
                         websocket,
                     )
+                    if current_payload:
+                        await manager.send_personal_message(
+                            {
+                                "type": "beat_clock_question",
+                                "data": current_payload,
+                            },
+                            websocket,
+                        )
+            if not current_payload:
+                await self._send_question_to_player(db, player_id, state)
             return
 
         question = get_question_by_id(question_id, db)
