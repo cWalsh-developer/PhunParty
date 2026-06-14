@@ -589,6 +589,12 @@ async def websocket_endpoint(
             resolved_game_type = resolve_session_game_type(
                 db, session_code, session=session, requested_game_type=game_type
             )
+            if (
+                resolved_game_type != BEAT_THE_CLOCK_GAME_TYPE
+                and session_looks_like_beat_clock(db, session_code)
+            ):
+                resolved_game_type = BEAT_THE_CLOCK_GAME_TYPE
+                manager.set_session_game_type(session_code, BEAT_THE_CLOCK_GAME_TYPE)
         finally:
             close_db_session(db_generator)
 
@@ -1313,6 +1319,9 @@ async def handle_websocket_message(
             data.get("gameType") if isinstance(data, dict) else None,
             data,
         )
+        if not requested_game_type and session_looks_like_beat_clock(db, session_code):
+            requested_game_type = BEAT_THE_CLOCK_GAME_TYPE
+
         if requested_game_type and requested_game_type != getattr(
             game_handler, "game_type", None
         ):
@@ -2874,6 +2883,17 @@ async def handle_game_start(
 
         if acting_player_id:
             set_rls_current_player(db, acting_player_id)
+
+        if (
+            getattr(game_handler, "game_type", None) != BEAT_THE_CLOCK_GAME_TYPE
+            and session_looks_like_beat_clock(db, session_code)
+        ):
+            logger.info(
+                "Forcing Beat the Clock handler for %s based on BTC question assignments",
+                session_code,
+            )
+            manager.set_session_game_type(session_code, BEAT_THE_CLOCK_GAME_TYPE)
+            game_handler = create_game_handler(session_code, BEAT_THE_CLOCK_GAME_TYPE)
 
         # Emit an authoritative roster snapshot at game-start boundary.
         await manager.broadcast_player_roster_update(session_code)
