@@ -11,7 +11,6 @@ from typing import Any, Dict, Optional
 
 from app.config import SessionLocal
 from app.database.dbCRUD import (
-    build_question_with_randomized_options,
     create_player_response,
     create_score,
     get_current_question_details,
@@ -22,7 +21,12 @@ from app.database.dbCRUD import (
     get_session_questions_ordered,
     update_scores,
 )
-from app.logic.game_logic import get_game_session_state, question_allows_fuzzy_validation
+from app.logic.game_logic import (
+    build_question_with_randomized_options,
+    get_game_session_state,
+    question_allows_fuzzy_validation,
+    submit_player_answer,
+)
 from app.security.rls import set_rls_current_player
 from app.database.fair_play_crud import is_player_frozen_for_question, is_player_kicked
 from app.logic.answer_validation import validate_answer_against_question
@@ -30,7 +34,6 @@ from app.security.loggingUtils import safe_player_ref
 from app.security.question_payload import sanitize_question_for_client
 from app.security.roster_identity import make_roster_player_id
 from app.websockets.game_lifecycle import handle_game_end
-from app.logic.game_logic import submit_player_answer
 from app.websockets.game_modes import BEAT_THE_CLOCK_GAME_TYPE
 from app.websockets.manager import SessionPhase, manager
 from app.websockets.scheduler import (
