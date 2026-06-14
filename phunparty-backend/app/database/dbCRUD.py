@@ -1,4 +1,5 @@
 import logging
+import random
 from datetime import datetime, timezone
 
 from sqlalchemy import func, text
@@ -12,6 +13,7 @@ def utc_now() -> datetime:
 
 
 from app.models.players import Player
+from app.models.enums import DifficultyLevel
 from app.schemas.game_model import Game
 from app.schemas.game_session_model import GameSession
 from app.schemas.game_state_models import GameSessionState, PlayerResponse
@@ -33,6 +35,71 @@ from app.utils.id_generator import (
     generate_session_code,
 )
 from app.utils.phone_numbers import normalize_phone_number, phone_number_candidates
+
+
+def _is_beat_clock_text(value: str | None) -> bool:
+    normalized = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
+    return "beat the clock" in normalized or "beat clock" in normalized
+
+
+def _question_genre_values_for_game(game: Game) -> list[str]:
+    """Return lower-case question genre values accepted for a game template."""
+    genre = str(getattr(game, "genre", "") or "").strip().lower()
+    rules = str(getattr(game, "rules", "") or "").strip().lower()
+    if _is_beat_clock_text(genre) or _is_beat_clock_text(rules):
+        return ["beat_the_clock", "beat-the-clock", "beat the clock", "beat clock"]
+    return [genre]
+
+
+def _select_mixed_difficulty_questions(
+    base_query,
+    total_questions: int,
+) -> list[Questions]:
+    """Select a balanced Easy/Medium/Hard pool, then fill any shortages."""
+    difficulties = [
+        DifficultyLevel.easy,
+        DifficultyLevel.medium,
+        DifficultyLevel.hard,
+    ]
+    random.shuffle(difficulties)
+
+    base_count = total_questions // len(difficulties)
+    remainder = total_questions % len(difficulties)
+    target_counts = {
+        difficulty: base_count + (1 if index < remainder else 0)
+        for index, difficulty in enumerate(difficulties)
+    }
+
+    selected: list[Questions] = []
+    selected_ids: set[str] = set()
+
+    for difficulty, count in target_counts.items():
+        if count <= 0:
+            continue
+        questions = (
+            base_query.filter(Questions.difficulty == difficulty)
+            .order_by(func.random())
+            .limit(count)
+            .all()
+        )
+        for question in questions:
+            if question.question_id not in selected_ids:
+                selected.append(question)
+                selected_ids.add(question.question_id)
+
+    if len(selected) < total_questions:
+        fill_query = base_query
+        if selected_ids:
+            fill_query = fill_query.filter(~Questions.question_id.in_(selected_ids))
+        fill_questions = (
+            fill_query.order_by(func.random())
+            .limit(total_questions - len(selected))
+            .all()
+        )
+        selected.extend(fill_questions)
+
+    random.shuffle(selected)
+    return selected
 
 
 def generate_unique_friend_code(db: Session) -> str:
@@ -62,6 +129,7 @@ def create_game_session(
     owner_player_id: str = None,
     ispublic: bool = True,
     difficulty: str = None,
+    beat_clock_duration_seconds: int = 60,
 ) -> GameSession:
     """Create a new game session with the specified parameters.
 
@@ -76,18 +144,32 @@ def create_game_session(
     """
     session_code = generate_session_code()
     try:
+        beat_clock_duration_seconds = int(beat_clock_duration_seconds or 60)
+    except (TypeError, ValueError):
+        beat_clock_duration_seconds = 60
+    beat_clock_duration_seconds = max(15, min(600, beat_clock_duration_seconds))
+
+    try:
+        game = get_game_by_code(db, game_code)
+        effective_difficulty = (
+            None
+            if game
+            and (_is_beat_clock_text(game.genre) or _is_beat_clock_text(game.rules))
+            else difficulty
+        )
         gameSession = GameSession(
             session_code=session_code,
             host_name=host_name,
             number_of_questions=number_of_questions,
             game_code=game_code,
             owner_player_id=owner_player_id,
+            beat_clock_duration_seconds=beat_clock_duration_seconds,
         )
         db.add(gameSession)
         db.flush()
 
         first_question_id = add_question_to_session(
-            db, session_code, difficulty, session=gameSession
+            db, session_code, effective_difficulty, session=gameSession
         )
         create_game_session_state(
             db,
@@ -650,15 +732,12 @@ def add_question_to_session(
         raise ValueError("Game not found")
 
     db.execute(text("SELECT set_config('app.question_bank_read', 'on', true)"))
-    # Build query with genre filter
-    query = db.query(Questions).filter(
-        func.lower(Questions.genre) == game.genre.lower()
-    )
+    question_genres = _question_genre_values_for_game(game)
+    is_beat_clock = _is_beat_clock_text(game.genre) or _is_beat_clock_text(game.rules)
+    query = db.query(Questions).filter(func.lower(Questions.genre).in_(question_genres))
 
     # Add difficulty filter if specified
-    if difficulty:
-        from app.models.enums import DifficultyLevel
-
+    if difficulty and not is_beat_clock:
         try:
             difficulty_enum = DifficultyLevel(difficulty.lower())
             query = query.filter(Questions.difficulty == difficulty_enum)
@@ -667,17 +746,36 @@ def add_question_to_session(
                 f"Invalid difficulty level: {difficulty}. Must be 'easy', 'medium', or 'hard'"
             )
 
-    # Get randomly selected questions
-    questions = query.order_by(func.random()).limit(session.number_of_questions).all()
+    if is_beat_clock:
+        questions = _select_mixed_difficulty_questions(
+            query,
+            session.number_of_questions,
+        )
+    else:
+        questions = (
+            query.order_by(func.random()).limit(session.number_of_questions).all()
+        )
 
     if not questions:
-        difficulty_msg = f" with difficulty '{difficulty}'" if difficulty else ""
+        difficulty_msg = (
+            " with mixed difficulties"
+            if is_beat_clock
+            else f" with difficulty '{difficulty}'"
+            if difficulty
+            else ""
+        )
         raise ValueError(
             f"No questions available for genre '{game.genre}'{difficulty_msg}"
         )
 
     if len(questions) < session.number_of_questions:
-        difficulty_msg = f" with difficulty '{difficulty}'" if difficulty else ""
+        difficulty_msg = (
+            " with mixed difficulties"
+            if is_beat_clock
+            else f" with difficulty '{difficulty}'"
+            if difficulty
+            else ""
+        )
         raise ValueError(
             f"Not enough questions available. Found {len(questions)} but need {session.number_of_questions} "
             f"for genre '{game.genre}'{difficulty_msg}"

@@ -11,3 +11,4 @@ class GameSession(Base):
     owner_player_id = Column(
         String, ForeignKey("players.player_id"), nullable=True
     )  # Added for session ownership
+    beat_clock_duration_seconds = Column(Integer, nullable=False, default=60)

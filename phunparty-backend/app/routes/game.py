@@ -78,6 +78,10 @@ def create_game_session_route(
             current_player.player_id,
             request.ispublic,
             request.difficulty,
+            request.beat_clock_duration_seconds
+            or request.duration_seconds
+            or request.timer_seconds
+            or 60,
         )
         return {
             "session_code": gameSession.session_code,
@@ -85,6 +89,7 @@ def create_game_session_route(
             "number_of_questions": gameSession.number_of_questions,
             "game_code": gameSession.game_code,
             "owner_player_id": gameSession.owner_player_id,
+            "beat_clock_duration_seconds": gameSession.beat_clock_duration_seconds,
             "difficulty": request.difficulty,
             "message": "Game session created successfully with randomly selected questions",
         }

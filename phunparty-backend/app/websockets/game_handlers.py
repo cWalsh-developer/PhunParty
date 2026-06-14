@@ -3,16 +3,26 @@ Game event handlers for different game types
 Handles the business logic for different game modes
 """
 
+import asyncio
 import logging
+import random
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
+from app.config import SessionLocal
 from app.database.dbCRUD import (
+    build_question_with_randomized_options,
+    create_player_response,
+    create_score,
     get_current_question_details,
     get_player_by_ID,
     get_question_by_id,
+    get_scores_by_session_and_player,
+    get_session_by_code,
+    get_session_questions_ordered,
+    update_scores,
 )
-from app.logic.game_logic import get_game_session_state
+from app.logic.game_logic import get_game_session_state, question_allows_fuzzy_validation
 from app.security.rls import set_rls_current_player
 from app.database.fair_play_crud import is_player_frozen_for_question, is_player_kicked
 from app.logic.answer_validation import validate_answer_against_question
@@ -21,6 +31,7 @@ from app.security.question_payload import sanitize_question_for_client
 from app.security.roster_identity import make_roster_player_id
 from app.websockets.game_lifecycle import handle_game_end
 from app.logic.game_logic import submit_player_answer
+from app.websockets.game_modes import BEAT_THE_CLOCK_GAME_TYPE
 from app.websockets.manager import SessionPhase, manager
 from app.websockets.scheduler import (
     NEXT_QUESTION_REVEAL_DELAY_MS,
@@ -318,6 +329,487 @@ class TriviaGameHandler(GameEventHandler):
             ),  # Alias for compatibility
             "ui_mode": ui_mode,
         }
+
+
+class BeatTheClockGameHandler(GameEventHandler):
+    """Handler for Beat the Clock game mode."""
+
+    def __init__(self, session_code: str):
+        super().__init__(session_code, BEAT_THE_CLOCK_GAME_TYPE)
+
+    def _duration_seconds(self, db: Session) -> int:
+        session = get_session_by_code(db, self.session_code)
+        duration = getattr(session, "beat_clock_duration_seconds", None) or 60
+        try:
+            duration = int(duration)
+        except (TypeError, ValueError):
+            duration = 60
+        return max(15, min(600, duration))
+
+    def _question_ids(self, db: Session) -> list[str]:
+        assignments = get_session_questions_ordered(db, self.session_code)
+        return [
+            assignment.question_id
+            for assignment in assignments
+            if getattr(assignment, "question_id", None)
+        ]
+
+    def _leaderboard(self, db: Session) -> list[dict]:
+        players = manager.get_mobile_players(self.session_code)
+        leaderboard = []
+        for player in players:
+            player_id = player.get("player_id")
+            if not player_id:
+                continue
+            score_row = get_scores_by_session_and_player(
+                db, self.session_code, player_id
+            )
+            leaderboard.append(
+                {
+                    "player_id": player_id,
+                    "roster_player_id": make_roster_player_id(
+                        self.session_code, player_id
+                    ),
+                    "display_name": player.get("player_name") or "Player",
+                    "player_photo_url": player.get("player_photo"),
+                    "score": score_row.score if score_row else 0,
+                }
+            )
+
+        leaderboard.sort(key=lambda item: (-item["score"], item["display_name"]))
+        for index, item in enumerate(leaderboard, start=1):
+            item["rank"] = index
+        return leaderboard
+
+    def _ensure_player_state(
+        self,
+        state: dict,
+        player_id: str,
+        question_ids: list[str],
+    ) -> dict:
+        players = state.setdefault("players", {})
+        player_state = players.get(player_id)
+        if not player_state:
+            order = list(question_ids)
+            random.shuffle(order)
+            player_state = {
+                "question_order": order,
+                "question_index": 0,
+                "current_question_id": None,
+                "answered_count": 0,
+                "correct_count": 0,
+            }
+            players[player_id] = player_state
+
+        if not player_state.get("question_order"):
+            player_state["question_order"] = list(question_ids)
+            random.shuffle(player_state["question_order"])
+            player_state["question_index"] = 0
+
+        return player_state
+
+    def _next_question_id(self, state: dict, player_id: str) -> Optional[str]:
+        question_ids = state.get("questions") or []
+        if not question_ids:
+            return None
+
+        player_state = self._ensure_player_state(state, player_id, question_ids)
+        if player_state["question_index"] >= len(player_state["question_order"]):
+            player_state["question_order"] = list(question_ids)
+            random.shuffle(player_state["question_order"])
+            player_state["question_index"] = 0
+
+        question_id = player_state["question_order"][player_state["question_index"]]
+        player_state["question_index"] += 1
+        player_state["current_question_id"] = question_id
+        return question_id
+
+    def _question_payload(
+        self,
+        db: Session,
+        question_id: str,
+        player_id: str,
+        state: dict,
+    ) -> Optional[dict]:
+        question = get_question_by_id(question_id, db)
+        if not question:
+            return None
+
+        question_data = build_question_with_randomized_options(question)
+        display_options = question_data.get("display_options") or []
+        difficulty = str(question_data.get("difficulty", "easy")).lower()
+        ui_mode = "multiple_choice" if display_options and difficulty != "hard" else "text_input"
+        player_state = state.get("players", {}).get(player_id, {})
+        score_row = get_scores_by_session_and_player(db, self.session_code, player_id)
+
+        return {
+            "game_type": self.game_type,
+            "question_id": question_data.get("question_id"),
+            "question": question_data.get("question"),
+            "genre": question_data.get("genre"),
+            "difficulty": question_data.get("difficulty"),
+            "display_options": display_options,
+            "options": display_options,
+            "ui_mode": ui_mode,
+            "score": score_row.score if score_row else 0,
+            "answered_count": player_state.get("answered_count", 0),
+            "correct_count": player_state.get("correct_count", 0),
+            "duration_seconds": state.get("duration_seconds"),
+            "started_at": state.get("started_at"),
+            "ends_at": state.get("ends_at"),
+            "server_time_ms": manager._utc_now_ms(),
+            "phase": SessionPhase.QUESTION.value,
+        }
+
+    async def _send_question_to_player(
+        self,
+        db: Session,
+        player_id: str,
+        state: Optional[dict] = None,
+    ) -> bool:
+        state = state or manager.get_beat_clock_state(self.session_code)
+        if not state.get("active"):
+            return False
+
+        question_id = self._next_question_id(state, player_id)
+        if not question_id:
+            return False
+
+        payload = self._question_payload(db, question_id, player_id, state)
+        if not payload:
+            return False
+
+        sent = False
+        for connection_info in manager.get_player_connections(
+            self.session_code, player_id
+        ).values():
+            websocket = connection_info.get("websocket")
+            if websocket:
+                await manager.send_personal_message(
+                    {"type": "beat_clock_question", "data": payload},
+                    websocket,
+                )
+                sent = True
+        return sent
+
+    async def _broadcast_state(self, db: Session) -> dict:
+        state = manager.get_beat_clock_state(self.session_code)
+        leaderboard = self._leaderboard(db)
+        state["leaderboard"] = leaderboard
+        payload = {
+            "game_type": self.game_type,
+            "duration_seconds": state.get("duration_seconds"),
+            "started_at": state.get("started_at"),
+            "ends_at": state.get("ends_at"),
+            "server_time_ms": manager._utc_now_ms(),
+            "leaderboard": leaderboard,
+        }
+        await manager.broadcast_to_session(
+            self.session_code,
+            {"type": "beat_clock_state", "data": payload},
+            critical=True,
+        )
+        return payload
+
+    async def handle_game_start(self, db: Session):
+        try:
+            session = get_session_by_code(db, self.session_code)
+            if session and session.owner_player_id:
+                set_rls_current_player(db, session.owner_player_id)
+
+            question_ids = self._question_ids(db)
+            if not question_ids:
+                await manager.broadcast_to_session(
+                    self.session_code,
+                    {
+                        "type": "error",
+                        "data": {
+                            "message": "Beat the Clock needs at least one question.",
+                            "reason": "missing_questions",
+                        },
+                    },
+                    critical=True,
+                )
+                return
+
+            game_state = get_game_session_state(db, self.session_code)
+            if not game_state:
+                await manager.broadcast_to_session(
+                    self.session_code,
+                    {
+                        "type": "error",
+                        "data": {
+                            "message": "The game session could not be started.",
+                            "reason": "missing_game_state",
+                        },
+                    },
+                    critical=True,
+                )
+                return
+
+            duration_seconds = self._duration_seconds(db)
+            started_at_dt = utc_now()
+            ends_at_dt = started_at_dt + timedelta(seconds=duration_seconds)
+            started_at = iso_utc(started_at_dt)
+            ends_at = iso_utc(ends_at_dt)
+
+            for player in manager.get_mobile_players(self.session_code):
+                player_id = player.get("player_id")
+                if player_id:
+                    create_score(db, self.session_code, player_id)
+
+            game_state.isstarted = True
+            game_state.is_waiting_for_players = False
+            game_state.started_at = game_state.started_at or started_at_dt
+            db.commit()
+
+            phase_state = manager.set_session_phase(
+                self.session_code,
+                SessionPhase.QUESTION,
+                start_at=started_at,
+                ends_at=ends_at,
+                duration_seconds=duration_seconds,
+                game_type=self.game_type,
+                total_questions=len(question_ids),
+                clear_fields=["current_question_id"],
+            )
+
+            state = {
+                "active": True,
+                "round_id": f"{self.session_code}:{phase_state['phase_started_at_ms']}",
+                "duration_seconds": duration_seconds,
+                "started_at": started_at,
+                "ends_at": ends_at,
+                "ends_at_dt": ends_at_dt,
+                "questions": question_ids,
+                "players": {},
+                "leaderboard": [],
+            }
+            manager.set_beat_clock_state(self.session_code, state)
+
+            await manager.broadcast_to_session(
+                self.session_code,
+                {
+                    "type": "game_started",
+                    "data": {
+                        "session_code": self.session_code,
+                        "started_at": started_at,
+                        "isstarted": True,
+                        "phase": phase_state["phase"],
+                        "game_type": self.game_type,
+                        "duration_seconds": duration_seconds,
+                        "ends_at": ends_at,
+                        "server_time_ms": phase_state["server_time_ms"],
+                    },
+                },
+                critical=True,
+                require_ack=True,
+            )
+
+            await manager.broadcast_to_session(
+                self.session_code,
+                {
+                    "type": "beat_clock_started",
+                    "data": {
+                        "game_type": self.game_type,
+                        "duration_seconds": duration_seconds,
+                        "started_at": started_at,
+                        "ends_at": ends_at,
+                        "server_time_ms": phase_state["server_time_ms"],
+                        "leaderboard": self._leaderboard(db),
+                    },
+                },
+                critical=True,
+                require_ack=True,
+            )
+
+            await manager.broadcast_player_roster_update(self.session_code)
+
+            for player in manager.get_mobile_players(self.session_code):
+                player_id = player.get("player_id")
+                if player_id:
+                    await self._send_question_to_player(db, player_id, state)
+
+            asyncio.create_task(
+                self._finish_when_timer_expires(
+                    state["round_id"],
+                    duration_seconds,
+                    getattr(session, "owner_player_id", None),
+                )
+            )
+        except Exception:
+            logger.exception("Error starting Beat the Clock session %s", self.session_code)
+
+    async def handle_current_question_request(
+        self,
+        websocket,
+        player_id: Optional[str],
+        db: Session,
+    ) -> None:
+        if not player_id:
+            return
+        state = manager.get_beat_clock_state(self.session_code)
+        if not state.get("active"):
+            return
+
+        player_state = self._ensure_player_state(
+            state,
+            player_id,
+            state.get("questions", []),
+        )
+        question_id = player_state.get("current_question_id")
+        if not question_id:
+            await self._send_question_to_player(db, player_id, state)
+            return
+
+        payload = self._question_payload(db, question_id, player_id, state)
+        if payload:
+            await manager.send_personal_message(
+                {"type": "beat_clock_question", "data": payload},
+                websocket,
+            )
+
+    async def handle_player_answer(
+        self, player_id: str, answer: str, question_id: str, db: Session
+    ):
+        state = manager.get_beat_clock_state(self.session_code)
+        if not state.get("active"):
+            for connection_info in manager.get_player_connections(
+                self.session_code, player_id
+            ).values():
+                websocket = connection_info.get("websocket")
+                if websocket:
+                    await manager.send_personal_message(
+                        {
+                            "type": "answer_rejected",
+                            "data": {
+                                "reason": "game_not_active",
+                                "message": "Beat the Clock is not currently active.",
+                            },
+                        },
+                        websocket,
+                    )
+            return
+
+        if utc_now() >= state.get("ends_at_dt", utc_now()):
+            state["active"] = False
+            await self._finish_now(db, acting_player_id=player_id)
+            return
+
+        player_state = state.get("players", {}).get(player_id)
+        if not player_state or player_state.get("current_question_id") != question_id:
+            for connection_info in manager.get_player_connections(
+                self.session_code, player_id
+            ).values():
+                websocket = connection_info.get("websocket")
+                if websocket:
+                    await manager.send_personal_message(
+                        {
+                            "type": "answer_rejected",
+                            "data": {
+                                "reason": "stale_question",
+                                "message": "That question has already moved on.",
+                                "question_id": question_id,
+                                "current_question_id": (
+                                    player_state or {}
+                                ).get("current_question_id"),
+                            },
+                        },
+                        websocket,
+                    )
+            return
+
+        question = get_question_by_id(question_id, db)
+        if not question:
+            return
+
+        validation = validate_answer_against_question(
+            answer,
+            question,
+            allow_fuzzy=question_allows_fuzzy_validation(question),
+        )
+        is_correct = validation.is_correct
+        create_player_response(
+            db,
+            self.session_code,
+            player_id,
+            question_id,
+            answer,
+            is_correct,
+        )
+        if is_correct:
+            update_scores(db, self.session_code, player_id)
+            player_state["correct_count"] = player_state.get("correct_count", 0) + 1
+
+        player_state["answered_count"] = player_state.get("answered_count", 0) + 1
+        score_row = get_scores_by_session_and_player(db, self.session_code, player_id)
+        db.commit()
+
+        session = get_session_by_code(db, self.session_code)
+        if session and session.owner_player_id:
+            set_rls_current_player(db, session.owner_player_id)
+
+        answer_payload = {
+            "game_type": self.game_type,
+            "question_id": question_id,
+            "is_correct": is_correct,
+            "score": score_row.score if score_row else 0,
+            "answered_count": player_state["answered_count"],
+            "correct_count": player_state["correct_count"],
+            "duration_seconds": state.get("duration_seconds"),
+            "ends_at": state.get("ends_at"),
+            "server_time_ms": manager._utc_now_ms(),
+            "answer_match": {
+                "method": validation.method,
+                "matched_answer": validation.matched_answer,
+                "score": validation.score,
+            },
+        }
+
+        for connection_info in manager.get_player_connections(
+            self.session_code, player_id
+        ).values():
+            websocket = connection_info.get("websocket")
+            if websocket:
+                await manager.send_personal_message(
+                    {"type": "beat_clock_answer_result", "data": answer_payload},
+                    websocket,
+                )
+
+        await self._broadcast_state(db)
+        await self._send_question_to_player(db, player_id, state)
+
+    async def _finish_when_timer_expires(
+        self,
+        round_id: str,
+        duration_seconds: int,
+        owner_player_id: Optional[str],
+    ) -> None:
+        await asyncio.sleep(duration_seconds + 0.25)
+        state = manager.get_beat_clock_state(self.session_code)
+        if state.get("round_id") != round_id or not state.get("active"):
+            return
+
+        with SessionLocal() as db:
+            await self._finish_now(db, acting_player_id=owner_player_id)
+
+    async def _finish_now(
+        self,
+        db: Session,
+        acting_player_id: Optional[str] = None,
+    ) -> None:
+        state = manager.get_beat_clock_state(self.session_code)
+        state["active"] = False
+        session = get_session_by_code(db, self.session_code)
+        end_actor_id = getattr(session, "owner_player_id", None) or acting_player_id
+        if end_actor_id:
+            set_rls_current_player(db, end_actor_id)
+        await self._broadcast_state(db)
+        await handle_game_end(
+            self.session_code,
+            db,
+            acting_player_id=end_actor_id,
+        )
 
 
 class BuzzerGameHandler(GameEventHandler):
@@ -1204,6 +1696,7 @@ class BuzzerGameHandler(GameEventHandler):
 GAME_HANDLERS = {
     "trivia": TriviaGameHandler,
     "buzzer": BuzzerGameHandler,
+    BEAT_THE_CLOCK_GAME_TYPE: BeatTheClockGameHandler,
 }
 
 

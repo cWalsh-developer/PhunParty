@@ -3,6 +3,7 @@ import os
 from contextlib import asynccontextmanager
 
 from app.config import Base, engine
+from app.database.beat_clock_migrations import ensure_beat_clock_session_columns
 from app.database.fair_play_migrations import ensure_fair_play_columns
 from app.database.social_migrations import ensure_social_player_columns
 from app.routes import (
@@ -85,6 +86,7 @@ async def lifespan(app: FastAPI):
         Base.metadata.create_all(bind=engine)
         ensure_fair_play_columns()
         ensure_social_player_columns()
+        ensure_beat_clock_session_columns()
     except Exception as e:
         logger.warning("Could not create database tables: %s", e)
 

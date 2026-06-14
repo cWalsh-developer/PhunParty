@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GAME_TYPE = "trivia"
 BUZZER_GAME_TYPE = "buzzer"
+BEAT_THE_CLOCK_GAME_TYPE = "beat_the_clock"
 
 
 def normalize_game_type(*candidates: Any) -> Optional[str]:
@@ -50,6 +51,15 @@ def normalize_game_type(*candidates: Any) -> Optional[str]:
                 if parsed_type:
                     return parsed_type
 
+            if (
+                "beat the clock" in text
+                or "beat-the-clock" in text
+                or "beat_the_clock" in text
+                or "beat clock" in text
+                or "beat-clock" in text
+                or "beat_clock" in text
+            ):
+                return BEAT_THE_CLOCK_GAME_TYPE
             if "buzzer" in text or "buzz" in text:
                 return BUZZER_GAME_TYPE
             if "trivia" in text or "quiz" in text:

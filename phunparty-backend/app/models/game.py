@@ -16,6 +16,9 @@ class GameSessionCreation(BaseModel):
     game_code: str
     ispublic: bool = True
     difficulty: Optional[str] = None
+    beat_clock_duration_seconds: Optional[int] = None
+    duration_seconds: Optional[int] = None
+    timer_seconds: Optional[int] = None
 
 
 class GameJoinRequest(BaseModel):

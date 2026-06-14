@@ -36,7 +36,11 @@ from app.security.rls import set_rls_current_player
 from app.security.roster_identity import make_roster_player_id
 from app.websockets.game_handlers import create_game_handler
 from app.websockets.game_lifecycle import handle_game_end
-from app.websockets.game_modes import BUZZER_GAME_TYPE, resolve_session_game_type
+from app.websockets.game_modes import (
+    BEAT_THE_CLOCK_GAME_TYPE,
+    BUZZER_GAME_TYPE,
+    resolve_session_game_type,
+)
 from app.websockets.manager import SessionPhase, manager
 from app.websockets.scheduler import (
     COUNTDOWN_DURATION_MS,
@@ -366,6 +370,15 @@ def build_sync_state(
     sync_state["game_state"] = game_state
     sync_state["game_type"] = game_type
     sync_state["connected_players"] = manager.get_mobile_players(session_code)
+    if game_type == BEAT_THE_CLOCK_GAME_TYPE:
+        beat_clock_state = manager.get_beat_clock_state(session_code)
+        sync_state["beat_clock"] = {
+            "active": beat_clock_state.get("active", False),
+            "duration_seconds": beat_clock_state.get("duration_seconds"),
+            "started_at": beat_clock_state.get("started_at"),
+            "ends_at": beat_clock_state.get("ends_at"),
+            "leaderboard": beat_clock_state.get("leaderboard", []),
+        }
     sync_state["current_question"] = get_mobile_current_question_payload(
         session_code, db, game_type
     )
@@ -379,6 +392,10 @@ def get_mobile_current_question_payload(
     queued_question = manager.get_current_question(session_code)
     if queued_question:
         return queued_question
+
+    game_type = game_type or resolve_session_game_type(db, session_code)
+    if game_type == BEAT_THE_CLOCK_GAME_TYPE:
+        return None
 
     phase_state = manager.get_session_phase_state(session_code)
     if phase_state.get("phase") != SessionPhase.QUESTION.value:
@@ -410,7 +427,6 @@ def get_mobile_current_question_payload(
         total_questions=game_status.get("total_questions"),
     )
 
-    game_type = game_type or resolve_session_game_type(db, session_code)
     question_data = {
         **question_data,
         "game_type": game_type,
@@ -715,6 +731,7 @@ async def send_initial_session_state(
             and game_state
             and game_state.get("is_active")
             and game_state.get("isstarted")
+            and game_type != BEAT_THE_CLOCK_GAME_TYPE
         ):
             try:
                 current_question = get_current_question_details(db, session_code)
@@ -737,7 +754,19 @@ async def send_initial_session_state(
             authoritative_phase = authoritative_state.get("phase")
 
             if authoritative_phase == SessionPhase.QUESTION.value:
-                if game_type == BUZZER_GAME_TYPE:
+                if game_type == BEAT_THE_CLOCK_GAME_TYPE:
+                    beat_clock_handler = create_game_handler(
+                        session_code,
+                        BEAT_THE_CLOCK_GAME_TYPE,
+                    )
+                    if hasattr(beat_clock_handler, "handle_current_question_request"):
+                        await beat_clock_handler.handle_current_question_request(
+                            websocket,
+                            player_id,
+                            db,
+                        )
+
+                elif game_type == BUZZER_GAME_TYPE:
                     logger.warning(
                         "Mobile reconnected during buzzer question; sending authoritative buzzer UI instead of generic question_started: session=%s player=%s",
                         session_code,
@@ -864,6 +893,19 @@ async def handle_websocket_message(
 
         game_type = resolve_session_game_type(db, session_code)
 
+        if game_type == BEAT_THE_CLOCK_GAME_TYPE:
+            beat_clock_handler = create_game_handler(
+                session_code,
+                BEAT_THE_CLOCK_GAME_TYPE,
+            )
+            if hasattr(beat_clock_handler, "handle_current_question_request"):
+                await beat_clock_handler.handle_current_question_request(
+                    websocket,
+                    player_id,
+                    db,
+                )
+            return
+
         if game_type == BUZZER_GAME_TYPE:
             logger.warning(
                 "Mobile requested current question during buzzer game; sending authoritative buzzer UI: session=%s player=%s",
@@ -978,6 +1020,77 @@ async def handle_websocket_message(
             raw_answer,
             data,
         )
+
+        if getattr(game_handler, "game_type", None) == BEAT_THE_CLOCK_GAME_TYPE:
+            if current_phase != SessionPhase.QUESTION.value:
+                await manager.send_personal_message(
+                    {
+                        "type": "answer_rejected",
+                        "data": {
+                            "reason": "question_not_active",
+                            "message": "Beat the Clock is not currently active.",
+                            "question_id": question_id,
+                        },
+                    },
+                    websocket,
+                )
+                return
+
+            if raw_answer is None or not player_id or not question_id:
+                await manager.send_personal_message(
+                    {
+                        "type": "answer_rejected",
+                        "data": {
+                            "reason": "missing_answer_data",
+                            "message": "Your answer could not be submitted. Please try again.",
+                            "question_id": question_id,
+                        },
+                    },
+                    websocket,
+                )
+                return
+
+            answer = str(raw_answer).strip()
+            if answer == "":
+                await manager.send_personal_message(
+                    {
+                        "type": "answer_rejected",
+                        "data": {
+                            "reason": "empty_answer",
+                            "message": "Please select or enter an answer before submitting.",
+                            "question_id": question_id,
+                        },
+                    },
+                    websocket,
+                )
+                return
+
+            if manager.is_player_frozen_for_question(
+                session_code, player_id, question_id
+            ) or is_player_kicked(db, session_code, player_id):
+                await manager.send_personal_message(
+                    {
+                        "type": "answer_rejected",
+                        "data": {
+                            "reason": "fair_play_restriction",
+                            "question_id": question_id,
+                            "is_frozen": manager.is_player_frozen_for_question(
+                                session_code, player_id, question_id
+                            ),
+                            "is_kicked": is_player_kicked(db, session_code, player_id),
+                        },
+                    },
+                    websocket,
+                )
+                return
+
+            await game_handler.handle_player_answer(
+                player_id,
+                answer,
+                question_id,
+                db,
+            )
+            return
 
         if current_phase != SessionPhase.QUESTION.value:
             logger.warning(
@@ -2638,6 +2751,10 @@ async def handle_game_start(
             logger.info(
                 f"ðŸ“Š After roster sync - WebSocket: {ws_player_count}, Database: {db_player_count}"
             )
+
+        if getattr(game_handler, "game_type", None) == BEAT_THE_CLOCK_GAME_TYPE:
+            await game_handler.handle_game_start(db)
+            return
 
         # Validate the first question before committing the started state.
         from app.logic.game_logic import get_game_session_state

@@ -124,6 +124,7 @@ async def handle_game_end(
 
         manager.clear_question_queue(session_code)
         manager.reset_buzzer_state(session_code)
+        manager.clear_beat_clock_state(session_code)
 
         logger.info(
             "Game ended for session %s with %s final scores",

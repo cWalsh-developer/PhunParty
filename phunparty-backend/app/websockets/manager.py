@@ -71,6 +71,9 @@ class ConnectionManager:
         # session_code -> shared buzzer state. Handlers are per-connection, so
         # buzzer state must live at session scope.
         self.buzzer_states: Dict[str, Dict[str, Any]] = {}
+        # session_code -> shared Beat the Clock state. Each player has their
+        # own current question and score during the same timed round.
+        self.beat_clock_states: Dict[str, Dict[str, Any]] = {}
         # session_code -> resolved game mode, shared across scheduler/handlers.
         self.session_game_types: Dict[str, str] = {}
         # session_code -> player_id -> frozen question id for Fair Play violations.
@@ -776,6 +779,7 @@ class ConnectionManager:
         self.question_queue.pop(session_code, None)
         self.session_phase_state.pop(session_code, None)
         self.buzzer_states.pop(session_code, None)
+        self.beat_clock_states.pop(session_code, None)
         self.session_game_types.pop(session_code, None)
         self.fair_play_frozen_players.pop(session_code, None)
         self.fair_play_player_status.pop(session_code, None)
@@ -1840,6 +1844,23 @@ class ConnectionManager:
     def get_session_game_type(self, session_code: str) -> Optional[str]:
         """Return the resolved game type for a session if known."""
         return self.session_game_types.get(session_code)
+
+    def set_beat_clock_state(self, session_code: str, state: Dict[str, Any]) -> None:
+        self.beat_clock_states[session_code] = state
+
+    def get_beat_clock_state(self, session_code: str) -> Dict[str, Any]:
+        return self.beat_clock_states.setdefault(
+            session_code,
+            {
+                "active": False,
+                "players": {},
+                "questions": [],
+                "leaderboard": [],
+            },
+        )
+
+    def clear_beat_clock_state(self, session_code: str) -> None:
+        self.beat_clock_states.pop(session_code, None)
 
 
 # Global connection manager instance
