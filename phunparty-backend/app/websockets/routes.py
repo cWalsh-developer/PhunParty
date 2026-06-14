@@ -1300,6 +1300,15 @@ async def handle_websocket_message(
         logger.info(
             f"Starting countdown for {session_code}: reason=intro_complete duration_ms={countdown_duration_ms} data={data}"
         )
+        game_type = resolve_session_game_type(db, session_code)
+        if game_type == BEAT_THE_CLOCK_GAME_TYPE:
+            beat_clock_handler = create_game_handler(
+                session_code, BEAT_THE_CLOCK_GAME_TYPE
+            )
+            await beat_clock_handler.handle_game_start(db)
+            manager.update_heartbeat(websocket)
+            return
+
         game_state = await ensure_current_question_ready_for_countdown(
             session_code, db, "intro_complete"
         )
@@ -1348,6 +1357,15 @@ async def handle_websocket_message(
         logger.info(
             f"Starting countdown for {session_code}: reason=skip_intro duration_ms={countdown_duration_ms} data={data}"
         )
+        game_type = resolve_session_game_type(db, session_code)
+        if game_type == BEAT_THE_CLOCK_GAME_TYPE:
+            beat_clock_handler = create_game_handler(
+                session_code, BEAT_THE_CLOCK_GAME_TYPE
+            )
+            await beat_clock_handler.handle_game_start(db)
+            manager.update_heartbeat(websocket)
+            return
+
         game_state = await ensure_current_question_ready_for_countdown(
             session_code, db, "skip_intro"
         )
@@ -2763,10 +2781,6 @@ async def handle_game_start(
                 f"ðŸ“Š After roster sync - WebSocket: {ws_player_count}, Database: {db_player_count}"
             )
 
-        if getattr(game_handler, "game_type", None) == BEAT_THE_CLOCK_GAME_TYPE:
-            await game_handler.handle_game_start(db)
-            return
-
         # Validate the first question before committing the started state.
         from app.logic.game_logic import get_game_session_state
 
@@ -2792,6 +2806,65 @@ async def handle_game_start(
                 },
                 critical=True,
             )
+            return
+
+        if getattr(game_handler, "game_type", None) == BEAT_THE_CLOCK_GAME_TYPE:
+            game_state.isstarted = True
+            game_state.is_waiting_for_players = True
+            if not game_state.started_at:
+                game_state.started_at = utc_now()
+            db.commit()
+
+            phase_state = manager.set_session_phase(
+                session_code,
+                SessionPhase.INTRO_AUDIO,
+                current_question_index=0,
+                total_questions=game_state.total_questions,
+                game_type=BEAT_THE_CLOCK_GAME_TYPE,
+                clear_fields=["current_question_id"],
+            )
+
+            game_started_data = {
+                "session_code": session_code,
+                "started_at": datetime.now().isoformat(),
+                "isstarted": True,
+                "phase": phase_state["phase"],
+                "phase_started_at": phase_state["phase_started_at"],
+                "phase_started_at_ms": phase_state["phase_started_at_ms"],
+                "server_time_ms": phase_state["server_time_ms"],
+                "game_type": BEAT_THE_CLOCK_GAME_TYPE,
+                "game_state": {
+                    "isstarted": True,
+                    "is_active": game_state.is_active,
+                    "current_question_index": 0,
+                    "total_questions": game_state.total_questions,
+                    "game_type": BEAT_THE_CLOCK_GAME_TYPE,
+                    "fair_play_enabled": game_state.fair_play_enabled,
+                    "max_fair_play_strikes": game_state.max_fair_play_strikes,
+                },
+            }
+
+            await manager.broadcast_to_session(
+                session_code,
+                {"type": "game_started", "data": game_started_data},
+                critical=True,
+                require_ack=True,
+            )
+            await manager.broadcast_to_session(
+                session_code,
+                {
+                    "type": "intro_started",
+                    "data": {
+                        **phase_state,
+                        "session_code": session_code,
+                        "isstarted": True,
+                        "game_type": BEAT_THE_CLOCK_GAME_TYPE,
+                    },
+                },
+                critical=True,
+                require_ack=True,
+            )
+            await manager.broadcast_player_roster_update(session_code)
             return
 
         game_status = get_current_question_details(db, session_code)
