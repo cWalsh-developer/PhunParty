@@ -641,6 +641,13 @@ class BeatTheClockGameHandler(GameEventHandler):
             ends_at_dt = started_at_dt + timedelta(seconds=duration_seconds)
             started_at = iso_utc(started_at_dt)
             ends_at = iso_utc(ends_at_dt)
+            logger.warning(
+                "Starting Beat the Clock round session=%s duration_seconds=%s started_at=%s ends_at=%s",
+                self.session_code,
+                duration_seconds,
+                started_at,
+                ends_at,
+            )
 
             for player in manager.get_mobile_players(self.session_code):
                 player_id = player.get("player_id")
@@ -921,6 +928,12 @@ class BeatTheClockGameHandler(GameEventHandler):
             return
 
         with SessionLocal() as db:
+            logger.warning(
+                "Beat the Clock timer expired session=%s round_id=%s duration_seconds=%s",
+                self.session_code,
+                round_id,
+                duration_seconds,
+            )
             await self._finish_now(db, acting_player_id=owner_player_id)
 
     async def _finish_now(
@@ -934,6 +947,11 @@ class BeatTheClockGameHandler(GameEventHandler):
         state["ending"] = True
         state["active"] = False
         state["finished"] = True
+        logger.warning(
+            "Finishing Beat the Clock session=%s acting_player_id=%s",
+            self.session_code,
+            acting_player_id,
+        )
         session = get_session_by_code(db, self.session_code)
         end_actor_id = getattr(session, "owner_player_id", None) or acting_player_id
         if end_actor_id:

@@ -937,6 +937,16 @@ async def handle_websocket_message(
         )
 
         game_type = resolve_session_game_type(db, session_code)
+        if game_type != BEAT_THE_CLOCK_GAME_TYPE and session_looks_like_beat_clock(
+            db,
+            session_code,
+        ):
+            logger.warning(
+                "Routing current-question request to Beat the Clock based on BTC assignments: session=%s player=%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+            game_type = BEAT_THE_CLOCK_GAME_TYPE
 
         if game_type == BEAT_THE_CLOCK_GAME_TYPE:
             beat_clock_handler = create_game_handler(
