@@ -14,6 +14,7 @@ from app.database.dbCRUD import (
     get_game_session_state,
     get_player_by_ID,
     get_session_by_code,
+    get_session_questions_ordered,
 )
 from app.database.fair_play_crud import (
     get_eligible_player_ids_for_session,
@@ -85,6 +86,24 @@ def parse_optional_bool(value):
         if normalized in {"false", "0", "no", "off"}:
             return False
     return bool(value)
+
+
+def session_looks_like_beat_clock(db: Session, session_code: str) -> bool:
+    try:
+        assignments = get_session_questions_ordered(db, session_code)
+    except Exception:
+        logger.exception(
+            "Unable to inspect session questions for Beat the Clock detection: %s",
+            session_code,
+        )
+        return False
+
+    return any(
+        str(getattr(assignment, "question_id", "") or "")
+        .upper()
+        .startswith("BTC")
+        for assignment in assignments
+    )
 
 
 def open_db_session(
@@ -1351,7 +1370,21 @@ async def handle_websocket_message(
         logger.info(
             f"Starting countdown for {session_code}: reason=intro_complete duration_ms={countdown_duration_ms} data={data}"
         )
-        game_type = resolve_session_game_type(db, session_code)
+        game_type = resolve_session_game_type(
+            db,
+            session_code,
+            requested_game_type=(
+                data.get("game_type") or data.get("gameType")
+                if isinstance(data, dict)
+                else None
+            ),
+        )
+        if game_type != BEAT_THE_CLOCK_GAME_TYPE and session_looks_like_beat_clock(
+            db, session_code
+        ):
+            game_type = BEAT_THE_CLOCK_GAME_TYPE
+            manager.set_session_game_type(session_code, BEAT_THE_CLOCK_GAME_TYPE)
+
         if game_type == BEAT_THE_CLOCK_GAME_TYPE:
             game_state = get_game_session_state(db, session_code)
             await start_countdown(
@@ -1414,7 +1447,21 @@ async def handle_websocket_message(
         logger.info(
             f"Starting countdown for {session_code}: reason=skip_intro duration_ms={countdown_duration_ms} data={data}"
         )
-        game_type = resolve_session_game_type(db, session_code)
+        game_type = resolve_session_game_type(
+            db,
+            session_code,
+            requested_game_type=(
+                data.get("game_type") or data.get("gameType")
+                if isinstance(data, dict)
+                else None
+            ),
+        )
+        if game_type != BEAT_THE_CLOCK_GAME_TYPE and session_looks_like_beat_clock(
+            db, session_code
+        ):
+            game_type = BEAT_THE_CLOCK_GAME_TYPE
+            manager.set_session_game_type(session_code, BEAT_THE_CLOCK_GAME_TYPE)
+
         if game_type == BEAT_THE_CLOCK_GAME_TYPE:
             game_state = get_game_session_state(db, session_code)
             await start_countdown(
