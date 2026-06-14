@@ -1032,7 +1032,17 @@ async def handle_websocket_message(
         )
 
         if resolved_submit_game_type == BEAT_THE_CLOCK_GAME_TYPE:
-            if current_phase != SessionPhase.QUESTION.value:
+            beat_clock_state = manager.get_beat_clock_state(session_code)
+            beat_clock_active = bool(beat_clock_state.get("active"))
+            beat_clock_ends_at_dt = beat_clock_state.get("ends_at_dt")
+            beat_clock_time_remaining = (
+                not beat_clock_ends_at_dt or utc_now() < beat_clock_ends_at_dt
+            )
+
+            if (
+                current_phase != SessionPhase.QUESTION.value
+                and not (beat_clock_active and beat_clock_time_remaining)
+            ):
                 await manager.send_personal_message(
                     {
                         "type": "answer_rejected",

@@ -865,8 +865,8 @@ class BeatTheClockGameHandler(GameEventHandler):
                     websocket,
                 )
 
-        await self._broadcast_state(db)
         await self._send_question_to_player(db, player_id, state)
+        await self._broadcast_state(db)
 
     async def _finish_when_timer_expires(
         self,
