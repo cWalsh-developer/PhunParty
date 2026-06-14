@@ -488,6 +488,12 @@ class BeatTheClockGameHandler(GameEventHandler):
         state = state or manager.get_beat_clock_state(self.session_code)
         if not state.get("active"):
             return False
+        ends_at_dt = state.get("ends_at_dt")
+        if ends_at_dt and utc_now() >= ends_at_dt:
+            state["active"] = False
+            state["finished"] = True
+            await self._finish_now(db, acting_player_id=player_id)
+            return False
 
         question_id = self._next_question_id(state, player_id)
         if not question_id:
@@ -535,6 +541,14 @@ class BeatTheClockGameHandler(GameEventHandler):
             if session and session.owner_player_id:
                 set_rls_current_player(db, session.owner_player_id)
 
+            phase_state = manager.get_session_phase_state(self.session_code)
+            if phase_state.get("phase") == SessionPhase.ENDED.value:
+                logger.info(
+                    "Ignoring Beat the Clock start for ended session %s",
+                    self.session_code,
+                )
+                return
+
             question_ids = self._question_ids(db)
             if not question_ids:
                 await manager.broadcast_to_session(
@@ -551,10 +565,25 @@ class BeatTheClockGameHandler(GameEventHandler):
                 return
 
             existing_state = manager.get_beat_clock_state(self.session_code)
+            existing_ends_at_dt = existing_state.get("ends_at_dt")
+            if existing_state.get("finished"):
+                logger.info(
+                    "Ignoring Beat the Clock start for finished session %s",
+                    self.session_code,
+                )
+                return
+
+            if existing_state.get("active") and existing_ends_at_dt:
+                if utc_now() >= existing_ends_at_dt:
+                    existing_state["active"] = False
+                    existing_state["finished"] = True
+                    await self._finish_now(db, acting_player_id=session.owner_player_id)
+                    return
+
             if (
                 existing_state.get("active")
-                and existing_state.get("ends_at_dt")
-                and utc_now() < existing_state["ends_at_dt"]
+                and existing_ends_at_dt
+                and utc_now() < existing_ends_at_dt
             ):
                 await self._broadcast_state(db)
                 for player in manager.get_mobile_players(self.session_code):
@@ -711,6 +740,12 @@ class BeatTheClockGameHandler(GameEventHandler):
         state = manager.get_beat_clock_state(self.session_code)
         if not state.get("active"):
             return
+        ends_at_dt = state.get("ends_at_dt")
+        if ends_at_dt and utc_now() >= ends_at_dt:
+            state["active"] = False
+            state["finished"] = True
+            await self._finish_now(db, acting_player_id=player_id)
+            return
 
         player_state = self._ensure_player_state(
             state,
@@ -865,6 +900,12 @@ class BeatTheClockGameHandler(GameEventHandler):
                     websocket,
                 )
 
+        if utc_now() >= state.get("ends_at_dt", utc_now()):
+            state["active"] = False
+            state["finished"] = True
+            await self._finish_now(db, acting_player_id=player_id)
+            return
+
         await self._send_question_to_player(db, player_id, state)
         await self._broadcast_state(db)
 
@@ -888,7 +929,11 @@ class BeatTheClockGameHandler(GameEventHandler):
         acting_player_id: Optional[str] = None,
     ) -> None:
         state = manager.get_beat_clock_state(self.session_code)
+        if state.get("ending"):
+            return
+        state["ending"] = True
         state["active"] = False
+        state["finished"] = True
         session = get_session_by_code(db, self.session_code)
         end_actor_id = getattr(session, "owner_player_id", None) or acting_player_id
         if end_actor_id:
