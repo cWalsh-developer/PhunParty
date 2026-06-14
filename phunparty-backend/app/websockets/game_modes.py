@@ -34,6 +34,7 @@ def normalize_game_type(*candidates: Any) -> Optional[str]:
             text = str(value).strip().lower()
             if not text:
                 continue
+            compact_text = "".join(ch for ch in text if ch.isalnum())
 
             try:
                 parsed = json.loads(text)
@@ -58,6 +59,8 @@ def normalize_game_type(*candidates: Any) -> Optional[str]:
                 or "beat clock" in text
                 or "beat-clock" in text
                 or "beat_clock" in text
+                or "beattheclock" in compact_text
+                or "beatclock" in compact_text
             ):
                 return BEAT_THE_CLOCK_GAME_TYPE
             if "buzzer" in text or "buzz" in text:

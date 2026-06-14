@@ -1283,6 +1283,30 @@ async def handle_websocket_message(
     elif message_type == "update_session_settings" and client_type != "mobile":
         await handle_update_session_settings(session_code, data, db)
 
+    elif message_type == "start_beat_clock_round" and client_type == "web":
+        game_type = resolve_session_game_type(
+            db,
+            session_code,
+            requested_game_type=(
+                data.get("game_type") if isinstance(data, dict) else None
+            ),
+        )
+        if game_type != BEAT_THE_CLOCK_GAME_TYPE:
+            logger.info(
+                "Ignoring start_beat_clock_round for %s; resolved game type is %s",
+                session_code,
+                game_type,
+            )
+            manager.update_heartbeat(websocket)
+            return
+
+        beat_clock_handler = create_game_handler(
+            session_code, BEAT_THE_CLOCK_GAME_TYPE
+        )
+        await beat_clock_handler.handle_game_start(db)
+        manager.update_heartbeat(websocket)
+        return
+
     elif message_type == "intro_complete" and client_type == "web":
         current_phase = manager.get_session_phase_state(session_code).get("phase")
         if current_phase != SessionPhase.INTRO_AUDIO.value:
@@ -1402,6 +1426,18 @@ async def handle_websocket_message(
         phase_state = manager.get_session_phase_state(session_code)
         current_phase = phase_state.get("phase")
         if current_phase != SessionPhase.COUNTDOWN.value:
+            game_type = resolve_session_game_type(db, session_code)
+            if (
+                game_type == BEAT_THE_CLOCK_GAME_TYPE
+                and current_phase != SessionPhase.ENDED.value
+            ):
+                beat_clock_handler = create_game_handler(
+                    session_code, BEAT_THE_CLOCK_GAME_TYPE
+                )
+                await beat_clock_handler.handle_game_start(db)
+                manager.update_heartbeat(websocket)
+                return
+
             logger.info(
                 "Ignoring countdown_complete for %s; current phase is %s",
                 session_code,
