@@ -1010,6 +1010,15 @@ async def handle_websocket_message(
         phase_state = manager.get_session_phase_state(session_code)
         current_phase = phase_state.get("phase")
         current_question_id = phase_state.get("current_question_id")
+        resolved_submit_game_type = resolve_session_game_type(db, session_code)
+        if (
+            resolved_submit_game_type == BEAT_THE_CLOCK_GAME_TYPE
+            and getattr(game_handler, "game_type", None) != BEAT_THE_CLOCK_GAME_TYPE
+        ):
+            game_handler = create_game_handler(
+                session_code,
+                BEAT_THE_CLOCK_GAME_TYPE,
+            )
 
         logger.warning(
             "SUBMIT ANSWER WS HIT session=%s player=%s question=%s current_question=%s phase=%s raw_answer=%r data=%s",
@@ -1022,7 +1031,7 @@ async def handle_websocket_message(
             data,
         )
 
-        if getattr(game_handler, "game_type", None) == BEAT_THE_CLOCK_GAME_TYPE:
+        if resolved_submit_game_type == BEAT_THE_CLOCK_GAME_TYPE:
             if current_phase != SessionPhase.QUESTION.value:
                 await manager.send_personal_message(
                     {
