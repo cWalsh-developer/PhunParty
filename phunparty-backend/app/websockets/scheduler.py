@@ -598,12 +598,10 @@ async def scheduled_question_reveal(
             manager.set_session_game_type(session_code, BEAT_THE_CLOCK_GAME_TYPE)
 
         if game_type == BEAT_THE_CLOCK_GAME_TYPE:
-            from app.websockets.game_handlers import create_game_handler
-
-            beat_clock_handler = create_game_handler(
-                session_code, BEAT_THE_CLOCK_GAME_TYPE
+            logger.info(
+                "Beat the Clock countdown reached scheduled reveal for %s; waiting for host countdown_complete",
+                session_code,
             )
-            await beat_clock_handler.handle_game_start(db)
             return
 
         await reveal_current_question(
@@ -662,12 +660,10 @@ async def scheduled_countdown_watchdog(
             manager.set_session_game_type(session_code, BEAT_THE_CLOCK_GAME_TYPE)
 
         if game_type == BEAT_THE_CLOCK_GAME_TYPE:
-            from app.websockets.game_handlers import create_game_handler
-
-            beat_clock_handler = create_game_handler(
-                session_code, BEAT_THE_CLOCK_GAME_TYPE
+            logger.info(
+                "Beat the Clock countdown watchdog reached %s; waiting for host countdown_complete",
+                session_code,
             )
-            await beat_clock_handler.handle_game_start(db)
             return
 
         await reveal_current_question(
