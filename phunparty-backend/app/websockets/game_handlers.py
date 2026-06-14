@@ -535,6 +535,48 @@ class BeatTheClockGameHandler(GameEventHandler):
                 )
                 return
 
+            existing_state = manager.get_beat_clock_state(self.session_code)
+            if (
+                existing_state.get("active")
+                and existing_state.get("ends_at_dt")
+                and utc_now() < existing_state["ends_at_dt"]
+            ):
+                await self._broadcast_state(db)
+                for player in manager.get_mobile_players(self.session_code):
+                    player_id = player.get("player_id")
+                    if not player_id:
+                        continue
+
+                    player_state = existing_state.get("players", {}).get(
+                        player_id,
+                        {},
+                    )
+                    question_id = player_state.get("current_question_id")
+                    if not question_id:
+                        await self._send_question_to_player(db, player_id, existing_state)
+                        continue
+
+                    payload = self._question_payload(
+                        db,
+                        question_id,
+                        player_id,
+                        existing_state,
+                    )
+                    if not payload:
+                        continue
+
+                    for connection_info in manager.get_player_connections(
+                        self.session_code,
+                        player_id,
+                    ).values():
+                        websocket = connection_info.get("websocket")
+                        if websocket:
+                            await manager.send_personal_message(
+                                {"type": "beat_clock_question", "data": payload},
+                                websocket,
+                            )
+                return
+
             game_state = get_game_session_state(db, self.session_code)
             if not game_state:
                 await manager.broadcast_to_session(

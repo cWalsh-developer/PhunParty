@@ -1302,10 +1302,16 @@ async def handle_websocket_message(
         )
         game_type = resolve_session_game_type(db, session_code)
         if game_type == BEAT_THE_CLOCK_GAME_TYPE:
-            beat_clock_handler = create_game_handler(
-                session_code, BEAT_THE_CLOCK_GAME_TYPE
+            game_state = get_game_session_state(db, session_code)
+            await start_countdown(
+                session_code,
+                duration_ms=countdown_duration_ms,
+                reason="intro_complete",
+                acting_player_id=authenticated_player_id,
+                current_question_id=None,
+                current_question_index=0,
+                total_questions=(game_state.total_questions if game_state else None),
             )
-            await beat_clock_handler.handle_game_start(db)
             manager.update_heartbeat(websocket)
             return
 
@@ -1359,10 +1365,16 @@ async def handle_websocket_message(
         )
         game_type = resolve_session_game_type(db, session_code)
         if game_type == BEAT_THE_CLOCK_GAME_TYPE:
-            beat_clock_handler = create_game_handler(
-                session_code, BEAT_THE_CLOCK_GAME_TYPE
+            game_state = get_game_session_state(db, session_code)
+            await start_countdown(
+                session_code,
+                duration_ms=countdown_duration_ms,
+                reason="skip_intro",
+                acting_player_id=authenticated_player_id,
+                current_question_id=None,
+                current_question_index=0,
+                total_questions=(game_state.total_questions if game_state else None),
             )
-            await beat_clock_handler.handle_game_start(db)
             manager.update_heartbeat(websocket)
             return
 
@@ -1423,6 +1435,15 @@ async def handle_websocket_message(
             "Recovering countdown_complete for %s by revealing current question",
             session_code,
         )
+        game_type = resolve_session_game_type(db, session_code)
+        if game_type == BEAT_THE_CLOCK_GAME_TYPE:
+            beat_clock_handler = create_game_handler(
+                session_code, BEAT_THE_CLOCK_GAME_TYPE
+            )
+            await beat_clock_handler.handle_game_start(db)
+            manager.update_heartbeat(websocket)
+            return
+
         await reveal_current_question(
             session_code,
             db,

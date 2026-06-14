@@ -14,7 +14,11 @@ from app.database.dbCRUD import (
 from app.dependencies import get_db
 from app.security.question_payload import sanitize_question_for_client
 from app.security.rls import set_rls_current_player
-from app.websockets.game_modes import BUZZER_GAME_TYPE, resolve_session_game_type
+from app.websockets.game_modes import (
+    BEAT_THE_CLOCK_GAME_TYPE,
+    BUZZER_GAME_TYPE,
+    resolve_session_game_type,
+)
 from app.websockets.manager import SessionPhase, manager
 from sqlalchemy.orm import Session
 
@@ -518,8 +522,12 @@ async def scheduled_question_reveal(
     acting_player_id: Optional[str] = None,
 ):
     """Reveal the current question from a server-owned countdown timer."""
-    broadcast_at = question_start_at - timedelta(
-        milliseconds=QUESTION_BROADCAST_LEAD_MS
+    phase_state = manager.get_session_phase_state(session_code)
+    is_beat_clock = phase_state.get("game_type") == BEAT_THE_CLOCK_GAME_TYPE
+    broadcast_at = (
+        question_start_at
+        if is_beat_clock
+        else question_start_at - timedelta(milliseconds=QUESTION_BROADCAST_LEAD_MS)
     )
     sleep_seconds = max(0, (broadcast_at - utc_now()).total_seconds())
     await asyncio.sleep(sleep_seconds)
@@ -543,6 +551,16 @@ async def scheduled_question_reveal(
     db = next(db_generator)
     try:
         apply_scheduled_rls_context(db, session_code, acting_player_id)
+        game_type = resolve_session_game_type(db, session_code)
+        if game_type == BEAT_THE_CLOCK_GAME_TYPE:
+            from app.websockets.game_handlers import create_game_handler
+
+            beat_clock_handler = create_game_handler(
+                session_code, BEAT_THE_CLOCK_GAME_TYPE
+            )
+            await beat_clock_handler.handle_game_start(db)
+            return
+
         await reveal_current_question(
             session_code,
             db,
@@ -587,6 +605,16 @@ async def scheduled_countdown_watchdog(
     db = next(db_generator)
     try:
         apply_scheduled_rls_context(db, session_code, acting_player_id)
+        game_type = resolve_session_game_type(db, session_code)
+        if game_type == BEAT_THE_CLOCK_GAME_TYPE:
+            from app.websockets.game_handlers import create_game_handler
+
+            beat_clock_handler = create_game_handler(
+                session_code, BEAT_THE_CLOCK_GAME_TYPE
+            )
+            await beat_clock_handler.handle_game_start(db)
+            return
+
         await reveal_current_question(
             session_code,
             db,
@@ -615,10 +643,18 @@ async def start_countdown(
     question_start_at = countdown_start + timedelta(milliseconds=duration_ms)
     countdown_start_iso = iso_utc(countdown_start)
     question_start_at_iso = iso_utc(question_start_at)
+    game_type = None
+    db_generator = get_db()
+    db = next(db_generator)
+    try:
+        game_type = resolve_session_game_type(db, session_code)
+    finally:
+        db_generator.close()
 
     phase_state = manager.set_session_phase(
         session_code,
         SessionPhase.COUNTDOWN,
+        game_type=game_type,
         start_at=countdown_start_iso,
         duration_ms=duration_ms,
         question_start_at=question_start_at_iso,
@@ -634,6 +670,7 @@ async def start_countdown(
             "type": "countdown_started",
             "data": {
                 **phase_state,
+                "game_type": game_type,
                 "start_at": countdown_start_iso,
                 "duration_ms": duration_ms,
                 "question_start_at": question_start_at_iso,
