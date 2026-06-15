@@ -15,18 +15,28 @@ from app.models.notifications import (
     PushTokenResponse,
 )
 from app.schemas.players_model import Players
-from fastapi import APIRouter, Depends, HTTPException, Query
+from app.security.cache import invalidate_profile_cache
+from app.security.rate_limit import enforce_rate_limit
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 router = APIRouter()
 
 
 @router.post("/register-push-token", response_model=PushTokenResponse)
-def register_push_token_route(
+async def register_push_token_route(
+    http_request: Request,
     request: PushTokenRegistrationRequest,
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
+    await enforce_rate_limit(
+        http_request,
+        scope="notifications-push-token-player",
+        identifier=current_player.player_id,
+        limit=20,
+        window_seconds=3600,
+    )
     try:
         return register_push_token(
             db,
@@ -44,12 +54,20 @@ def register_push_token_route(
 
 @router.get("", response_model=NotificationListResponse)
 @router.get("/", response_model=NotificationListResponse)
-def get_notifications(
+async def get_notifications(
+    request: Request,
     unread_only: bool = Query(False),
     limit: int = Query(50, ge=1, le=100),
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
+    await enforce_rate_limit(
+        request,
+        scope="notifications-list-player",
+        identifier=current_player.player_id,
+        limit=120,
+        window_seconds=300,
+    )
     notifications = list_notifications(
         db,
         current_player.player_id,
@@ -76,10 +94,18 @@ def read_notification(
 
 
 @router.post("/read-all")
-def read_all_notifications(
+async def read_all_notifications(
+    request: Request,
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
+    await enforce_rate_limit(
+        request,
+        scope="notifications-read-all-player",
+        identifier=current_player.player_id,
+        limit=30,
+        window_seconds=3600,
+    )
     count = mark_all_notifications_read(db, current_player.player_id)
     return {"detail": "Notifications marked read", "count": count}
 
@@ -99,6 +125,7 @@ def update_settings(
         allow_friend_code_search=request.allow_friend_code_search,
         allow_phone_discovery=request.allow_phone_discovery,
     )
+    invalidate_profile_cache(current_player.player_id)
     return NotificationSettingsResponse(
         friend_request_notifications_enabled=(
             player.friend_request_notifications_enabled

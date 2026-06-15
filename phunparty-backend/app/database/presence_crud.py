@@ -64,16 +64,12 @@ def set_player_offline(db: Session, player_id: str) -> PlayerPresence:
     return presence
 
 
-def get_presence_map(
-    db: Session, player_ids: list[str]
-) -> dict[str, PlayerPresence]:
+def get_presence_map(db: Session, player_ids: list[str]) -> dict[str, PlayerPresence]:
     if not player_ids:
         return {}
 
     rows = (
-        db.query(PlayerPresence)
-        .filter(PlayerPresence.player_id.in_(player_ids))
-        .all()
+        db.query(PlayerPresence).filter(PlayerPresence.player_id.in_(player_ids)).all()
     )
     return {row.player_id: row for row in rows}
 

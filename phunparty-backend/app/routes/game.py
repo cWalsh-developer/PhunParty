@@ -29,6 +29,7 @@ from app.security.ownership import (
     assert_same_player,
     assert_session_owner,
 )
+from app.security.cache import cache
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
 from app.websockets.manager import manager
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -46,6 +47,7 @@ def create_game(
 ):
     try:
         game = cg(db, request.rules, request.genre)
+        cache.delete("games:list")
         return {
             "message": "Game created successfully.",
             "game_code": game.game_code,
@@ -159,10 +161,23 @@ def get_all_games(
     Retrieve all games.
     """
     try:
+        cached = cache.get("games:list")
+        if cached is not None:
+            return cached
+
         games = gag(db)
         if not games:
             raise HTTPException(status_code=404, detail="No games found")
-        return games
+        response = [
+            {
+                "game_code": game.game_code,
+                "genre": game.genre,
+                "rules": game.rules,
+            }
+            for game in games
+        ]
+        cache.set("games:list", response, ttl_seconds=600)
+        return response
     except HTTPException:
         raise
     except Exception as e:
@@ -377,8 +392,14 @@ def get_all_public_sessions_route(
     Returns: session_code, genre, number_of_questions, difficulty
     """
     try:
+        cached = cache.get("game:sessions:public")
+        if cached is not None:
+            return cached
+
         sessions = get_all_public_sessions(db)
-        return {"sessions": sessions, "count": len(sessions)}
+        response = {"sessions": sessions, "count": len(sessions)}
+        cache.set("game:sessions:public", response, ttl_seconds=10)
+        return response
     except Exception as e:
         raise HTTPException(
             status_code=500, detail="Unable to retrieve public sessions"

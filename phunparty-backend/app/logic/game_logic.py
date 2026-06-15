@@ -471,8 +471,10 @@ async def broadcast_question_with_options(
 
         # Get question with randomized options
         question_data = get_question_with_randomized_options(db, question_id)
-        if str(question_data.get("question_id") or question_id).upper().startswith(
-            "BTC"
+        if (
+            str(question_data.get("question_id") or question_id)
+            .upper()
+            .startswith("BTC")
         ):
             logger.warning(
                 "Preventing standard question broadcast for Beat the Clock question %s in session %s",

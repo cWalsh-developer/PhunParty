@@ -77,7 +77,9 @@ def ensure_social_player_columns() -> None:
             text("ALTER TABLE players ALTER COLUMN friend_code SET NOT NULL")
         )
         connection.execute(
-            text("ALTER TABLE players ALTER COLUMN profile_visibility SET DEFAULT 'friends'")
+            text(
+                "ALTER TABLE players ALTER COLUMN profile_visibility SET DEFAULT 'friends'"
+            )
         )
         connection.execute(
             text(
@@ -92,6 +94,49 @@ def ensure_social_player_columns() -> None:
                         ALTER TABLE players
                         ADD CONSTRAINT players_profile_visibility_check
                         CHECK (profile_visibility IN ('public', 'friends', 'private'));
+                    END IF;
+                END $$;
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'players_name_length_check'
+                    ) THEN
+                        ALTER TABLE players
+                        ADD CONSTRAINT players_name_length_check
+                        CHECK (char_length(player_name) <= 40) NOT VALID;
+                    END IF;
+
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'players_friend_code_format_check'
+                    ) THEN
+                        ALTER TABLE players
+                        ADD CONSTRAINT players_friend_code_format_check
+                        CHECK (friend_code ~ '^[A-Z0-9]{6,12}$') NOT VALID;
+                    END IF;
+                END $$;
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'game_sessions_code_format_check'
+                    ) THEN
+                        ALTER TABLE game_sessions
+                        ADD CONSTRAINT game_sessions_code_format_check
+                        CHECK (session_code ~ '^[A-Z0-9]{6,12}$') NOT VALID;
                     END IF;
                 END $$;
                 """

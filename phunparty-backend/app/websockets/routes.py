@@ -5,6 +5,7 @@ WebSocket routes for real-time game functionality
 import asyncio
 import json
 import logging
+import os
 from collections.abc import Generator
 from datetime import datetime, timedelta
 from typing import Optional
@@ -33,6 +34,7 @@ from app.dependencies import (
 from app.logic.game_logic import check_and_advance_game
 from app.security.loggingUtils import safe_player_ref
 from app.security.ownership import assert_session_owner
+from app.security.rate_limit import rate_limiter, stable_hash
 from app.security.rls import set_rls_current_player
 from app.security.roster_identity import make_roster_player_id
 from app.websockets.game_handlers import create_game_handler
@@ -72,6 +74,86 @@ IMMEDIATE_FAIR_PLAY_VIOLATION_REASONS = {
     "multi_window_mode",
     "picture_in_picture_mode",
 }
+WEBSOCKET_MESSAGE_LIMITS = {
+    "submit_answer": (10, 60),
+    "fair_play_focus_lost": (10, 60),
+    "focus_violation": (10, 60),
+    "fair_play_window_violation": (10, 60),
+    "fair_play_focus_returned": (10, 60),
+    "request_current_question": (20, 60),
+}
+WEBSOCKET_CONNECTION_LIMIT = (20, 300)
+WEBSOCKET_BUZZER_LIMIT = (5, 3600)
+
+
+def get_websocket_client_ip(websocket: WebSocket) -> str:
+    trust_proxy = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
+    if trust_proxy:
+        forwarded_for = websocket.headers.get("x-forwarded-for")
+        if forwarded_for:
+            return forwarded_for.split(",")[0].strip()
+
+    return websocket.client.host if websocket.client else "unknown"
+
+
+async def hit_websocket_limit(
+    *,
+    scope: str,
+    identifier: str,
+    limit: int,
+    window_seconds: int,
+) -> tuple[bool, int]:
+    key = f"wsrl:{scope}:{stable_hash(identifier)}"
+    return await rate_limiter.hit(key, limit, window_seconds)
+
+
+async def enforce_websocket_message_rate_limit(
+    websocket: WebSocket,
+    *,
+    session_code: str,
+    message_type: str,
+    player_id: Optional[str],
+    data: dict,
+) -> bool:
+    if not player_id:
+        return True
+
+    if message_type == "buzzer_press":
+        question_id = data.get("question_id") or data.get("current_question_id")
+        if not question_id:
+            phase_state = manager.get_session_phase_state(session_code)
+            question_id = phase_state.get("current_question_id") or "unknown"
+        limit, window_seconds = WEBSOCKET_BUZZER_LIMIT
+        identifier = f"{session_code}:{question_id}:{player_id}"
+        scope = "buzzer-press-player-question"
+    elif message_type in WEBSOCKET_MESSAGE_LIMITS:
+        limit, window_seconds = WEBSOCKET_MESSAGE_LIMITS[message_type]
+        identifier = f"{player_id}:{message_type}"
+        scope = f"message-{message_type}"
+    else:
+        return True
+
+    allowed, retry_after = await hit_websocket_limit(
+        scope=scope,
+        identifier=identifier,
+        limit=limit,
+        window_seconds=window_seconds,
+    )
+    if allowed:
+        return True
+
+    await send_websocket_error_safely(
+        websocket,
+        f"Too many {message_type} messages. Please try again later.",
+    )
+    logger.warning(
+        "WebSocket rate limit exceeded: session=%s player=%s type=%s retry_after=%s",
+        session_code,
+        safe_player_ref(player_id),
+        message_type,
+        retry_after,
+    )
+    return False
 
 
 def parse_optional_bool(value):
@@ -99,9 +181,7 @@ def session_looks_like_beat_clock(db: Session, session_code: str) -> bool:
         return False
 
     return any(
-        str(getattr(assignment, "question_id", "") or "")
-        .upper()
-        .startswith("BTC")
+        str(getattr(assignment, "question_id", "") or "").upper().startswith("BTC")
         for assignment in assignments
     )
 
@@ -297,17 +377,14 @@ def build_player_fair_play_status(
             )
         )
     )
-    frozen_question_id = (
-        manager_status.get("frozen_question_id")
-        or (current_question_id if is_frozen else None)
+    frozen_question_id = manager_status.get("frozen_question_id") or (
+        current_question_id if is_frozen else None
     )
     is_kicked = bool(record and record.is_kicked) or bool(
         manager_status.get("is_kicked")
     )
     strike_count = (
-        record.strike_count
-        if record
-        else int(manager_status.get("strike_count") or 0)
+        record.strike_count if record else int(manager_status.get("strike_count") or 0)
     )
     answer_status = (
         "kicked"
@@ -571,6 +648,23 @@ async def websocket_endpoint(
     connected = False
 
     try:
+        client_ip = get_websocket_client_ip(websocket)
+        limit, window_seconds = WEBSOCKET_CONNECTION_LIMIT
+        allowed, retry_after = await hit_websocket_limit(
+            scope="connection-ip",
+            identifier=client_ip,
+            limit=limit,
+            window_seconds=window_seconds,
+        )
+        if not allowed:
+            logger.warning(
+                "WebSocket connection rate limit exceeded: ip=%s retry_after=%s",
+                client_ip,
+                retry_after,
+            )
+            await websocket.close(code=4008, reason="Too many connection attempts")
+            return
+
         db, db_generator = open_db_session()
         try:
             if not token:
@@ -712,6 +806,17 @@ async def websocket_endpoint(
                 # Receive message from client
                 data = await websocket.receive_text()
                 message = json.loads(data)
+                message_type = message.get("type")
+                message_data = message.get("data", {}) or {}
+
+                if not await enforce_websocket_message_rate_limit(
+                    websocket,
+                    session_code=session_code,
+                    message_type=message_type,
+                    player_id=player_id,
+                    data=message_data,
+                ):
+                    continue
 
                 message_db, message_db_generator = open_db_session(
                     authenticated_player_id
@@ -1152,9 +1257,8 @@ async def handle_websocket_message(
                 not beat_clock_ends_at_dt or utc_now() < beat_clock_ends_at_dt
             )
 
-            if (
-                current_phase != SessionPhase.QUESTION.value
-                and not (beat_clock_active and beat_clock_time_remaining)
+            if current_phase != SessionPhase.QUESTION.value and not (
+                beat_clock_active and beat_clock_time_remaining
             ):
                 await manager.send_personal_message(
                     {
@@ -1446,9 +1550,7 @@ async def handle_websocket_message(
             manager.update_heartbeat(websocket)
             return
 
-        beat_clock_handler = create_game_handler(
-            session_code, BEAT_THE_CLOCK_GAME_TYPE
-        )
+        beat_clock_handler = create_game_handler(session_code, BEAT_THE_CLOCK_GAME_TYPE)
         await beat_clock_handler.handle_game_start(db)
         manager.update_heartbeat(websocket)
         return
@@ -2607,7 +2709,6 @@ async def resolve_game_after_fair_play_strike(
     if is_kicked:
         await kick_player_for_fair_play(session_code, player_id, max_strikes, db)
         await asyncio.sleep(0.75)
-        return
 
     if game_type == BEAT_THE_CLOCK_GAME_TYPE:
         beat_clock_handler = create_game_handler(
@@ -3006,9 +3107,10 @@ async def handle_game_start(
         if acting_player_id:
             set_rls_current_player(db, acting_player_id)
 
-        if (
-            getattr(game_handler, "game_type", None) != BEAT_THE_CLOCK_GAME_TYPE
-            and session_looks_like_beat_clock(db, session_code)
+        if getattr(
+            game_handler, "game_type", None
+        ) != BEAT_THE_CLOCK_GAME_TYPE and session_looks_like_beat_clock(
+            db, session_code
         ):
             logger.info(
                 "Forcing Beat the Clock handler for %s based on BTC question assignments",
@@ -3408,7 +3510,7 @@ async def handle_next_question(
 
 # REST endpoints for WebSocket management
 @router.get("/ws/health")
-async def websocket_health_check():
+async def websocket_health_check(_: str = Depends(require_admin_api_key)):
     """
     Health check endpoint for WebSocket infrastructure.
     Monitor this endpoint to detect API issues early.

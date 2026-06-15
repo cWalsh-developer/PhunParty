@@ -760,9 +760,7 @@ def add_question_to_session(
         difficulty_msg = (
             " with mixed difficulties"
             if is_beat_clock
-            else f" with difficulty '{difficulty}'"
-            if difficulty
-            else ""
+            else f" with difficulty '{difficulty}'" if difficulty else ""
         )
         raise ValueError(
             f"No questions available for genre '{game.genre}'{difficulty_msg}"
@@ -779,9 +777,7 @@ def add_question_to_session(
         difficulty_msg = (
             " with mixed difficulties"
             if is_beat_clock
-            else f" with difficulty '{difficulty}'"
-            if difficulty
-            else ""
+            else f" with difficulty '{difficulty}'" if difficulty else ""
         )
         raise ValueError(
             f"Not enough questions available. Found {len(questions)} but need {session.number_of_questions} "

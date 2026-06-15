@@ -8,6 +8,11 @@ from app.dependencies import get_current_player, get_db
 from app.models.friends import FriendProfileResponse
 from app.models.profile_stats import ProfileStatsResponse
 from app.schemas.players_model import Players
+from app.security.cache import (
+    cache,
+    profile_cache_key,
+    profile_stats_cache_key,
+)
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -50,24 +55,34 @@ def get_profile(
             detail="This player has not made their profile visible to you",
         )
 
-    ensure_player_friend_code(db, player)
+    is_self_profile = current_player.player_id == player.player_id
+    if is_self_profile:
+        ensure_player_friend_code(db, player)
+
     relationship_status = (
         "self"
-        if current_player.player_id == player.player_id
-        else "friends"
-        if are_friends(db, current_player.player_id, player.player_id)
-        else "none"
+        if is_self_profile
+        else (
+            "friends"
+            if are_friends(db, current_player.player_id, player.player_id)
+            else "none"
+        )
     )
     presence = get_presence_map(db, [player.player_id]).get(player.player_id)
     is_online, last_seen_at = visible_presence_for_player(player, presence)
 
-    return FriendProfileResponse(
+    cache_key = profile_cache_key(current_player.player_id, player.player_id)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    response = FriendProfileResponse(
         player_id=player.player_id,
         player_name=player.player_name,
-        player_email=player.player_email,
-        player_mobile=player.player_mobile,
+        player_email=player.player_email if is_self_profile else None,
+        player_mobile=player.player_mobile if is_self_profile else None,
         profile_photo_url=player.profile_photo_url,
-        friend_code=player.friend_code,
+        friend_code=player.friend_code if is_self_profile else None,
         relationship_status=relationship_status,
         profile_visibility=player.profile_visibility,
         can_view_profile=True,
@@ -77,6 +92,8 @@ def get_profile(
         is_online=is_online,
         last_seen_at=last_seen_at,
     )
+    cache.set(cache_key, response.model_dump(mode="json"), ttl_seconds=45)
+    return response
 
 
 @router.get("/{player_id}/stats", response_model=ProfileStatsResponse)
@@ -108,4 +125,11 @@ def get_profile_stats(
             detail="This player has not made their game stats visible",
         )
 
-    return ProfileStatsResponse(**get_player_stats_summary(db, player.player_id))
+    cache_key = profile_stats_cache_key(current_player.player_id, player.player_id)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    response = ProfileStatsResponse(**get_player_stats_summary(db, player.player_id))
+    cache.set(cache_key, response.model_dump(mode="json"), ttl_seconds=180)
+    return response

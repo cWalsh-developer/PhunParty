@@ -16,6 +16,7 @@ from app.models.players import Player, PlayerUpdate
 from app.models.response_models import PlayerResponse
 from app.schemas.players_model import Players
 from app.schemas.session_player_assignment_model import SessionAssignment
+from app.security.cache import invalidate_profile_cache, invalidate_social_cache
 from app.security.ownership import assert_same_player
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -164,6 +165,8 @@ def update_player_route(
         updated_player = update_player(db, player_id, player)
         if not updated_player:
             raise HTTPException(status_code=400, detail="Failed to update player")
+        invalidate_profile_cache(player_id)
+        invalidate_social_cache(player_id)
         return updated_player
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

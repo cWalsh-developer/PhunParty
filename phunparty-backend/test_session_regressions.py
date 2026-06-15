@@ -692,7 +692,7 @@ def test_buzzer_state_update_broadcast_uses_authoritative_state():
     assert message["data"]["question_active"] is True
     assert message["data"]["transitioning"] is False
     assert message["data"]["accepting_buzzes"] is True
-    assert message["data"]["button_state"] == "active"
+    assert message["data"]["button_state"] == "waiting"
     assert broadcast.await_args.kwargs["only_client_types"] == ["mobile"]
     assert broadcast.await_args.kwargs["require_ack"] is True
 
@@ -999,6 +999,13 @@ def test_mobile_current_question_payload_rebuilds_missing_queue_from_db():
             "question_duration_ms": 15000,
             "server_time_ms": 123,
         }
+        mock_manager.set_session_phase.return_value = {
+            "phase": "question",
+            "start_at": "2026-06-01T12:00:00Z",
+            "question_expires_at": "2026-06-01T12:00:15Z",
+            "question_duration_ms": 15000,
+            "server_time_ms": 123,
+        }
         with patch.object(
             routes,
             "get_current_question_details",
@@ -1255,6 +1262,7 @@ def test_focus_violation_delays_progression_after_fair_play_kick():
                 mock_manager.get_player_name_from_websocket.return_value = "Player"
                 mock_manager.get_player_connections.return_value = {}
                 mock_manager.broadcast_to_session = AsyncMock()
+                mock_manager.send_personal_critical_message = AsyncMock()
                 with patch.object(
                     routes, "kick_player_for_fair_play", new_callable=AsyncMock
                 ) as kick_player:
@@ -1307,6 +1315,7 @@ def test_fair_play_focus_lost_starts_backend_grace_period():
                 "lost_at": "2026-06-01T12:00:00Z",
             }
             mock_manager.send_personal_message = AsyncMock()
+            mock_manager.send_personal_critical_message = AsyncMock()
             with patch.object(
                 routes,
                 "finalize_focus_loss_after_grace",
@@ -1394,7 +1403,7 @@ def test_fair_play_return_uses_client_returned_at_for_reconnect_delay():
 
     focus_violation.assert_not_awaited()
     mock_manager.clear_pending_focus_loss.assert_called_once_with("SESSION123", "P1")
-    mock_manager.send_personal_message.assert_awaited_once()
+    assert mock_manager.send_personal_message.await_count == 2
 
 
 def test_fair_play_immediate_reasons_bypass_grace_period():

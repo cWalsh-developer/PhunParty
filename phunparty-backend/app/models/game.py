@@ -1,6 +1,7 @@
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict
+from app.security.input_validation import normalize_session_code, validate_player_name
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class GameCreation(BaseModel):
@@ -11,8 +12,8 @@ class GameCreation(BaseModel):
 class GameSessionCreation(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    host_name: str
-    number_of_questions: int
+    host_name: str = Field(..., max_length=40)
+    number_of_questions: int = Field(..., ge=1, le=50)
     game_code: str
     ispublic: bool = True
     difficulty: Optional[str] = None
@@ -20,8 +21,18 @@ class GameSessionCreation(BaseModel):
     duration_seconds: Optional[int] = None
     timer_seconds: Optional[int] = None
 
+    @field_validator("host_name")
+    @classmethod
+    def validate_host_name(cls, value: str) -> str:
+        return validate_player_name(value)
+
 
 class GameJoinRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     session_code: str
+
+    @field_validator("session_code")
+    @classmethod
+    def validate_session_code(cls, value: str) -> str:
+        return normalize_session_code(value)

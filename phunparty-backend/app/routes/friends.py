@@ -26,8 +26,15 @@ from app.models.friends import (
 from app.models.presence import FriendsPresenceResponse, PresenceResponse
 from app.schemas.players_model import Players
 from app.schemas.social_models import FriendRequest
+from app.security.cache import (
+    cache,
+    friends_cache_key,
+    friends_presence_cache_key,
+    invalidate_social_cache,
+)
+from app.security.rate_limit import enforce_rate_limit
 from app.utils.expo_push import send_expo_push_to_tokens
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 import logging
@@ -43,12 +50,14 @@ def profile_response(
     player: Players,
     relationship_status: str | None = None,
 ) -> FriendProfileResponse:
-    ensure_player_friend_code(db, player)
+    is_self_profile = current_player_id == player.player_id
+    if is_self_profile:
+        ensure_player_friend_code(db, player)
     return FriendProfileResponse(
         player_id=player.player_id,
         player_name=player.player_name,
         profile_photo_url=player.profile_photo_url,
-        friend_code=player.friend_code,
+        friend_code=player.friend_code if is_self_profile else None,
         relationship_status=relationship_status
         or get_relationship_status(db, current_player_id, player.player_id),
     )
@@ -91,11 +100,19 @@ def get_my_friend_code(
 
 
 @router.post("/search", response_model=FriendProfileResponse)
-def search_by_friend_code(
+async def search_by_friend_code(
+    http_request: Request,
     request: FriendSearchRequest,
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
+    await enforce_rate_limit(
+        http_request,
+        scope="friends-search-player",
+        identifier=current_player.player_id,
+        limit=30,
+        window_seconds=3600,
+    )
     current_player = ensure_player_friend_code(db, current_player)
     player = get_player_by_friend_code(db, request.friend_code)
     if not player:
@@ -105,11 +122,19 @@ def search_by_friend_code(
 
 @router.post("/requests", response_model=FriendRequestResponse)
 async def create_friend_request(
+    http_request: Request,
     request: FriendRequestCreate,
     background_tasks: BackgroundTasks,
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
+    await enforce_rate_limit(
+        http_request,
+        scope="friends-request-player",
+        identifier=current_player.player_id,
+        limit=20,
+        window_seconds=3600,
+    )
     logger.warning(
         "Creating friend request sender=%s receiver_code=%s",
         current_player.player_id,
@@ -128,6 +153,7 @@ async def create_friend_request(
     receiver = get_player_public_profile(db, friend_request.receiver_player_id)
 
     if receiver:
+        invalidate_social_cache(current_player.player_id, receiver.player_id)
         tokens = get_active_push_tokens(db, receiver.player_id)
 
         logger.warning(
@@ -178,11 +204,19 @@ def get_outgoing_requests(
 
 @router.post("/requests/{request_id}/accept", response_model=FriendRequestResponse)
 async def accept_request(
+    http_request: Request,
     request_id: str,
     background_tasks: BackgroundTasks,
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
+    await enforce_rate_limit(
+        http_request,
+        scope="friends-accept-player",
+        identifier=current_player.player_id,
+        limit=60,
+        window_seconds=3600,
+    )
     logger.warning(
         "Accepting friend request receiver=%s request_id=%s",
         current_player.player_id,
@@ -197,6 +231,7 @@ async def accept_request(
     set_rls_current_player(db, current_player.player_id)
 
     sender = get_player_public_profile(db, friend_request.sender_player_id)
+    invalidate_social_cache(current_player.player_id, friend_request.sender_player_id)
 
     if sender:
         tokens = get_active_push_tokens(db, sender.player_id)
@@ -226,15 +261,24 @@ async def accept_request(
 
 
 @router.post("/requests/{request_id}/reject", response_model=FriendRequestResponse)
-def reject_request(
+async def reject_request(
+    http_request: Request,
     request_id: str,
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
+    await enforce_rate_limit(
+        http_request,
+        scope="friends-reject-player",
+        identifier=current_player.player_id,
+        limit=60,
+        window_seconds=3600,
+    )
     try:
         friend_request = reject_friend_request(db, current_player, request_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    invalidate_social_cache(current_player.player_id, friend_request.sender_player_id)
     return request_response(db, current_player.player_id, friend_request)
 
 
@@ -247,6 +291,7 @@ def delete_friend(
     removed = remove_friendship(db, current_player.player_id, friend_player_id)
     if not removed:
         raise HTTPException(status_code=404, detail="Friendship not found")
+    invalidate_social_cache(current_player.player_id, friend_player_id)
     return {"detail": "Friend removed"}
 
 
@@ -256,18 +301,39 @@ def get_friends(
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
-    friends = [
-        profile_response(db, current_player.player_id, friend, "friends")
-        for friend in list_friends(db, current_player.player_id)
-    ]
-    return FriendsListResponse(friends=friends)
+    cache_key = friends_cache_key(current_player.player_id)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    response = FriendsListResponse(
+        friends=[
+            profile_response(db, current_player.player_id, friend, "friends")
+            for friend in list_friends(db, current_player.player_id)
+        ]
+    )
+    cache.set(cache_key, response.model_dump(mode="json"), ttl_seconds=45)
+    return response
 
 
 @router.get("/presence", response_model=FriendsPresenceResponse)
-def get_friends_presence(
+async def get_friends_presence(
+    request: Request,
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
+    await enforce_rate_limit(
+        request,
+        scope="friends-presence-player",
+        identifier=current_player.player_id,
+        limit=120,
+        window_seconds=300,
+    )
+    cache_key = friends_presence_cache_key(current_player.player_id)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     friends = list_friends(db, current_player.player_id)
     presence_by_player_id = get_presence_map(
         db, [friend.player_id for friend in friends]
@@ -287,4 +353,6 @@ def get_friends_presence(
             )
         )
 
-    return FriendsPresenceResponse(presence=presence)
+    response = FriendsPresenceResponse(presence=presence)
+    cache.set(cache_key, response.model_dump(mode="json"), ttl_seconds=10)
+    return response

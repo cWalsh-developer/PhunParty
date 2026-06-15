@@ -1,5 +1,6 @@
 import glob
 import os
+from urllib.parse import quote
 import uuid
 from io import BytesIO
 from pathlib import Path
@@ -7,10 +8,13 @@ from pathlib import Path
 from app.database.dbCRUD import get_player_by_ID, update_player_photo
 from app.dependencies import get_current_player, get_db, require_admin_api_key
 from app.schemas.players_model import Players
+from app.security.cache import cache, invalidate_profile_cache
+from app.security.input_validation import validate_avatar_seed
 from app.security.ownership import assert_same_player
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from app.security.rate_limit import enforce_rate_limit, get_client_ip
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
-from PIL import Image
+from PIL import Image, ImageOps
 from sqlalchemy.orm import Session
 
 # Create photos directory if it doesn't exist
@@ -130,6 +134,30 @@ def validate_uploaded_image(filename: str, content: bytes) -> str:
     return suffix
 
 
+def strip_image_metadata(content: bytes, suffix: str) -> bytes:
+    try:
+        image = Image.open(BytesIO(content))
+        image = ImageOps.exif_transpose(image)
+
+        output = BytesIO()
+        if suffix in {".jpg", ".jpeg"}:
+            if image.mode not in {"RGB", "L"}:
+                image = image.convert("RGB")
+            image.save(output, format="JPEG", quality=90, optimize=True)
+        elif suffix == ".png":
+            image.save(output, format="PNG", optimize=True)
+        elif suffix == ".webp":
+            image.save(output, format="WEBP", quality=90, method=6)
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported image format")
+
+        return output.getvalue()
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not process image")
+
+
 def safe_photo_path(filename: str) -> Path:
     safe_name = Path(filename).name
     if safe_name != filename:
@@ -148,6 +176,7 @@ def safe_photo_path(filename: str) -> Path:
 @router.post("/upload/{player_id}", tags=["Photos"])
 async def upload_player_photo(
     player_id: str,
+    request: Request,
     file: UploadFile = File(...),
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
@@ -156,6 +185,13 @@ async def upload_player_photo(
     Upload a profile photo for a player.
     """
     assert_same_player(current_player, player_id)
+    await enforce_rate_limit(
+        request,
+        scope="photos-upload-player",
+        identifier=current_player.player_id,
+        limit=10,
+        window_seconds=3600,
+    )
 
     try:
         # Check if player exists
@@ -165,6 +201,7 @@ async def upload_player_photo(
 
         file_content = await file.read()
         file_extension = validate_uploaded_image(file.filename, file_content)
+        sanitized_content = strip_image_metadata(file_content, file_extension)
 
         cleanup_old_player_photos(player_id, UPLOAD_DIR)
 
@@ -174,13 +211,14 @@ async def upload_player_photo(
 
         # Save file
         with open(file_path, "wb") as buffer:
-            buffer.write(file_content)
+            buffer.write(sanitized_content)
 
         # Update player record with photo URL
         photo_url = f"/photos/{unique_filename}"
 
         # Update player in database
         update_player_photo(db, player_id, photo_url)
+        invalidate_profile_cache(player_id)
 
         return {
             "message": "Photo uploaded successfully",
@@ -225,6 +263,7 @@ async def delete_player_photo(
 
         # Update database
         update_player_photo(db, player_id, None)
+        invalidate_profile_cache(player_id)
 
         return {"message": "Photo deleted successfully"}
     except HTTPException:
@@ -236,6 +275,7 @@ async def delete_player_photo(
 @router.post("/avatar/{player_id}", tags=["Photos"])
 async def set_player_avatar(
     player_id: str,
+    request: Request,
     avatar_style: str,
     avatar_seed: str = "default",
     current_player: Players = Depends(get_current_player),
@@ -245,6 +285,13 @@ async def set_player_avatar(
     Set a DiceBear generated avatar for a player.
     """
     assert_same_player(current_player, player_id)
+    await enforce_rate_limit(
+        request,
+        scope="photos-avatar-player",
+        identifier=current_player.player_id,
+        limit=30,
+        window_seconds=3600,
+    )
 
     try:
         # Check if player exists
@@ -263,13 +310,17 @@ async def set_player_avatar(
         # Avatars are external URLs, so we can safely delete all uploaded files
         cleanup_old_player_photos(player_id, UPLOAD_DIR)
 
+        avatar_seed = validate_avatar_seed(avatar_seed)
+        encoded_seed = quote(avatar_seed, safe="")
+
         # Generate DiceBear avatar URL
         avatar_url = (
-            f"https://api.dicebear.com/7.x/{avatar_style}/png?seed={avatar_seed}"
+            f"https://api.dicebear.com/7.x/{avatar_style}/png?seed={encoded_seed}"
         )
 
         # Update player in database
         update_player_photo(db, player_id, avatar_url)
+        invalidate_profile_cache(player_id)
 
         return {
             "message": "Avatar set successfully",
@@ -289,6 +340,11 @@ async def get_available_avatars():
     Get list of available DiceBear generated avatars.
     """
     try:
+        cache_key = "photos:avatars"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         avatars = []
         for style in DICEBEAR_STYLES:
             # Generate 20 different avatars per style using numeric seeds
@@ -303,11 +359,13 @@ async def get_available_avatars():
                     }
                 )
 
-        return {
+        response = {
             "avatars": avatars,
             "total_count": len(avatars),
             "styles": DICEBEAR_STYLES,
         }
+        cache.set(cache_key, response, ttl_seconds=86400)
+        return response
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -318,7 +376,12 @@ async def get_avatar_styles():
     Get available avatar styles only.
     """
     try:
-        return {
+        cache_key = "photos:avatar_styles"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        response = {
             "styles": [
                 {
                     "name": style,
@@ -328,16 +391,30 @@ async def get_avatar_styles():
                 for style in DICEBEAR_STYLES
             ]
         }
+        cache.set(cache_key, response, ttl_seconds=86400)
+        return response
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/avatars/generate/{style}", tags=["Photos"])
-async def generate_avatar_preview(style: str, seed: str = "preview", size: int = 128):
+async def generate_avatar_preview(
+    style: str,
+    request: Request,
+    seed: str = "preview",
+    size: int = 128,
+):
     """
     Generate a preview of an avatar with specific style and seed.
     """
     try:
+        await enforce_rate_limit(
+            request,
+            scope="photos-avatar-generate-ip",
+            identifier=get_client_ip(request),
+            limit=120,
+            window_seconds=3600,
+        )
         if style not in DICEBEAR_STYLES:
             raise HTTPException(
                 status_code=400,
@@ -348,7 +425,11 @@ async def generate_avatar_preview(style: str, seed: str = "preview", size: int =
         if size < 16 or size > 512:
             size = 128
 
-        avatar_url = f"https://api.dicebear.com/7.x/{style}/png?seed={seed}&size={size}"
+        seed = validate_avatar_seed(seed)
+        encoded_seed = quote(seed, safe="")
+        avatar_url = (
+            f"https://api.dicebear.com/7.x/{style}/png?seed={encoded_seed}&size={size}"
+        )
 
         return {"style": style, "seed": seed, "size": size, "url": avatar_url}
     except HTTPException:

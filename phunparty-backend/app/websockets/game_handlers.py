@@ -653,7 +653,9 @@ class BeatTheClockGameHandler(GameEventHandler):
                     )
                     question_id = player_state.get("current_question_id")
                     if not question_id:
-                        await self._send_question_to_player(db, player_id, existing_state)
+                        await self._send_question_to_player(
+                            db, player_id, existing_state
+                        )
                         continue
 
                     payload = self._question_payload(
@@ -790,7 +792,9 @@ class BeatTheClockGameHandler(GameEventHandler):
                 )
             )
         except Exception:
-            logger.exception("Error starting Beat the Clock session %s", self.session_code)
+            logger.exception(
+                "Error starting Beat the Clock session %s", self.session_code
+            )
 
     async def handle_current_question_request(
         self,
@@ -856,9 +860,7 @@ class BeatTheClockGameHandler(GameEventHandler):
 
         player_state = state.get("players", {}).get(player_id)
         if not player_state or player_state.get("current_question_id") != question_id:
-            current_question_id = (
-                player_state or {}
-            ).get("current_question_id")
+            current_question_id = (player_state or {}).get("current_question_id")
             score_row = get_scores_by_session_and_player(
                 db,
                 self.session_code,

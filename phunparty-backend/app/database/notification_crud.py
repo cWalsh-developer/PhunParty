@@ -94,7 +94,8 @@ def register_push_token(
     token row if it currently belongs to a different player.
     """
     token_id = db.execute(
-        text("""
+        text(
+            """
             SELECT id
             FROM public.register_user_push_token(
                 :player_id,
@@ -102,7 +103,8 @@ def register_push_token(
                 :device_id,
                 :platform
             )
-            """),
+            """
+        ),
         {
             "player_id": player_id,
             "expo_push_token": expo_push_token,
@@ -134,10 +136,12 @@ def get_active_push_tokens(db: Session, player_id: str) -> list[str]:
 
     tokens = list(
         db.execute(
-            text("""
+            text(
+                """
                 SELECT expo_push_token
                 FROM public.get_active_push_tokens_for_notification(:player_id)
-                """),
+                """
+            ),
             {"player_id": player_id},
         ).scalars()
     )

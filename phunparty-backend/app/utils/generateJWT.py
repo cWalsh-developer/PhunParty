@@ -20,8 +20,8 @@ def int_env(name: str, default: int) -> int:
         return default
 
 
-# Default: 30 days
-ACCESS_TOKEN_EXPIRE_MINUTES = int_env("ACCESS_TOKEN_EXPIRE_MINUTES", 60 * 24 * 30)
+# Default: 1 day. Use refresh-token rotation for longer lived sessions.
+ACCESS_TOKEN_EXPIRE_MINUTES = int_env("ACCESS_TOKEN_EXPIRE_MINUTES", 60 * 24)
 
 
 def create_access_token(data: dict, expires_delta: timedelta = None):

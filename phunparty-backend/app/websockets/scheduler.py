@@ -43,9 +43,7 @@ def session_looks_like_beat_clock(db: Session, session_code: str) -> bool:
         return False
 
     return any(
-        str(getattr(assignment, "question_id", "") or "")
-        .upper()
-        .startswith("BTC")
+        str(getattr(assignment, "question_id", "") or "").upper().startswith("BTC")
         for assignment in assignments
     )
 

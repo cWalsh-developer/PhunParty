@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 router = APIRouter()
+INVALID_LOGIN_MESSAGE = "Invalid email or password"
 
 
 @router.post("/login", tags=["Players"])
@@ -43,13 +44,11 @@ async def login_route(
         player = get_player_by_email(db, login_request.player_email)
 
         if not player:
-            raise HTTPException(
-                status_code=404, detail="No account found with this email address"
-            )
+            raise HTTPException(status_code=401, detail=INVALID_LOGIN_MESSAGE)
         else:
             # Verify password
             if not verify_password(login_request.password, player.hashed_password):
-                raise HTTPException(status_code=401, detail="Incorrect password")
+                raise HTTPException(status_code=401, detail=INVALID_LOGIN_MESSAGE)
             else:
                 set_rls_current_player(db, player.player_id)
 
