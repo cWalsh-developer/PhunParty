@@ -280,21 +280,49 @@ def build_player_fair_play_status(
         raise HTTPException(status_code=404, detail="Session not found")
 
     max_strikes = getattr(game_state, "max_fair_play_strikes", 3) or 3
-    current_question_id = getattr(game_state, "current_question_id", None)
+    phase_state = manager.get_session_phase_state(session_code)
+    current_question_id = get_active_fair_play_question_id(
+        session_code,
+        player_id,
+        phase_state,
+        db,
+    ) or getattr(game_state, "current_question_id", None)
+    manager_status = manager.get_fair_play_status(session_code, player_id)
     is_frozen = bool(
-        current_question_id
-        and has_focus_violation_for_question(
-            db, session_code, player_id, current_question_id
+        manager_status.get("is_frozen")
+        or (
+            current_question_id
+            and has_focus_violation_for_question(
+                db, session_code, player_id, current_question_id
+            )
         )
     )
-    is_kicked = bool(record and record.is_kicked)
-    strike_count = record.strike_count if record else 0
-    answer_status = "kicked" if is_kicked else ("frozen" if is_frozen else None)
-    reason = "fair_play_strikes" if is_kicked else None
+    frozen_question_id = (
+        manager_status.get("frozen_question_id")
+        or (current_question_id if is_frozen else None)
+    )
+    is_kicked = bool(record and record.is_kicked) or bool(
+        manager_status.get("is_kicked")
+    )
+    strike_count = (
+        record.strike_count
+        if record
+        else int(manager_status.get("strike_count") or 0)
+    )
+    answer_status = (
+        "kicked"
+        if is_kicked
+        else manager_status.get("answer_status") or ("frozen" if is_frozen else None)
+    )
+    reason = (
+        "fair_play_strikes"
+        if is_kicked
+        else manager_status.get("reason") or manager_status.get("fair_play_reason")
+    )
     message = (
         f"You were removed after {max_strikes} Fair Play strikes."
         if is_kicked
-        else None
+        else manager_status.get("message")
     )
 
     return {
@@ -305,7 +333,7 @@ def build_player_fair_play_status(
         "max_strikes": max_strikes,
         "is_kicked": is_kicked,
         "is_frozen": is_frozen or is_kicked,
-        "frozen_question_id": current_question_id if is_frozen else None,
+        "frozen_question_id": frozen_question_id,
         "reason": reason,
         "fair_play_reason": reason,
         "answer_status": answer_status,

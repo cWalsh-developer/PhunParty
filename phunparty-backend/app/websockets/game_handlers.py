@@ -466,6 +466,14 @@ class BeatTheClockGameHandler(GameEventHandler):
             payloads[question_id] = base_payload
 
         score_row = get_scores_by_session_and_player(db, self.session_code, player_id)
+        game_state = get_game_session_state(db, self.session_code)
+        fair_play_status = manager.get_fair_play_status(self.session_code, player_id)
+        fair_play_enabled = (
+            getattr(game_state, "fair_play_enabled", False) if game_state else False
+        )
+        max_fair_play_strikes = (
+            getattr(game_state, "max_fair_play_strikes", 3) if game_state else 3
+        )
 
         return {
             **base_payload,
@@ -477,6 +485,20 @@ class BeatTheClockGameHandler(GameEventHandler):
             "ends_at": state.get("ends_at"),
             "server_time_ms": manager._utc_now_ms(),
             "phase": SessionPhase.QUESTION.value,
+            "fair_play_enabled": fair_play_enabled,
+            "cheat_detection_enabled": fair_play_enabled,
+            "max_fair_play_strikes": max_fair_play_strikes,
+            "max_cheat_strikes": max_fair_play_strikes,
+            "player_fair_play_status": {
+                **fair_play_status,
+                "player_id": player_id,
+                "roster_player_id": make_roster_player_id(self.session_code, player_id),
+                "strike_count": fair_play_status.get("strike_count", 0),
+                "max_strikes": fair_play_status.get(
+                    "max_strikes",
+                    max_fair_play_strikes,
+                ),
+            },
         }
 
     async def _send_question_to_player(
