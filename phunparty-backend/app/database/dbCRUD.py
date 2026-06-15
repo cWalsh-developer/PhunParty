@@ -2,7 +2,7 @@ import logging
 import random
 from datetime import datetime, timezone
 
-from sqlalchemy import func, text
+from sqlalchemy import and_, func, text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -1181,10 +1181,12 @@ def get_game_history_for_player(db: Session, player_id: str) -> list:
             Game,
             GameSession.game_code == Game.game_code,
         )
-        .join(
+        .outerjoin(
             Scores,
-            (Scores.session_code == SessionAssignment.session_code)
-            & (Scores.player_id == player_id),
+            and_(
+                Scores.session_code == SessionAssignment.session_code,
+                Scores.player_id == SessionAssignment.player_id,
+            ),
         )
         .outerjoin(
             GameSessionState,
@@ -1569,6 +1571,15 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
         game_state.is_active = False
         game_state.isstarted = False
         game_state.is_waiting_for_players = False
+
+        assigned_player_ids = (
+            db.query(SessionAssignment.player_id)
+            .filter(SessionAssignment.session_code == session_code)
+            .distinct()
+            .all()
+        )
+        for (assigned_player_id,) in assigned_player_ids:
+            create_score(db, session_code, assigned_player_id)
 
         try:
             calculate_game_results(db, session_code)
