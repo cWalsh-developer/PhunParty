@@ -2612,6 +2612,10 @@ async def handle_focus_violation(
     phase_state = manager.get_session_phase_state(session_code)
     if phase_state.get("phase") != SessionPhase.QUESTION.value:
         return
+    is_beat_clock_fair_play = (
+        phase_state.get("game_type") == BEAT_THE_CLOCK_GAME_TYPE
+        or resolve_session_game_type(db, session_code) == BEAT_THE_CLOCK_GAME_TYPE
+    )
 
     question_id = data.get("question_id")
     current_question_id = get_active_fair_play_question_id(
