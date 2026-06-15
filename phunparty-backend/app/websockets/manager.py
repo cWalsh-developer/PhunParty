@@ -1421,6 +1421,36 @@ class ConnectionManager:
             == question_id
         )
 
+    def clear_player_fair_play_freeze(
+        self, session_code: str, player_id: str, question_id: Optional[str] = None
+    ) -> None:
+        frozen_players = self.fair_play_frozen_players.get(session_code)
+        if not frozen_players:
+            self.update_fair_play_status(
+                session_code,
+                player_id,
+                is_frozen=False,
+                frozen_question_id=None,
+                answer_status=None,
+            )
+            return
+
+        frozen_question_id = frozen_players.get(player_id)
+        if question_id is not None and frozen_question_id != question_id:
+            return
+
+        frozen_players.pop(player_id, None)
+        if not frozen_players:
+            self.fair_play_frozen_players.pop(session_code, None)
+
+        self.update_fair_play_status(
+            session_code,
+            player_id,
+            is_frozen=False,
+            frozen_question_id=None,
+            answer_status=None,
+        )
+
     def update_fair_play_status(
         self, session_code: str, player_id: str, **status: Any
     ) -> Dict[str, Any]:

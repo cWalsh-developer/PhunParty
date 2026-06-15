@@ -564,6 +564,11 @@ class BeatTheClockGameHandler(GameEventHandler):
         if player_state.get("current_question_id") == question_id:
             player_state["answered_count"] = player_state.get("answered_count", 0) + 1
 
+        manager.clear_player_fair_play_freeze(
+            self.session_code,
+            player_id,
+            question_id,
+        )
         await self._send_question_to_player(db, player_id, state)
         await self._broadcast_state(db)
 
