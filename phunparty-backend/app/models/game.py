@@ -13,7 +13,8 @@ class GameSessionCreation(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     host_name: str = Field(..., max_length=40)
-    number_of_questions: int = Field(..., ge=1, le=50)
+    # Beat the Clock uses a large question pool sentinel from the website.
+    number_of_questions: int = Field(..., ge=1, le=1000)
     game_code: str
     ispublic: bool = True
     difficulty: Optional[str] = None
