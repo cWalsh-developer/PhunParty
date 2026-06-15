@@ -45,7 +45,7 @@ class FriendProfileResponse(BaseModel):
     player_email: Optional[str] = None
     player_mobile: Optional[str] = None
     profile_photo_url: Optional[str] = None
-    friend_code: str
+    friend_code: Optional[str] = None
     relationship_status: str = "none"
     profile_visibility: Optional[str] = None
     can_view_profile: Optional[bool] = None
