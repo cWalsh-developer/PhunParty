@@ -325,6 +325,29 @@ def get_player_fair_play_status(
     return build_player_fair_play_status(db, session_code, player_id)
 
 
+def get_active_fair_play_question_id(
+    session_code: str,
+    player_id: Optional[str],
+    phase_state: dict,
+    db: Session,
+) -> Optional[str]:
+    """Return the question Fair Play should use for this player."""
+    current_question_id = phase_state.get("current_question_id")
+    if not player_id:
+        return current_question_id
+
+    game_type = phase_state.get("game_type") or resolve_session_game_type(
+        db,
+        session_code,
+    )
+    if game_type != BEAT_THE_CLOCK_GAME_TYPE:
+        return current_question_id
+
+    beat_state = manager.get_beat_clock_state(session_code)
+    player_state = beat_state.get("players", {}).get(player_id, {})
+    return player_state.get("current_question_id") or current_question_id
+
+
 def serialize_game_state(
     game_state_obj, game_type: Optional[str] = None
 ) -> Optional[dict]:
@@ -1690,7 +1713,12 @@ async def handle_mobile_disconnect_during_fair_play(
     if phase_state.get("phase") != SessionPhase.QUESTION.value:
         return
 
-    question_id = phase_state.get("current_question_id")
+    question_id = get_active_fair_play_question_id(
+        session_code,
+        player_id,
+        phase_state,
+        db,
+    )
     if not question_id:
         return
 
@@ -1782,7 +1810,12 @@ async def handle_fair_play_focus_lost(
         return
 
     question_id = data.get("question_id")
-    current_question_id = phase_state.get("current_question_id")
+    current_question_id = get_active_fair_play_question_id(
+        session_code,
+        player_id,
+        phase_state,
+        db,
+    )
     if not question_id or question_id != current_question_id:
         logger.info(
             f"Ignoring focus loss for {session_code}/{safe_player_ref(player_id)}; question {question_id} != {current_question_id}"
@@ -2549,7 +2582,12 @@ async def handle_focus_violation(
         return
 
     question_id = data.get("question_id")
-    current_question_id = phase_state.get("current_question_id")
+    current_question_id = get_active_fair_play_question_id(
+        session_code,
+        player_id,
+        phase_state,
+        db,
+    )
     if not question_id or question_id != current_question_id:
         logger.info(
             f"Ignoring focus violation for {session_code}/{player_id}; question {question_id} != {current_question_id}"

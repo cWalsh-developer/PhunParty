@@ -850,6 +850,49 @@ class BeatTheClockGameHandler(GameEventHandler):
                 await self._send_question_to_player(db, player_id, state)
             return
 
+        if is_player_kicked(db, self.session_code, player_id) or (
+            manager.is_player_frozen_for_question(
+                self.session_code,
+                player_id,
+                question_id,
+            )
+            or is_player_frozen_for_question(
+                db,
+                self.session_code,
+                player_id,
+                question_id,
+            )
+        ):
+            score_row = get_scores_by_session_and_player(
+                db,
+                self.session_code,
+                player_id,
+            )
+            rejection_payload = {
+                "game_type": self.game_type,
+                "question_id": question_id,
+                "ignored": True,
+                "reason": "fair_play_restriction",
+                "message": "You are frozen for this question because of Fair Play Mode.",
+                "score": score_row.score if score_row else 0,
+                "answered_count": player_state.get("answered_count", 0),
+                "correct_count": player_state.get("correct_count", 0),
+                "duration_seconds": state.get("duration_seconds"),
+                "ends_at": state.get("ends_at"),
+                "server_time_ms": manager._utc_now_ms(),
+            }
+            for connection_info in manager.get_player_connections(
+                self.session_code,
+                player_id,
+            ).values():
+                websocket = connection_info.get("websocket")
+                if websocket:
+                    await manager.send_personal_message(
+                        {"type": "beat_clock_answer_result", "data": rejection_payload},
+                        websocket,
+                    )
+            return
+
         question = get_question_by_id(question_id, db)
         if not question:
             return
