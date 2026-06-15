@@ -538,6 +538,35 @@ class BeatTheClockGameHandler(GameEventHandler):
                 sent = True
         return sent
 
+    async def handle_fair_play_skip(
+        self,
+        player_id: str,
+        question_id: str,
+        db: Session,
+    ) -> None:
+        """Move a Beat the Clock player on after Fair Play voids a question."""
+        state = manager.get_beat_clock_state(self.session_code)
+        if not state.get("active"):
+            return
+
+        ends_at_dt = state.get("ends_at_dt")
+        if ends_at_dt and utc_now() >= ends_at_dt:
+            state["active"] = False
+            state["finished"] = True
+            await self._finish_now(db, acting_player_id=player_id)
+            return
+
+        player_state = self._ensure_player_state(
+            state,
+            player_id,
+            state.get("questions", []),
+        )
+        if player_state.get("current_question_id") == question_id:
+            player_state["answered_count"] = player_state.get("answered_count", 0) + 1
+
+        await self._send_question_to_player(db, player_id, state)
+        await self._broadcast_state(db)
+
     async def _broadcast_state(self, db: Session) -> dict:
         state = manager.get_beat_clock_state(self.session_code)
         leaderboard = self._leaderboard(db)

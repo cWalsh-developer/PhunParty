@@ -1836,6 +1836,10 @@ async def handle_fair_play_focus_lost(
     phase_state = manager.get_session_phase_state(session_code)
     if phase_state.get("phase") != SessionPhase.QUESTION.value:
         return
+    is_beat_clock_fair_play = (
+        phase_state.get("game_type") == BEAT_THE_CLOCK_GAME_TYPE
+        or resolve_session_game_type(db, session_code) == BEAT_THE_CLOCK_GAME_TYPE
+    )
 
     question_id = data.get("question_id")
     current_question_id = get_active_fair_play_question_id(
@@ -2638,7 +2642,8 @@ async def handle_focus_violation(
 
     reason = data.get("reason") or "left_question_screen"
     manager.freeze_player_for_question(session_code, player_id, question_id)
-    manager.set_player_answered(session_code, player_id, True)
+    if not is_beat_clock_fair_play:
+        manager.set_player_answered(session_code, player_id, True)
     player = get_player_by_ID(db, player_id)
     player_name = (
         manager.get_player_name_from_websocket(websocket)
@@ -2732,16 +2737,26 @@ async def handle_focus_violation(
         },
         critical=True,
     )
+    if record.is_kicked:
+        await kick_player_for_fair_play(session_code, player_id, max_strikes, db)
+        await asyncio.sleep(0.75)
+        return
+
+    if is_beat_clock_fair_play:
+        beat_clock_handler = create_game_handler(
+            session_code,
+            BEAT_THE_CLOCK_GAME_TYPE,
+        )
+        if hasattr(beat_clock_handler, "handle_fair_play_skip"):
+            await beat_clock_handler.handle_fair_play_skip(player_id, question_id, db)
+        return
+
     await apply_buzzer_fair_play_freeze(
         session_code=session_code,
         player_id=player_id,
         question_id=question_id,
         db=db,
     )
-
-    if record.is_kicked:
-        await kick_player_for_fair_play(session_code, player_id, max_strikes, db)
-        await asyncio.sleep(0.75)
     await advance_after_fair_play_if_ready(
         session_code,
         question_id,
