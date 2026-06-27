@@ -24,12 +24,13 @@ from app.queue.queue_models import (
     QueueStatusResponse,
 )
 from app.schemas.players_model import Players
+from app.schemas.scores_model import Scores
+from app.security.cache import cache, invalidate_profile_cache
 from app.security.ownership import (
     assert_public_or_member_or_owner,
     assert_same_player,
     assert_session_owner,
 )
-from app.security.cache import cache
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
 from app.websockets.manager import manager
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -85,6 +86,8 @@ def create_game_session_route(
             or request.timer_seconds
             or 60,
         )
+        if request.ispublic:
+            cache.delete("game:sessions:public")
         return {
             "session_code": gameSession.session_code,
             "host_name": gameSession.host_name,
@@ -440,6 +443,16 @@ async def end_game_route(
     try:
         assert_session_owner(db, current_player, session_code)
         result = end_game_session(db, session_code)
+        cache.delete("game:sessions:public")
+        score_player_ids = [
+            player_id
+            for (player_id,) in db.query(Scores.player_id)
+            .filter(Scores.session_code == session_code)
+            .all()
+            if player_id
+        ]
+        for player_id in score_player_ids:
+            invalidate_profile_cache(player_id)
 
         # Broadcast game ended message to all connected WebSocket clients
         await manager.broadcast_to_session(

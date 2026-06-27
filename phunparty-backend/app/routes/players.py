@@ -140,7 +140,10 @@ def delete_player_route(
         player = get_player_by_ID(db, player_id)
         if not player:
             raise HTTPException(status_code=404, detail="Player not found")
-        return delete_player(db, player_id)
+        result = delete_player(db, player_id)
+        invalidate_profile_cache(player_id)
+        invalidate_social_cache(player_id)
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:

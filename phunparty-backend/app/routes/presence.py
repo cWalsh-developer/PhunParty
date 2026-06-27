@@ -2,6 +2,7 @@ from app.database.presence_crud import set_player_offline, set_player_online
 from app.dependencies import get_current_player, get_db
 from app.models.presence import PresenceResponse
 from app.schemas.players_model import Players
+from app.security.cache import invalidate_friends_presence_cache
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
@@ -30,6 +31,7 @@ async def heartbeat(
         window_seconds=300,
     )
     presence = set_player_online(db, current_player.player_id)
+    invalidate_friends_presence_cache(db, current_player.player_id)
     return PresenceResponse(
         player_id=current_player.player_id,
         is_online=current_player.show_online_status,
@@ -59,6 +61,7 @@ async def offline(
         window_seconds=300,
     )
     presence = set_player_offline(db, current_player.player_id)
+    invalidate_friends_presence_cache(db, current_player.player_id)
     return PresenceResponse(
         player_id=current_player.player_id,
         is_online=False,

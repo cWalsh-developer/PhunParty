@@ -30,7 +30,7 @@ from app.security.cache import (
     cache,
     friends_cache_key,
     friends_presence_cache_key,
-    invalidate_social_cache,
+    invalidate_relationship_cache,
 )
 from app.security.rate_limit import enforce_rate_limit
 from app.utils.expo_push import send_expo_push_to_tokens
@@ -153,7 +153,7 @@ async def create_friend_request(
     receiver = get_player_public_profile(db, friend_request.receiver_player_id)
 
     if receiver:
-        invalidate_social_cache(current_player.player_id, receiver.player_id)
+        invalidate_relationship_cache(current_player.player_id, receiver.player_id)
         tokens = get_active_push_tokens(db, receiver.player_id)
 
         logger.warning(
@@ -231,7 +231,9 @@ async def accept_request(
     set_rls_current_player(db, current_player.player_id)
 
     sender = get_player_public_profile(db, friend_request.sender_player_id)
-    invalidate_social_cache(current_player.player_id, friend_request.sender_player_id)
+    invalidate_relationship_cache(
+        current_player.player_id, friend_request.sender_player_id
+    )
 
     if sender:
         tokens = get_active_push_tokens(db, sender.player_id)
@@ -278,7 +280,9 @@ async def reject_request(
         friend_request = reject_friend_request(db, current_player, request_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    invalidate_social_cache(current_player.player_id, friend_request.sender_player_id)
+    invalidate_relationship_cache(
+        current_player.player_id, friend_request.sender_player_id
+    )
     return request_response(db, current_player.player_id, friend_request)
 
 
@@ -291,7 +295,7 @@ def delete_friend(
     removed = remove_friendship(db, current_player.player_id, friend_player_id)
     if not removed:
         raise HTTPException(status_code=404, detail="Friendship not found")
-    invalidate_social_cache(current_player.player_id, friend_player_id)
+    invalidate_relationship_cache(current_player.player_id, friend_player_id)
     return {"detail": "Friend removed"}
 
 

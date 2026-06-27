@@ -38,6 +38,11 @@ def get_profile(
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
+    cache_key = profile_cache_key(current_player.player_id, player_id)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     player = (
         db.query(Players)
         .filter(Players.player_id == player_id)
@@ -71,11 +76,6 @@ def get_profile(
     presence = get_presence_map(db, [player.player_id]).get(player.player_id)
     is_online, last_seen_at = visible_presence_for_player(player, presence)
 
-    cache_key = profile_cache_key(current_player.player_id, player.player_id)
-    cached = cache.get(cache_key)
-    if cached is not None:
-        return cached
-
     response = FriendProfileResponse(
         player_id=player.player_id,
         player_name=player.player_name,
@@ -102,6 +102,11 @@ def get_profile_stats(
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
+    cache_key = profile_stats_cache_key(current_player.player_id, player_id)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     player = (
         db.query(Players)
         .filter(Players.player_id == player_id)
@@ -124,11 +129,6 @@ def get_profile_stats(
             status_code=403,
             detail="This player has not made their game stats visible",
         )
-
-    cache_key = profile_stats_cache_key(current_player.player_id, player.player_id)
-    cached = cache.get(cache_key)
-    if cached is not None:
-        return cached
 
     response = ProfileStatsResponse(**get_player_stats_summary(db, player.player_id))
     cache.set(cache_key, response.model_dump(mode="json"), ttl_seconds=180)

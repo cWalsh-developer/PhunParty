@@ -2,9 +2,10 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from app.config import Base, engine
+from app.config import Base, SessionLocal, engine
 from app.database.beat_clock_migrations import ensure_beat_clock_session_columns
 from app.database.fair_play_migrations import ensure_fair_play_columns
+from app.database.refresh_token_crud import cleanup_stale_user_sessions
 from app.database.social_migrations import ensure_social_player_columns
 from app.routes import (
     authentication,
@@ -21,6 +22,7 @@ from app.routes import (
     questions,
     scores,
 )
+from app.schemas.auth_models import UserSession
 from app.schemas.fair_play_models import FairPlayViolation, SessionPlayerFairPlay
 from app.schemas.game_model import Game
 from app.schemas.game_session_model import GameSession
@@ -87,6 +89,8 @@ async def lifespan(app: FastAPI):
         ensure_fair_play_columns()
         ensure_social_player_columns()
         ensure_beat_clock_session_columns()
+        with SessionLocal() as db:
+            cleanup_stale_user_sessions(db)
     except Exception as e:
         logger.warning("Could not create database tables: %s", e)
 

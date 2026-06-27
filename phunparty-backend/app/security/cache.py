@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import time
+import fnmatch
 from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
@@ -85,6 +86,29 @@ class JsonCache:
         for key in keys:
             self._memory.pop(key, None)
 
+    def delete_pattern(self, *patterns: str) -> None:
+        patterns = tuple(pattern for pattern in patterns if pattern)
+        if not patterns:
+            return
+
+        if self._redis:
+            try:
+                keys_to_delete = []
+                for pattern in patterns:
+                    keys_to_delete.extend(
+                        list(self._redis.scan_iter(match=pattern, count=250))
+                    )
+
+                if keys_to_delete:
+                    self._redis.delete(*keys_to_delete)
+            except Exception as exc:
+                logger.warning("Redis cache pattern delete failed: %s", exc)
+                self._redis = None
+
+        for key in list(self._memory.keys()):
+            if any(fnmatch.fnmatch(key, pattern) for pattern in patterns):
+                self._memory.pop(key, None)
+
     def get_or_set(self, key: str, ttl_seconds: int, factory: Callable[[], Any]) -> Any:
         cached = self.get(key)
         if cached is not None:
@@ -138,7 +162,32 @@ def invalidate_social_cache(*player_ids: str) -> None:
 
 
 def invalidate_profile_cache(player_id: str) -> None:
+    if not player_id:
+        return
+
+    cache.delete_pattern(
+        f"profile:viewer_*:target_{player_id}",
+        f"profile_stats:viewer_*:target_{player_id}",
+    )
+
+
+def invalidate_relationship_cache(player_a_id: str, player_b_id: str) -> None:
+    invalidate_social_cache(player_a_id, player_b_id)
+    invalidate_profile_cache(player_a_id)
+    invalidate_profile_cache(player_b_id)
+
+
+def invalidate_friends_presence_cache(db, player_id: str) -> None:
+    if not player_id:
+        return
+
+    from app.database.friend_crud import list_friends
+
+    friend_ids = [friend.player_id for friend in list_friends(db, player_id)]
     cache.delete(
-        profile_cache_key(player_id, player_id),
-        profile_stats_cache_key(player_id, player_id),
+        *[
+            friends_presence_cache_key(friend_id)
+            for friend_id in friend_ids
+            if friend_id
+        ]
     )

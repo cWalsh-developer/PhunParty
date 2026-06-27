@@ -5,16 +5,16 @@ import inspect
 import logging
 from datetime import datetime
 
-from requests import session
-
 from app.database.dbCRUD import (
     get_final_scores,
-    update_game_session_ended,
     get_session_by_code,
+    update_game_session_ended,
 )
 from app.schemas.game_state_models import GameSessionState
-from app.websockets.manager import SessionPhase, manager
+from app.schemas.scores_model import Scores
+from app.security.cache import cache, invalidate_profile_cache
 from app.security.rls import set_rls_current_player
+from app.websockets.manager import SessionPhase, manager
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -78,6 +78,16 @@ async def handle_game_end(
             logger.info("Game session %s was already ended", session_code)
 
         final_scores = get_final_scores(db, session_code)
+        score_player_ids = [
+            player_id
+            for (player_id,) in db.query(Scores.player_id)
+            .filter(Scores.session_code == session_code)
+            .all()
+            if player_id
+        ]
+        for player_id in score_player_ids:
+            invalidate_profile_cache(player_id)
+        cache.delete("game:sessions:public")
 
         fair_play_statuses = manager.fair_play_player_status.get(session_code, {})
         removed_players = [
