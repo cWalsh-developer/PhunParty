@@ -1,7 +1,11 @@
 from app.dependencies import get_current_player, get_db
 from app.models.privacy import PrivacySettingsResponse, PrivacySettingsUpdate
 from app.schemas.players_model import Players
-from app.security.cache import invalidate_profile_cache, invalidate_social_cache
+from app.security.cache import (
+    invalidate_friends_presence_cache,
+    invalidate_profile_cache,
+    invalidate_social_cache,
+)
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -40,4 +44,6 @@ def update_privacy_settings(
     db.commit()
     invalidate_profile_cache(current_player.player_id)
     invalidate_social_cache(current_player.player_id)
+    if "show_online_status" in updates:
+        invalidate_friends_presence_cache(db, current_player.player_id)
     return privacy_settings_response(current_player)

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from app.config import Base, SessionLocal, engine
 from app.database.beat_clock_migrations import ensure_beat_clock_session_columns
 from app.database.fair_play_migrations import ensure_fair_play_columns
+from app.database.performance_migrations import ensure_performance_indexes
 from app.database.refresh_token_crud import cleanup_stale_user_sessions
 from app.database.social_migrations import ensure_social_player_columns
 from app.routes import (
@@ -48,6 +49,26 @@ from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger(__name__)
 
+PRIVATE_NO_STORE_PREFIXES = (
+    "/auth",
+    "/players",
+    "/profiles",
+    "/friends",
+    "/notifications",
+    "/presence",
+    "/photos",
+    "/privacy",
+    "/scores",
+    "/game-logic",
+    "/password-reset",
+)
+
+PUBLIC_GAME_CACHE_PATHS = {
+    "/game",
+    "/game/",
+    "/game/sessions/public",
+}
+
 
 """PhunParty Backend API main application module.
 
@@ -82,6 +103,34 @@ def warn_about_websocket_process_state():
     )
 
 
+def set_cache_control(request: Request, response) -> None:
+    """Apply conservative API cache headers unless a route set them explicitly."""
+    if "cache-control" in response.headers:
+        return
+
+    path = request.url.path
+    method = request.method.upper()
+
+    if path.startswith("/photos/avatars"):
+        response.headers["Cache-Control"] = "public, max-age=86400"
+        return
+
+    if path == "/game/sessions/public" and method == "GET":
+        response.headers["Cache-Control"] = "public, max-age=10"
+        return
+
+    if path in {"/game", "/game/"} and method == "GET":
+        response.headers["Cache-Control"] = "public, max-age=600"
+        return
+
+    if path.startswith(PRIVATE_NO_STORE_PREFIXES):
+        response.headers["Cache-Control"] = "no-store"
+        return
+
+    if path.startswith("/game") and path not in PUBLIC_GAME_CACHE_PATHS:
+        response.headers["Cache-Control"] = "no-store"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -89,6 +138,7 @@ async def lifespan(app: FastAPI):
         ensure_fair_play_columns()
         ensure_social_player_columns()
         ensure_beat_clock_session_columns()
+        ensure_performance_indexes()
         with SessionLocal() as db:
             cleanup_stale_user_sessions(db)
     except Exception as e:
@@ -144,6 +194,7 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    set_cache_control(request, response)
 
     if os.getenv("ENVIRONMENT", "development").lower() == "production":
         response.headers["Strict-Transport-Security"] = (

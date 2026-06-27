@@ -23,8 +23,8 @@ class UserSession(Base):
         nullable=False,
         index=True,
     )
-    current_refresh_token_hash = Column(String, nullable=False, unique=True)
-    previous_refresh_token_hash = Column(String, nullable=True, unique=True)
+    current_refresh_token_hash = Column(String, nullable=False)
+    previous_refresh_token_hash = Column(String, nullable=True)
     previous_token_valid_until = Column(DateTime, nullable=True)
     user_agent = Column(String, nullable=True)
     ip_address = Column(String, nullable=True)

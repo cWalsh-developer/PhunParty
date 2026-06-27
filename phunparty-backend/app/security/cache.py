@@ -16,11 +16,32 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def redis_required() -> bool:
+    default = os.getenv("ENVIRONMENT", "development").lower() == "production"
+    return env_flag("REQUIRE_REDIS_CACHE", default=default)
+
+
 class JsonCache:
     def __init__(self) -> None:
         self.redis_url = os.getenv("REDIS_URL")
+        self.require_redis = redis_required()
         self._redis = None
         self._memory: dict[str, tuple[str, float]] = {}
+
+        if self.require_redis and not self.redis_url:
+            raise RuntimeError("REDIS_URL is required when Redis cache is mandatory")
+
+        if self.require_redis and not redis:
+            raise RuntimeError(
+                "The redis package is required when Redis cache is mandatory"
+            )
 
         if self.redis_url and redis:
             try:
@@ -33,8 +54,19 @@ class JsonCache:
                 )
                 self._redis.ping()
             except Exception as exc:
+                if self.require_redis:
+                    raise RuntimeError(
+                        "Redis cache is mandatory but unavailable"
+                    ) from exc
                 logger.warning("Redis cache unavailable; using memory cache: %s", exc)
                 self._redis = None
+
+    def _handle_redis_failure(self, operation: str, exc: Exception) -> None:
+        if self.require_redis:
+            raise RuntimeError(f"Redis cache {operation} failed") from exc
+
+        logger.warning("Redis cache %s failed; using memory cache: %s", operation, exc)
+        self._redis = None
 
     def get(self, key: str) -> Optional[Any]:
         raw = None
@@ -42,8 +74,7 @@ class JsonCache:
             try:
                 raw = self._redis.get(key)
             except Exception as exc:
-                logger.warning("Redis cache get failed; using memory cache: %s", exc)
-                self._redis = None
+                self._handle_redis_failure("get", exc)
 
         if raw is None:
             entry = self._memory.get(key)
@@ -66,8 +97,7 @@ class JsonCache:
                 self._redis.setex(key, ttl_seconds, raw)
                 return
             except Exception as exc:
-                logger.warning("Redis cache set failed; using memory cache: %s", exc)
-                self._redis = None
+                self._handle_redis_failure("set", exc)
 
         self._memory[key] = (raw, time.time() + ttl_seconds)
 
@@ -80,8 +110,7 @@ class JsonCache:
             try:
                 self._redis.delete(*keys)
             except Exception as exc:
-                logger.warning("Redis cache delete failed: %s", exc)
-                self._redis = None
+                self._handle_redis_failure("delete", exc)
 
         for key in keys:
             self._memory.pop(key, None)
@@ -102,8 +131,7 @@ class JsonCache:
                 if keys_to_delete:
                     self._redis.delete(*keys_to_delete)
             except Exception as exc:
-                logger.warning("Redis cache pattern delete failed: %s", exc)
-                self._redis = None
+                self._handle_redis_failure("pattern delete", exc)
 
         for key in list(self._memory.keys()):
             if any(fnmatch.fnmatch(key, pattern) for pattern in patterns):

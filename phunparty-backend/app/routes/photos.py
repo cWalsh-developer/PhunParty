@@ -452,7 +452,7 @@ async def get_photo(filename: str):
         return FileResponse(
             path=file_path,
             media_type="image/*",
-            headers={"Cache-Control": "max-age=3600"},  # Cache for 1 hour
+            headers={"Cache-Control": "public, max-age=86400, immutable"},
         )
     except HTTPException:
         raise

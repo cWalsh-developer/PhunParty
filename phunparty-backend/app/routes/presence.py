@@ -31,7 +31,6 @@ async def heartbeat(
         window_seconds=300,
     )
     presence = set_player_online(db, current_player.player_id)
-    invalidate_friends_presence_cache(db, current_player.player_id)
     return PresenceResponse(
         player_id=current_player.player_id,
         is_online=current_player.show_online_status,
