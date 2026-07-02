@@ -4,7 +4,7 @@ from app.database.dbCRUD import *
 from app.dependencies import get_current_player, get_db
 from app.models.response_models import ScoresResponseModel
 from app.schemas.players_model import Players
-from app.security.ownership import assert_session_member_or_owner
+from app.security.ownership import assert_session_participant_or_owner
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -22,7 +22,7 @@ def get_scores_by_session_route(
     db: Session = Depends(get_db),
 ):
     try:
-        assert_session_member_or_owner(db, current_player, session_code)
+        assert_session_participant_or_owner(db, current_player, session_code)
 
         scores = get_scores_by_session(db, session_code)
         if not scores:

@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from app.config import Base, SessionLocal, engine
 from app.database.beat_clock_migrations import ensure_beat_clock_session_columns
+from app.database.dbCRUD import backfill_missing_session_assignments_from_scores
 from app.database.fair_play_migrations import ensure_fair_play_columns
 from app.database.performance_migrations import ensure_performance_indexes
 from app.database.refresh_token_crud import cleanup_stale_user_sessions
@@ -141,6 +142,13 @@ async def lifespan(app: FastAPI):
         ensure_performance_indexes()
         with SessionLocal() as db:
             cleanup_stale_user_sessions(db)
+            repaired_assignments = backfill_missing_session_assignments_from_scores(db)
+            if repaired_assignments:
+                db.commit()
+                logger.info(
+                    "Backfilled %s missing session assignments from scores",
+                    repaired_assignments,
+                )
     except Exception as e:
         logger.warning("Could not create database tables: %s", e)
 

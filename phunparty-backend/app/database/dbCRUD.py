@@ -2,7 +2,7 @@ import logging
 import random
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, func, text
+from sqlalchemy import and_, func, or_, text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -308,7 +308,7 @@ def end_game_session(db: Session, session_code: str) -> dict:
         # Update session assignment end times
         for assignment in session_assignments:
             if not assignment.session_end:
-                assignment.session_end = datetime.now()
+                assignment.session_end = utc_now()
 
         # Reset player game codes
         for player in players:
@@ -681,8 +681,15 @@ def get_game_history_for_player(db: Session, player_id: str) -> list:
     # Session Player Assignment CRUD operations -----------------------------------------------------------------------------------------------------
 
 
-def assign_player_to_session(db: Session, player_id: str, session_code: str) -> None:
-    """Assign a player to a game session."""
+def ensure_session_assignment(
+    db: Session,
+    session_code: str,
+    player_id: str,
+    *,
+    session_start: datetime | None = None,
+    session_end: datetime | None = None,
+) -> SessionAssignment:
+    """Ensure a player/session membership row exists."""
     existing_assignment = (
         db.query(SessionAssignment)
         .filter(SessionAssignment.player_id == player_id)
@@ -691,23 +698,83 @@ def assign_player_to_session(db: Session, player_id: str, session_code: str) -> 
     )
 
     if existing_assignment:
-        existing_assignment.session_end = None
-        existing_assignment.session_start = datetime.now()
-        db.flush()
-        return
+        return existing_assignment
 
-    assignment_id = generate_assignment_id()
     assignment = SessionAssignment(
-        assignment_id=assignment_id,
+        assignment_id=generate_assignment_id(),
         player_id=player_id,
         session_code=session_code,
-        session_start=datetime.now(),
-        session_end=None,
+        session_start=session_start or utc_now(),
+        session_end=session_end,
     )
     db.add(assignment)
     db.flush()
+    return assignment
+
+
+def assign_player_to_session(db: Session, player_id: str, session_code: str) -> None:
+    """Assign a player to a game session."""
+    assignment = ensure_session_assignment(db, session_code, player_id)
+    assignment.session_end = None
+    assignment.session_start = utc_now()
+    db.flush()
 
     # Session Questions Assignment CRUD operations --------------------------------------------------------------------------------------------------------------
+
+
+def backfill_missing_session_assignments_from_scores(db: Session) -> int:
+    """
+    Repair completed score rows that are missing session assignment rows.
+
+    This is a defensive data cleanup for older sessions. It only backfills rows
+    that look completed, either because the session ended or the score has a
+    final result.
+    """
+    missing_assignments = (
+        db.query(
+            Scores.player_id,
+            Scores.session_code,
+            GameSessionState.started_at,
+            GameSessionState.ended_at,
+            Scores.result,
+        )
+        .join(GameSession, Scores.session_code == GameSession.session_code)
+        .outerjoin(
+            GameSessionState,
+            Scores.session_code == GameSessionState.session_code,
+        )
+        .outerjoin(
+            SessionAssignment,
+            and_(
+                SessionAssignment.player_id == Scores.player_id,
+                SessionAssignment.session_code == Scores.session_code,
+            ),
+        )
+        .filter(SessionAssignment.assignment_id.is_(None))
+        .filter(
+            (Scores.result.isnot(None))
+            | (GameSessionState.is_active == False)
+            | (GameSessionState.ended_at.isnot(None))
+        )
+        .all()
+    )
+
+    repaired_count = 0
+    for row in missing_assignments:
+        ended_at = row.ended_at or utc_now()
+        ensure_session_assignment(
+            db,
+            row.session_code,
+            row.player_id,
+            session_start=row.started_at or ended_at,
+            session_end=ended_at,
+        )
+        repaired_count += 1
+
+    if repaired_count:
+        db.flush()
+
+    return repaired_count
 
 
 # Rebooting
@@ -868,6 +935,8 @@ def update_scores(db: Session, session_code: str, player_id: str) -> Scores:
 
 def create_score(db: Session, session_code: str, player_id: str) -> Scores:
     """Create a new score entry for a player in a game session."""
+    ensure_session_assignment(db, session_code, player_id)
+
     existing_score = (
         db.query(Scores)
         .filter(Scores.session_code == session_code)
@@ -1162,51 +1231,53 @@ def get_all_sessions_from_player(db: Session, player_id: str) -> list:
 
 def get_game_history_for_player(db: Session, player_id: str) -> list:
     """
-    Get the games played by a specific player by checking SessionAssignment table
-    and joining scores table to display if they won, lost, or drew.
+    Get completed games for a player using scores as participation evidence.
+
+    Session assignments are still maintained, but scores are the more resilient
+    source for history because older data may have a score without an assignment.
     Returns a list of dictionaries with session_code, game_type (genre), and did_win (boolean).
     """
     history = (
         db.query(
-            SessionAssignment.session_code,
+            Scores.session_code,
             Game.genre,
             Scores.result,
         )
         .distinct()
-        .join(
+        .outerjoin(
             GameSession,
-            SessionAssignment.session_code == GameSession.session_code,
+            Scores.session_code == GameSession.session_code,
         )
-        .join(
+        .outerjoin(
             Game,
             GameSession.game_code == Game.game_code,
         )
         .outerjoin(
-            Scores,
-            and_(
-                Scores.session_code == SessionAssignment.session_code,
-                Scores.player_id == SessionAssignment.player_id,
-            ),
-        )
-        .outerjoin(
             GameSessionState,
-            SessionAssignment.session_code == GameSessionState.session_code,
+            Scores.session_code == GameSessionState.session_code,
         )
-        .filter(SessionAssignment.player_id == player_id)
+        .filter(Scores.player_id == player_id)
         .filter(
-            (GameSessionState.is_active == False)
-            | (GameSessionState.session_code == None)
+            (Scores.result.isnot(None))
+            | (GameSessionState.is_active == False)
+            | (GameSessionState.ended_at.isnot(None))
         )
         .all()
     )
     return [
         {
             "session_code": record.session_code,
-            "game_type": record.genre,
+            "game_type": record.genre or "Unknown",
             "did_win": (
                 "Won"
                 if record.result == "win"
-                else ("Lost" if record.result == "lose" else "Draw")
+                or getattr(record.result, "value", None) == "win"
+                else (
+                    "Lost"
+                    if record.result == "lose"
+                    or getattr(record.result, "value", None) == "lose"
+                    else "Draw"
+                )
             ),
         }
         for record in history

@@ -1,6 +1,7 @@
 from app.schemas.game_session_model import GameSession
 from app.schemas.game_state_models import GameSessionState
 from app.schemas.players_model import Players
+from app.schemas.scores_model import Scores
 from app.schemas.session_player_assignment_model import SessionAssignment
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
@@ -63,6 +64,27 @@ def is_session_member(db: Session, current_player: Players, session_code: str) -
     return assignment is not None
 
 
+def is_session_participant(
+    db: Session, current_player: Players, session_code: str
+) -> bool:
+    assignment = (
+        db.query(SessionAssignment)
+        .filter(SessionAssignment.session_code == session_code)
+        .filter(SessionAssignment.player_id == current_player.player_id)
+        .first()
+    )
+    if assignment:
+        return True
+
+    score = (
+        db.query(Scores)
+        .filter(Scores.session_code == session_code)
+        .filter(Scores.player_id == current_player.player_id)
+        .first()
+    )
+    return score is not None
+
+
 def assert_session_member_or_owner(
     db: Session,
     current_player: Players,
@@ -72,6 +94,20 @@ def assert_session_member_or_owner(
         return
 
     if is_session_member(db, current_player, session_code):
+        return
+
+    raise forbidden()
+
+
+def assert_session_participant_or_owner(
+    db: Session,
+    current_player: Players,
+    session_code: str,
+) -> None:
+    if is_session_participant(db, current_player, session_code):
+        return
+
+    if is_session_owner(db, current_player, session_code):
         return
 
     raise forbidden()
