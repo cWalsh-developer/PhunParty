@@ -153,8 +153,9 @@ async def lifespan(app: FastAPI):
                     "Backfilled %s missing session assignments from scores",
                     repaired_assignments,
                 )
-    except Exception as e:
-        logger.warning("Could not create database tables: %s", e)
+    except Exception:
+        logger.exception("Could not prepare database schema")
+        raise
 
     await rate_limiter.connect()
     warn_about_websocket_process_state()

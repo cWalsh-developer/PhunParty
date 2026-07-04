@@ -4,6 +4,7 @@ import hmac
 from datetime import datetime, timezone
 
 from sqlalchemy import and_, func, or_, text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,7 @@ def utc_now() -> datetime:
 
 
 from app.models.players import Player
+from app.database.email_verification_migrations import ensure_email_verification_columns
 from app.models.enums import DifficultyLevel
 from app.schemas.game_model import Game
 from app.schemas.game_session_model import GameSession
@@ -115,6 +117,15 @@ def generate_unique_friend_code(db: Session) -> str:
         if not exists:
             return friend_code
     raise ValueError("Unable to generate a unique friend code")
+
+
+def _is_missing_email_verification_column_error(exc: Exception) -> bool:
+    message = str(exc)
+    return (
+        "email_verified" in message
+        or "email_verification_code_hash" in message
+        or "email_verification_expires_at" in message
+    )
 
 
 def create_game(db: Session, rules: str, genre: str) -> Game:
@@ -366,23 +377,48 @@ def end_game_session(db: Session, session_code: str) -> dict:
 
 def get_player_by_ID(db: Session, player_ID: str) -> Players:
     """Retrieve an active player by their ID (excludes deactivated and deleted accounts)."""
-    return (
-        db.query(Players)
-        .filter(Players.player_id == player_ID)
-        .filter(Players.is_deleted == False)
-        .filter(Players.is_deactivated == False)
-        .first()
-    )
+    try:
+        return (
+            db.query(Players)
+            .filter(Players.player_id == player_ID)
+            .filter(Players.is_deleted == False)
+            .filter(Players.is_deactivated == False)
+            .first()
+        )
+    except ProgrammingError as exc:
+        if not _is_missing_email_verification_column_error(exc):
+            raise
+        db.rollback()
+        ensure_email_verification_columns()
+        return (
+            db.query(Players)
+            .filter(Players.player_id == player_ID)
+            .filter(Players.is_deleted == False)
+            .filter(Players.is_deactivated == False)
+            .first()
+        )
 
 
 def get_player_by_ID_include_deactivated(db: Session, player_ID: str) -> Players:
     """Retrieve a player by their ID, including deactivated accounts (for reactivation)."""
-    return (
-        db.query(Players)
-        .filter(Players.player_id == player_ID)
-        .filter(Players.is_deleted == False)
-        .first()
-    )
+    try:
+        return (
+            db.query(Players)
+            .filter(Players.player_id == player_ID)
+            .filter(Players.is_deleted == False)
+            .first()
+        )
+    except ProgrammingError as exc:
+        if not _is_missing_email_verification_column_error(exc):
+            raise
+        db.rollback()
+        ensure_email_verification_columns()
+        return (
+            db.query(Players)
+            .filter(Players.player_id == player_ID)
+            .filter(Players.is_deleted == False)
+            .first()
+        )
 
 
 def get_all_players(db: Session) -> list[Players]:
@@ -397,12 +433,24 @@ def get_all_players(db: Session) -> list[Players]:
 
 def get_player_by_email(db: Session, player_email: str) -> Players:
     """Retrieve a player by their email (excludes deleted accounts, includes deactivated)."""
-    return (
-        db.query(Players)
-        .filter(Players.player_email == player_email)
-        .filter(Players.is_deleted == False)
-        .first()
-    )
+    try:
+        return (
+            db.query(Players)
+            .filter(Players.player_email == player_email)
+            .filter(Players.is_deleted == False)
+            .first()
+        )
+    except ProgrammingError as exc:
+        if not _is_missing_email_verification_column_error(exc):
+            raise
+        db.rollback()
+        ensure_email_verification_columns()
+        return (
+            db.query(Players)
+            .filter(Players.player_email == player_email)
+            .filter(Players.is_deleted == False)
+            .first()
+        )
 
 
 def get_player_by_phone_any_status(db: Session, phone: str) -> Players:

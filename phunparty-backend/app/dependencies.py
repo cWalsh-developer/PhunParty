@@ -2,6 +2,7 @@ import os
 import secrets
 
 from app.config import SessionLocal
+from app.database.email_verification_migrations import ensure_email_verification_columns
 from app.schemas.players_model import Players
 from app.security.rls import clear_rls_context, set_rls_current_player
 from app.utils.generateJWT import ALGORITHM, SECRET_KEY
@@ -10,6 +11,7 @@ from fastapi import Depends, HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.security.api_key import APIKeyHeader
 from jose import JWTError, jwt
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
 load_dotenv("credentials.env")
@@ -58,13 +60,26 @@ def get_player_from_token_value(token: str, db: Session) -> Players:
 
     set_rls_current_player(db, player_id)
 
-    player = (
-        db.query(Players)
-        .filter(Players.player_id == player_id)
-        .filter(Players.is_deleted == False)
-        .filter(Players.is_deactivated == False)
-        .first()
-    )
+    try:
+        player = (
+            db.query(Players)
+            .filter(Players.player_id == player_id)
+            .filter(Players.is_deleted == False)
+            .filter(Players.is_deactivated == False)
+            .first()
+        )
+    except ProgrammingError as exc:
+        if "email_verified" not in str(exc):
+            raise
+        db.rollback()
+        ensure_email_verification_columns()
+        player = (
+            db.query(Players)
+            .filter(Players.player_id == player_id)
+            .filter(Players.is_deleted == False)
+            .filter(Players.is_deactivated == False)
+            .first()
+        )
     if not player:
         raise HTTPException(status_code=401, detail="Player account is not available")
 
