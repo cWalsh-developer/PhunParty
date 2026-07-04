@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 from typing import List
 
@@ -9,21 +10,30 @@ from app.database.dbCRUD import (
     get_game_history_for_player,
     get_player_by_email,
     get_player_by_ID,
+    issue_email_verification_code,
     update_player,
+    verify_player_email_code,
 )
 from app.dependencies import get_current_player, get_db, require_admin_api_key
-from app.models.players import Player, PlayerUpdate
+from app.models.players import (
+    EmailVerificationRequest,
+    EmailVerificationResendRequest,
+    Player,
+    PlayerUpdate,
+)
 from app.models.response_models import PlayerResponse
 from app.schemas.players_model import Players
 from app.schemas.session_player_assignment_model import SessionAssignment
 from app.security.cache import invalidate_profile_cache, invalidate_social_cache
 from app.security.ownership import assert_same_player
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
+from app.utils.email_verification import send_email_verification_code
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -57,13 +67,22 @@ async def create_player_route(
             raise HTTPException(
                 status_code=400, detail="Account with this email already exists"
             )
-        return create_player(
+        new_player = create_player(
             db,
             player.player_name,
             player.player_email,
             player.player_mobile,
             player.hashed_password,
         )
+        verification_code = issue_email_verification_code(db, new_player)
+        try:
+            send_email_verification_code(new_player.player_email, verification_code)
+        except Exception:
+            logger.exception(
+                "Failed to send email verification code to %s",
+                new_player.player_email,
+            )
+        return new_player
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except IntegrityError:
@@ -76,6 +95,76 @@ async def create_player_route(
         raise
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to create account")
+
+
+@router.post("/verify-email", tags=["Players"])
+async def verify_email_route(
+    request: Request,
+    payload: EmailVerificationRequest,
+    db: Session = Depends(get_db),
+):
+    await enforce_rate_limit(
+        request,
+        scope="email-verify-ip",
+        identifier=get_client_ip(request),
+        limit=12,
+        window_seconds=900,
+    )
+    await enforce_rate_limit(
+        request,
+        scope="email-verify-email",
+        identifier=payload.player_email,
+        limit=8,
+        window_seconds=900,
+    )
+
+    if not verify_player_email_code(db, payload.player_email, payload.code):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired verification code",
+        )
+
+    return {"message": "Email verified"}
+
+
+@router.post("/resend-verification", tags=["Players"])
+async def resend_email_verification_route(
+    request: Request,
+    payload: EmailVerificationResendRequest,
+    db: Session = Depends(get_db),
+):
+    await enforce_rate_limit(
+        request,
+        scope="email-resend-ip",
+        identifier=get_client_ip(request),
+        limit=5,
+        window_seconds=900,
+    )
+    await enforce_rate_limit(
+        request,
+        scope="email-resend-email",
+        identifier=payload.player_email,
+        limit=3,
+        window_seconds=900,
+    )
+
+    player = get_player_by_email(db, payload.player_email)
+    if not player:
+        return {"message": "If that account exists, a verification code was sent"}
+
+    if player.email_verified:
+        return {"message": "Email already verified"}
+
+    verification_code = issue_email_verification_code(db, player)
+    try:
+        send_email_verification_code(player.player_email, verification_code)
+    except Exception:
+        logger.exception(
+            "Failed to resend email verification code to %s",
+            player.player_email,
+        )
+
+    return {"message": "Verification code sent"}
 
 
 @router.get("/me", response_model=PlayerResponse, tags=["Players"])

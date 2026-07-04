@@ -5,6 +5,9 @@ from contextlib import asynccontextmanager
 from app.config import Base, SessionLocal, engine
 from app.database.beat_clock_migrations import ensure_beat_clock_session_columns
 from app.database.dbCRUD import backfill_missing_session_assignments_from_scores
+from app.database.email_verification_migrations import (
+    ensure_email_verification_columns,
+)
 from app.database.fair_play_migrations import ensure_fair_play_columns
 from app.database.performance_migrations import ensure_performance_indexes
 from app.database.refresh_token_crud import cleanup_stale_user_sessions
@@ -138,6 +141,7 @@ async def lifespan(app: FastAPI):
         Base.metadata.create_all(bind=engine)
         ensure_fair_play_columns()
         ensure_social_player_columns()
+        ensure_email_verification_columns()
         ensure_beat_clock_session_columns()
         ensure_performance_indexes()
         with SessionLocal() as db:

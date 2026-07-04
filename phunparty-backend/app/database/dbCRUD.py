@@ -1,5 +1,6 @@
 import logging
 import random
+import hmac
 from datetime import datetime, timezone
 
 from sqlalchemy import and_, func, or_, text
@@ -25,6 +26,11 @@ from app.schemas.session_player_assignment_model import SessionAssignment
 from app.schemas.session_question_assignment import SessionQuestionAssignment
 from app.utils.friend_codes import generate_friend_code
 from app.utils.hash_password import hash_password
+from app.utils.email_verification import (
+    email_verification_expires_at,
+    generate_email_verification_code,
+    hash_email_verification_code,
+)
 from app.utils.id_generator import (
     generate_assignment_id,
     generate_game_code,
@@ -452,6 +458,54 @@ def create_player(
     db.flush()
     db.commit()
     return new_player
+
+
+def issue_email_verification_code(db: Session, player: Players) -> str:
+    """Create a fresh email verification code for a newly-created player."""
+    code = generate_email_verification_code()
+    player.email_verified = False
+    player.email_verification_code_hash = hash_email_verification_code(
+        player.player_email,
+        code,
+    )
+    player.email_verification_expires_at = email_verification_expires_at()
+    db.add(player)
+    db.commit()
+    db.refresh(player)
+    return code
+
+
+def verify_player_email_code(db: Session, player_email: str, code: str) -> bool:
+    """Validate a player's email verification code and mark the email verified."""
+    player = get_player_by_email(db, player_email)
+    if not player:
+        return False
+
+    if player.email_verified:
+        return True
+
+    expires_at = player.email_verification_expires_at
+    if (
+        not player.email_verification_code_hash
+        or not expires_at
+        or expires_at < utc_now()
+    ):
+        return False
+
+    submitted_hash = hash_email_verification_code(player.player_email, code)
+    if not hmac.compare_digest(
+        submitted_hash,
+        player.email_verification_code_hash,
+    ):
+        return False
+
+    player.email_verified = True
+    player.email_verification_code_hash = None
+    player.email_verification_expires_at = None
+    db.add(player)
+    db.commit()
+    db.refresh(player)
+    return True
 
 
 def update_player_game_code(db: Session, player_id: str, game_code: str) -> Players:

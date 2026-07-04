@@ -19,6 +19,7 @@ class PlayerResponse(BaseModel):
     player_mobile: Optional[str] = None
     profile_photo_url: Optional[str] = None
     active_game_code: Optional[str] = None
+    email_verified: bool = False
 
 
 class AnswerVerificationResponseModel(BaseModel):

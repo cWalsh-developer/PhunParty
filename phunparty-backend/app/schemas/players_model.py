@@ -1,5 +1,5 @@
 from app.config import Base
-from sqlalchemy import Boolean, Column, ForeignKey, String
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String
 
 
 class Players(Base):
@@ -11,6 +11,9 @@ class Players(Base):
     )  # Nullable for deleted accounts
     player_mobile = Column(String, nullable=True)
     hashed_password = Column(String, nullable=True)  # Nullable for deleted accounts
+    email_verified = Column(Boolean, default=False, nullable=False)
+    email_verification_code_hash = Column(String, nullable=True)
+    email_verification_expires_at = Column(DateTime, nullable=True)
     profile_photo_url = Column(String, nullable=True)
     active_game_code = Column(
         String, ForeignKey("game_sessions.session_code"), nullable=True

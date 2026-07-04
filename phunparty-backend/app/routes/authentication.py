@@ -73,6 +73,12 @@ async def login_route(
             if not verify_password(login_request.password, player.hashed_password):
                 raise HTTPException(status_code=401, detail=INVALID_LOGIN_MESSAGE)
             else:
+                if not player.email_verified:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Please verify your email address before logging in.",
+                    )
+
                 set_rls_current_player(db, player.player_id)
 
                 # If account is deactivated, try to reactivate

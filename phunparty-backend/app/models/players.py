@@ -6,7 +6,7 @@ from app.security.input_validation import (
     validate_password,
     validate_player_name,
 )
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class Player(BaseModel):
@@ -65,3 +65,30 @@ class PlayerUpdate(BaseModel):
     @classmethod
     def validate_optional_password(cls, value: Optional[str]) -> Optional[str]:
         return validate_password(value) if value is not None else None
+
+
+class EmailVerificationRequest(BaseModel):
+    player_email: str
+    code: str = Field(..., min_length=6, max_length=6)
+
+    @field_validator("player_email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return normalize_email(value)
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, value: str) -> str:
+        code = (value or "").strip()
+        if not code.isdigit() or len(code) != 6:
+            raise ValueError("Verification code must be 6 digits")
+        return code
+
+
+class EmailVerificationResendRequest(BaseModel):
+    player_email: str
+
+    @field_validator("player_email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return normalize_email(value)
