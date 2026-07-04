@@ -1142,6 +1142,12 @@ def get_session_details(db: Session, session_code: str) -> dict:
     }
 
 
+def _difficulty_label(difficulty, default: str = "Unknown") -> str:
+    if not difficulty:
+        return default
+    return str(getattr(difficulty, "value", difficulty))
+
+
 # TODO: Remove duplication with get_all_public_sessions
 
 
@@ -1183,7 +1189,7 @@ def get_all_public_sessions(db: Session) -> list:
                 "session_code": session.session_code,
                 "genre": game.genre,
                 "number_of_questions": session.number_of_questions,
-                "difficulty": difficulty.value if difficulty else "Unknown",
+                "difficulty": _difficulty_label(difficulty),
             }
         )
 
@@ -1229,7 +1235,7 @@ def get_player_private_sessions(db: Session, player_id: str) -> list:
                 "session_code": session.session_code,
                 "genre": game.genre,
                 "number_of_questions": session.number_of_questions,
-                "difficulty": difficulty.value if difficulty else "Unknown",
+                "difficulty": _difficulty_label(difficulty),
                 "ispublic": state.ispublic,
             }
         )
@@ -1275,7 +1281,7 @@ def get_all_sessions_from_player(db: Session, player_id: str) -> list:
                 "session_code": session.session_code,
                 "genre": game.genre,
                 "number_of_questions": session.number_of_questions,
-                "difficulty": difficulty.value if difficulty else "Unknown",
+                "difficulty": _difficulty_label(difficulty),
                 "ispublic": state.ispublic,
             }
         )
@@ -1521,10 +1527,8 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
                     "question_id": current_question.question_id,
                     "question": current_question.question,
                     "genre": current_question.genre,
-                    "difficulty": (
-                        current_question.difficulty.value
-                        if current_question.difficulty
-                        else "easy"
+                    "difficulty": _difficulty_label(
+                        current_question.difficulty, default="easy"
                     ),
                     "display_options": [],
                     "answer": current_question.answer,
