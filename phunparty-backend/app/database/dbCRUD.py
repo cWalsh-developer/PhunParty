@@ -632,8 +632,6 @@ def verify_player_email_token(db: Session, token: str) -> Players | None:
 
     _set_player_mutation_context(db, player)
     player.email_verified = True
-    player.email_verification_code_hash = None
-    player.email_verification_expires_at = None
     db.add(player)
     db.commit()
     db.refresh(player)
