@@ -96,6 +96,25 @@ def send_player_email_verification_link(
         return False
 
 
+async def enforce_email_verification_send_limits(
+    request: Request, player_email: str
+) -> None:
+    await enforce_rate_limit(
+        request,
+        scope="email-verification-send-ip",
+        identifier=get_client_ip(request),
+        limit=10,
+        window_seconds=3600,
+    )
+    await enforce_rate_limit(
+        request,
+        scope="email-verification-send-email",
+        identifier=player_email,
+        limit=3,
+        window_seconds=3600,
+    )
+
+
 @router.post("/create", response_model=PlayerResponse, tags=["Players"])
 async def create_player_route(
     request: Request,
@@ -124,6 +143,9 @@ async def create_player_route(
         existing_player = get_player_by_email(db, player.player_email)
         if existing_player:
             if not existing_player.email_verified:
+                await enforce_email_verification_send_limits(
+                    request, player.player_email
+                )
                 verification_token = issue_email_verification_token(
                     db, existing_player
                 )
@@ -136,6 +158,7 @@ async def create_player_route(
             raise HTTPException(
                 status_code=400, detail="Account with this email already exists"
             )
+        await enforce_email_verification_send_limits(request, player.player_email)
         verification_token = generate_email_verification_token()
         new_player = create_player(
             db,
@@ -214,7 +237,14 @@ async def verify_email_token_route(
         request,
         scope="email-token-verify-ip",
         identifier=get_client_ip(request),
-        limit=12,
+        limit=10,
+        window_seconds=900,
+    )
+    await enforce_rate_limit(
+        request,
+        scope="email-token-verify-token",
+        identifier=payload.token,
+        limit=6,
         window_seconds=900,
     )
 
@@ -249,6 +279,7 @@ async def resend_email_verification_route(
         limit=3,
         window_seconds=900,
     )
+    await enforce_email_verification_send_limits(request, payload.player_email)
 
     ensure_email_verification_columns()
     player = get_player_by_email(db, payload.player_email)
