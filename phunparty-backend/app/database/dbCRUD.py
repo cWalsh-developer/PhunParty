@@ -490,6 +490,7 @@ def create_player(
     player_mobile: str,
     hashed_password: str,
     game_code: str = None,
+    commit: bool = True,
 ) -> Players:
     """Create a new player and add them to a game."""
     player_id = generate_player_id()
@@ -506,11 +507,15 @@ def create_player(
     )
     db.add(new_player)
     db.flush()
-    db.commit()
+    if commit:
+        db.commit()
+        db.refresh(new_player)
     return new_player
 
 
-def issue_email_verification_code(db: Session, player: Players) -> str:
+def issue_email_verification_code(
+    db: Session, player: Players, *, commit: bool = True
+) -> str:
     """Create a fresh email verification code for a newly-created player."""
     code = generate_email_verification_code()
     player.email_verified = False
@@ -520,20 +525,26 @@ def issue_email_verification_code(db: Session, player: Players) -> str:
     )
     player.email_verification_expires_at = email_verification_expires_at()
     db.add(player)
-    db.commit()
-    db.refresh(player)
+    db.flush()
+    if commit:
+        db.commit()
+        db.refresh(player)
     return code
 
 
-def issue_email_verification_token(db: Session, player: Players) -> str:
+def issue_email_verification_token(
+    db: Session, player: Players, *, commit: bool = True
+) -> str:
     """Create a fresh one-time email verification token for a player."""
     token = generate_email_verification_token()
     player.email_verified = False
     player.email_verification_code_hash = hash_email_verification_token(token)
     player.email_verification_expires_at = email_verification_expires_at()
     db.add(player)
-    db.commit()
-    db.refresh(player)
+    db.flush()
+    if commit:
+        db.commit()
+        db.refresh(player)
     return token
 
 

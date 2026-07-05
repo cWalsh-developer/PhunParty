@@ -15,6 +15,9 @@ from app.database.dbCRUD import (
     verify_player_email_code,
     verify_player_email_token,
 )
+from app.database.email_verification_migrations import (
+    ensure_email_verification_columns,
+)
 from app.database.refresh_token_crud import create_refresh_session
 from app.dependencies import get_current_player, get_db, require_admin_api_key
 from app.models.players import (
@@ -74,15 +77,17 @@ def verification_login_response(
     }
 
 
-def send_player_email_verification_link(player: Players, db: Session) -> None:
-    verification_token = issue_email_verification_token(db, player)
+def send_player_email_verification_link(
+    player: Players, verification_token: str
+) -> bool:
     try:
-        send_email_verification_link(player.player_email, verification_token)
+        return send_email_verification_link(player.player_email, verification_token)
     except Exception:
         logger.exception(
             "Failed to send email verification link to %s",
             player.player_email,
         )
+        return False
 
 
 @router.post("/create", response_model=PlayerResponse, tags=["Players"])
@@ -107,10 +112,16 @@ async def create_player_route(
     )
 
     try:
+        ensure_email_verification_columns()
         existing_player = get_player_by_email(db, player.player_email)
         if existing_player:
             if not existing_player.email_verified:
-                send_player_email_verification_link(existing_player, db)
+                verification_token = issue_email_verification_token(
+                    db, existing_player
+                )
+                send_player_email_verification_link(
+                    existing_player, verification_token
+                )
                 return existing_player
             raise HTTPException(
                 status_code=400, detail="Account with this email already exists"
@@ -121,8 +132,14 @@ async def create_player_route(
             player.player_email,
             player.player_mobile,
             player.hashed_password,
+            commit=False,
         )
-        send_player_email_verification_link(new_player, db)
+        verification_token = issue_email_verification_token(
+            db, new_player, commit=False
+        )
+        db.commit()
+        db.refresh(new_player)
+        send_player_email_verification_link(new_player, verification_token)
         return new_player
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -135,6 +152,8 @@ async def create_player_route(
     except HTTPException:
         raise
     except Exception:
+        db.rollback()
+        logger.exception("Failed to create account for %s", player.player_email)
         raise HTTPException(status_code=500, detail="Failed to create account")
 
 
@@ -213,6 +232,7 @@ async def resend_email_verification_route(
         window_seconds=900,
     )
 
+    ensure_email_verification_columns()
     player = get_player_by_email(db, payload.player_email)
     if not player:
         return {"message": "If that account exists, a verification code was sent"}
@@ -220,7 +240,8 @@ async def resend_email_verification_route(
     if player.email_verified:
         return {"message": "Email already verified"}
 
-    send_player_email_verification_link(player, db)
+    verification_token = issue_email_verification_token(db, player)
+    send_player_email_verification_link(player, verification_token)
 
     return {"message": "Verification link sent"}
 
