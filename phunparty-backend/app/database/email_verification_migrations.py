@@ -13,6 +13,9 @@ def ensure_email_verification_columns() -> None:
             text("ALTER TABLE players ADD COLUMN IF NOT EXISTS email_verified BOOLEAN")
         )
         connection.execute(
+            text("ALTER TABLE players ALTER COLUMN email_verified SET DEFAULT TRUE")
+        )
+        connection.execute(
             text(
                 """
                 UPDATE players
@@ -21,6 +24,21 @@ def ensure_email_verification_columns() -> None:
                 """
             )
         )
+        remaining_nulls = connection.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM players
+                WHERE email_verified IS NULL
+                """
+            )
+        ).scalar_one()
+
+        if remaining_nulls:
+            raise RuntimeError(
+                f"Unable to backfill players.email_verified; {remaining_nulls} rows still contain NULL"
+            )
+
         connection.execute(
             text("ALTER TABLE players ALTER COLUMN email_verified SET DEFAULT FALSE")
         )

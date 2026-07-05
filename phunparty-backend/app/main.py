@@ -155,7 +155,6 @@ async def lifespan(app: FastAPI):
                 )
     except Exception:
         logger.exception("Could not prepare database schema")
-        raise
 
     await rate_limiter.connect()
     warn_about_websocket_process_state()
