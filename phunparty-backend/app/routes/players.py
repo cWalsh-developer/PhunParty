@@ -41,7 +41,7 @@ from app.utils.email_verification import (
     send_email_verification_link,
 )
 from app.utils.generateJWT import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -84,14 +84,14 @@ def verification_login_response(
 
 
 def send_player_email_verification_link(
-    player: Players, verification_token: str
+    player_email: str, verification_token: str
 ) -> bool:
     try:
-        return send_email_verification_link(player.player_email, verification_token)
+        return send_email_verification_link(player_email, verification_token)
     except Exception:
         logger.exception(
             "Failed to send email verification link to %s",
-            player.player_email,
+            player_email,
         )
         return False
 
@@ -99,6 +99,7 @@ def send_player_email_verification_link(
 @router.post("/create", response_model=PlayerResponse, tags=["Players"])
 async def create_player_route(
     request: Request,
+    background_tasks: BackgroundTasks,
     player: Player,
     db: Session = Depends(get_db),
 ):
@@ -126,8 +127,10 @@ async def create_player_route(
                 verification_token = issue_email_verification_token(
                     db, existing_player
                 )
-                send_player_email_verification_link(
-                    existing_player, verification_token
+                background_tasks.add_task(
+                    send_player_email_verification_link,
+                    existing_player.player_email,
+                    verification_token,
                 )
                 return existing_player
             raise HTTPException(
@@ -149,7 +152,11 @@ async def create_player_route(
         )
         db.commit()
         db.refresh(new_player)
-        send_player_email_verification_link(new_player, verification_token)
+        background_tasks.add_task(
+            send_player_email_verification_link,
+            new_player.player_email,
+            verification_token,
+        )
         return new_player
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -224,6 +231,7 @@ async def verify_email_token_route(
 @router.post("/resend-verification", tags=["Players"])
 async def resend_email_verification_route(
     request: Request,
+    background_tasks: BackgroundTasks,
     payload: EmailVerificationResendRequest,
     db: Session = Depends(get_db),
 ):
@@ -251,7 +259,11 @@ async def resend_email_verification_route(
         return {"message": "Email already verified"}
 
     verification_token = issue_email_verification_token(db, player)
-    send_player_email_verification_link(player, verification_token)
+    background_tasks.add_task(
+        send_player_email_verification_link,
+        player.player_email,
+        verification_token,
+    )
 
     return {"message": "Verification link sent"}
 
