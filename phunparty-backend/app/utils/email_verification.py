@@ -1,5 +1,4 @@
 import hashlib
-import json
 import logging
 import os
 import secrets
@@ -7,10 +6,9 @@ import smtplib
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
-from urllib import request as urlrequest
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
+import requests
 from app.security.input_validation import normalize_email
 from dotenv import load_dotenv
 
@@ -178,7 +176,7 @@ def _send_with_smtp(
 
 def _send_with_resend(
     to_email: str,
-    from_email: str,
+    from_email: str | None,
     from_name: str,
     subject: str,
     text_body: str,
@@ -188,40 +186,39 @@ def _send_with_resend(
     if not resend_api_key:
         return False
 
-    resend_from = os.getenv("RESEND_FROM") or _from_header(from_email, from_name)
-    payload = json.dumps(
-        {
+    resend_from = os.getenv("RESEND_FROM") or (
+        _from_header(from_email, from_name) if from_email else None
+    )
+    if not resend_from:
+        logger.warning("RESEND_API_KEY is set, but RESEND_FROM is missing")
+        return False
+
+    logger.info("Sending email verification link via Resend to %s", to_email)
+    response = requests.post(
+        "https://api.resend.com/emails",
+        headers={
+            "Authorization": f"Bearer {resend_api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
             "from": resend_from,
             "to": [to_email],
             "subject": subject,
             "text": text_body,
             "html": html_body,
-        }
-    ).encode("utf-8")
-
-    request = urlrequest.Request(
-        "https://api.resend.com/emails",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {resend_api_key}",
-            "Content-Type": "application/json",
         },
-        method="POST",
+        timeout=10,
     )
+    if response.ok:
+        logger.info("Resend accepted email verification link for %s", to_email)
+        return True
 
-    try:
-        with urlrequest.urlopen(request, timeout=10) as response:
-            if 200 <= response.status < 300:
-                return True
-            logger.error("Resend email request failed with status %s", response.status)
-            return False
-    except HTTPError as error:
-        body = error.read(500).decode("utf-8", errors="replace")
-        logger.error("Resend email request failed with status %s: %s", error.code, body)
-        return False
-    except URLError:
-        logger.exception("Resend email request failed before receiving a response")
-        return False
+    logger.error(
+        "Resend email request failed with status %s: %s",
+        response.status_code,
+        response.text[:500],
+    )
+    return False
 
 
 def send_email_verification_link(to_email: str, token: str) -> bool:
@@ -232,8 +229,10 @@ def send_email_verification_link(to_email: str, token: str) -> bool:
         or smtp_username
     )
     from_name = os.getenv("SMTP_FROM_NAME", "PhunParty")
+    has_smtp = bool(os.getenv("SMTP_HOST"))
+    has_resend = bool(os.getenv("RESEND_API_KEY"))
 
-    if not from_email:
+    if not from_email and not os.getenv("RESEND_FROM"):
         logger.warning(
             "Email verification sender is not configured. Verification link for %s is %s",
             to_email,
@@ -243,20 +242,21 @@ def send_email_verification_link(to_email: str, token: str) -> bool:
 
     subject, text_body, html_body = _build_email_verification_content(token)
 
-    try:
-        sent = _send_with_smtp(
-            to_email,
-            from_email,
-            from_name,
-            subject,
-            text_body,
-            html_body,
-        )
-    except Exception:
-        logger.exception("SMTP email verification send failed")
-        sent = False
+    sent = False
+    if has_smtp and from_email:
+        try:
+            sent = _send_with_smtp(
+                to_email,
+                from_email,
+                from_name,
+                subject,
+                text_body,
+                html_body,
+            )
+        except Exception:
+            logger.exception("SMTP email verification send failed")
 
-    if not sent:
+    if not sent and has_resend:
         sent = _send_with_resend(
             to_email,
             from_email,
@@ -268,7 +268,7 @@ def send_email_verification_link(to_email: str, token: str) -> bool:
 
     if not sent:
         logger.warning(
-            "Email verification provider is not configured. Verification link for %s is %s",
+            "No email verification provider sent a message. Verification link for %s is %s",
             to_email,
             build_email_verification_url(token),
         )
