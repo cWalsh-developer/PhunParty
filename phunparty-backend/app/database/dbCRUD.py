@@ -130,6 +130,28 @@ def _is_missing_email_verification_column_error(exc: Exception) -> bool:
     )
 
 
+def _is_postgresql_session(db: Session) -> bool:
+    try:
+        return db.get_bind().dialect.name == "postgresql"
+    except Exception:
+        return False
+
+
+def _set_player_mutation_context(db: Session, player: Players) -> None:
+    if not _is_postgresql_session(db) or not getattr(player, "player_id", None):
+        return
+
+    db.execute(
+        text("SELECT set_config('app.current_player_id', :player_id, false)"),
+        {"player_id": player.player_id},
+    )
+    if getattr(player, "player_email", None):
+        db.execute(
+            text("SELECT set_config('app.login_email', :email, false)"),
+            {"email": player.player_email.strip().lower()},
+        )
+
+
 def create_game(db: Session, rules: str, genre: str) -> Game:
     """Create a new game session in the database."""
     game_code = generate_game_code()
@@ -491,6 +513,9 @@ def create_player(
     hashed_password: str,
     game_code: str = None,
     commit: bool = True,
+    email_verified: bool | None = None,
+    email_verification_code_hash: str | None = None,
+    email_verification_expires_at: datetime | None = None,
 ) -> Players:
     """Create a new player and add them to a game."""
     player_id = generate_player_id()
@@ -505,6 +530,12 @@ def create_player(
         active_game_code=game_code,
         friend_code=generate_unique_friend_code(db),
     )
+    if email_verified is not None:
+        new_player.email_verified = email_verified
+    if email_verification_code_hash is not None:
+        new_player.email_verification_code_hash = email_verification_code_hash
+    if email_verification_expires_at is not None:
+        new_player.email_verification_expires_at = email_verification_expires_at
     db.add(new_player)
     db.flush()
     if commit:
@@ -518,6 +549,7 @@ def issue_email_verification_code(
 ) -> str:
     """Create a fresh email verification code for a newly-created player."""
     code = generate_email_verification_code()
+    _set_player_mutation_context(db, player)
     player.email_verified = False
     player.email_verification_code_hash = hash_email_verification_code(
         player.player_email,
@@ -537,6 +569,7 @@ def issue_email_verification_token(
 ) -> str:
     """Create a fresh one-time email verification token for a player."""
     token = generate_email_verification_token()
+    _set_player_mutation_context(db, player)
     player.email_verified = False
     player.email_verification_code_hash = hash_email_verification_token(token)
     player.email_verification_expires_at = email_verification_expires_at()
@@ -597,6 +630,7 @@ def verify_player_email_token(db: Session, token: str) -> Players | None:
     if not expires_at or expires_at < utc_now():
         return None
 
+    _set_player_mutation_context(db, player)
     player.email_verified = True
     player.email_verification_code_hash = None
     player.email_verification_expires_at = None

@@ -33,7 +33,13 @@ from app.schemas.session_player_assignment_model import SessionAssignment
 from app.security.cache import invalidate_profile_cache, invalidate_social_cache
 from app.security.ownership import assert_same_player
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
-from app.utils.email_verification import send_email_verification_link
+from app.security.rls import set_rls_login_email
+from app.utils.email_verification import (
+    email_verification_expires_at,
+    generate_email_verification_token,
+    hash_email_verification_token,
+    send_email_verification_link,
+)
 from app.utils.generateJWT import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
@@ -113,6 +119,7 @@ async def create_player_route(
 
     try:
         ensure_email_verification_columns()
+        set_rls_login_email(db, player.player_email)
         existing_player = get_player_by_email(db, player.player_email)
         if existing_player:
             if not existing_player.email_verified:
@@ -126,6 +133,7 @@ async def create_player_route(
             raise HTTPException(
                 status_code=400, detail="Account with this email already exists"
             )
+        verification_token = generate_email_verification_token()
         new_player = create_player(
             db,
             player.player_name,
@@ -133,9 +141,11 @@ async def create_player_route(
             player.player_mobile,
             player.hashed_password,
             commit=False,
-        )
-        verification_token = issue_email_verification_token(
-            db, new_player, commit=False
+            email_verified=False,
+            email_verification_code_hash=hash_email_verification_token(
+                verification_token
+            ),
+            email_verification_expires_at=email_verification_expires_at(),
         )
         db.commit()
         db.refresh(new_player)
