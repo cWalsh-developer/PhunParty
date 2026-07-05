@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import os
 import secrets
@@ -6,6 +7,8 @@ import smtplib
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
+from urllib import request as urlrequest
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
 from app.security.input_validation import normalize_email
@@ -70,49 +73,32 @@ def build_app_email_verification_url(token: str) -> str | None:
     return f"{base_url}{separator}{urlencode({'token': token})}"
 
 
-def send_email_verification_link(to_email: str, token: str) -> bool:
-    smtp_host = os.getenv("SMTP_HOST")
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
-    smtp_username = os.getenv("SMTP_USERNAME")
-    smtp_password = os.getenv("SMTP_PASSWORD")
-    smtp_from = os.getenv("SMTP_FROM_EMAIL") or smtp_username
-    smtp_from_name = os.getenv("SMTP_FROM_NAME", "PhunParty")
-    use_tls = os.getenv("SMTP_USE_TLS", "true").strip().lower() != "false"
-
-    if not smtp_host or not smtp_from:
-        logger.warning(
-            "Email verification SMTP is not configured. Verification link for %s is %s",
-            to_email,
-            build_email_verification_url(token),
-        )
-        return False
-
+def _build_email_verification_content(token: str) -> tuple[str, str, str]:
     verification_url = build_email_verification_url(token)
     app_verification_url = build_app_email_verification_url(token)
 
-    message = EmailMessage()
-    message["Subject"] = "Verify your PhunParty email"
-    message["From"] = f"{smtp_from_name} <{smtp_from}>"
-    message["To"] = to_email
-    message.set_content(
-        "\n".join(
-            [
-                "Welcome to PhunParty!",
-                "",
-                "Verify your email by opening this link:",
-                verification_url,
-                "",
-                f"This link expires in {TOKEN_TTL_MINUTES} minutes.",
-                "",
-                *(
-                    ["If you are on your phone, you can also open the app:", app_verification_url, ""]
-                    if app_verification_url
-                    else []
-                ),
-                "",
-                "If you did not create a PhunParty account, you can ignore this email.",
-            ]
-        )
+    subject = "Verify your PhunParty email"
+    text_body = "\n".join(
+        [
+            "Welcome to PhunParty!",
+            "",
+            "Verify your email by opening this link:",
+            verification_url,
+            "",
+            f"This link expires in {TOKEN_TTL_MINUTES} minutes.",
+            "",
+            *(
+                [
+                    "If you are on your phone, you can also open the app:",
+                    app_verification_url,
+                    "",
+                ]
+                if app_verification_url
+                else []
+            ),
+            "",
+            "If you did not create a PhunParty account, you can ignore this email.",
+        ]
     )
     app_link_html = (
         f"""
@@ -123,8 +109,7 @@ def send_email_verification_link(to_email: str, token: str) -> bool:
         if app_verification_url
         else ""
     )
-    message.add_alternative(
-        f"""\
+    html_body = f"""\
 <!doctype html>
 <html>
   <body style="margin:0;padding:0;background:#0f172a;font-family:Arial,sans-serif;color:#f8fafc;">
@@ -149,9 +134,37 @@ def send_email_verification_link(to_email: str, token: str) -> bool:
     </div>
   </body>
 </html>
-""",
-        subtype="html",
-    )
+"""
+    return subject, text_body, html_body
+
+
+def _from_header(from_email: str, from_name: str) -> str:
+    return f"{from_name} <{from_email}>"
+
+
+def _send_with_smtp(
+    to_email: str,
+    from_email: str,
+    from_name: str,
+    subject: str,
+    text_body: str,
+    html_body: str,
+) -> bool:
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_username = os.getenv("SMTP_USERNAME")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    use_tls = os.getenv("SMTP_USE_TLS", "true").strip().lower() != "false"
+
+    if not smtp_host:
+        return False
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = _from_header(from_email, from_name)
+    message["To"] = to_email
+    message.set_content(text_body)
+    message.add_alternative(html_body, subtype="html")
 
     with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as smtp:
         if use_tls:
@@ -159,6 +172,107 @@ def send_email_verification_link(to_email: str, token: str) -> bool:
         if smtp_username and smtp_password:
             smtp.login(smtp_username, smtp_password)
         smtp.send_message(message)
+
+    return True
+
+
+def _send_with_resend(
+    to_email: str,
+    from_email: str,
+    from_name: str,
+    subject: str,
+    text_body: str,
+    html_body: str,
+) -> bool:
+    resend_api_key = os.getenv("RESEND_API_KEY")
+    if not resend_api_key:
+        return False
+
+    resend_from = os.getenv("RESEND_FROM") or _from_header(from_email, from_name)
+    payload = json.dumps(
+        {
+            "from": resend_from,
+            "to": [to_email],
+            "subject": subject,
+            "text": text_body,
+            "html": html_body,
+        }
+    ).encode("utf-8")
+
+    request = urlrequest.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {resend_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlrequest.urlopen(request, timeout=10) as response:
+            if 200 <= response.status < 300:
+                return True
+            logger.error("Resend email request failed with status %s", response.status)
+            return False
+    except HTTPError as error:
+        body = error.read(500).decode("utf-8", errors="replace")
+        logger.error("Resend email request failed with status %s: %s", error.code, body)
+        return False
+    except URLError:
+        logger.exception("Resend email request failed before receiving a response")
+        return False
+
+
+def send_email_verification_link(to_email: str, token: str) -> bool:
+    smtp_username = os.getenv("SMTP_USERNAME")
+    from_email = (
+        os.getenv("SMTP_FROM_EMAIL")
+        or os.getenv("RESEND_FROM_EMAIL")
+        or smtp_username
+    )
+    from_name = os.getenv("SMTP_FROM_NAME", "PhunParty")
+
+    if not from_email:
+        logger.warning(
+            "Email verification sender is not configured. Verification link for %s is %s",
+            to_email,
+            build_email_verification_url(token),
+        )
+        return False
+
+    subject, text_body, html_body = _build_email_verification_content(token)
+
+    try:
+        sent = _send_with_smtp(
+            to_email,
+            from_email,
+            from_name,
+            subject,
+            text_body,
+            html_body,
+        )
+    except Exception:
+        logger.exception("SMTP email verification send failed")
+        sent = False
+
+    if not sent:
+        sent = _send_with_resend(
+            to_email,
+            from_email,
+            from_name,
+            subject,
+            text_body,
+            html_body,
+        )
+
+    if not sent:
+        logger.warning(
+            "Email verification provider is not configured. Verification link for %s is %s",
+            to_email,
+            build_email_verification_url(token),
+        )
+        return False
 
     logger.info("Email verification link sent to %s", to_email)
     return True
