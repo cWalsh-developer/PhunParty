@@ -10,14 +10,17 @@ from app.database.dbCRUD import (
     get_game_history_for_player,
     get_player_by_email,
     get_player_by_ID,
-    issue_email_verification_code,
+    issue_email_verification_token,
     update_player,
     verify_player_email_code,
+    verify_player_email_token,
 )
+from app.database.refresh_token_crud import create_refresh_session
 from app.dependencies import get_current_player, get_db, require_admin_api_key
 from app.models.players import (
     EmailVerificationRequest,
     EmailVerificationResendRequest,
+    EmailVerificationTokenRequest,
     Player,
     PlayerUpdate,
 )
@@ -27,7 +30,8 @@ from app.schemas.session_player_assignment_model import SessionAssignment
 from app.security.cache import invalidate_profile_cache, invalidate_social_cache
 from app.security.ownership import assert_same_player
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
-from app.utils.email_verification import send_email_verification_code
+from app.utils.email_verification import send_email_verification_link
+from app.utils.generateJWT import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -40,13 +44,43 @@ def utc_now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
-def send_player_email_verification_code(player: Players, db: Session) -> None:
-    verification_code = issue_email_verification_code(db, player)
+def verification_login_response(
+    player: Players,
+    request: Request,
+    db: Session,
+) -> dict:
+    access_token = create_access_token(data={"sub": player.player_id})
+    refresh_token, _refresh_record = create_refresh_session(
+        db,
+        player.player_id,
+        user_agent=request.headers.get("user-agent"),
+        ip_address=get_client_ip(request),
+    )
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "player_id": player.player_id,
+        "player_name": player.player_name,
+        "user": {
+            "player_id": player.player_id,
+            "player_name": player.player_name,
+            "player_email": player.player_email,
+            "player_mobile": player.player_mobile,
+            "active_game_code": player.active_game_code,
+            "email_verified": player.email_verified,
+        },
+    }
+
+
+def send_player_email_verification_link(player: Players, db: Session) -> None:
+    verification_token = issue_email_verification_token(db, player)
     try:
-        send_email_verification_code(player.player_email, verification_code)
+        send_email_verification_link(player.player_email, verification_token)
     except Exception:
         logger.exception(
-            "Failed to send email verification code to %s",
+            "Failed to send email verification link to %s",
             player.player_email,
         )
 
@@ -76,7 +110,7 @@ async def create_player_route(
         existing_player = get_player_by_email(db, player.player_email)
         if existing_player:
             if not existing_player.email_verified:
-                send_player_email_verification_code(existing_player, db)
+                send_player_email_verification_link(existing_player, db)
                 return existing_player
             raise HTTPException(
                 status_code=400, detail="Account with this email already exists"
@@ -88,7 +122,7 @@ async def create_player_route(
             player.player_mobile,
             player.hashed_password,
         )
-        send_player_email_verification_code(new_player, db)
+        send_player_email_verification_link(new_player, db)
         return new_player
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -134,6 +168,30 @@ async def verify_email_route(
     return {"message": "Email verified"}
 
 
+@router.post("/verify-email-token", tags=["Players"])
+async def verify_email_token_route(
+    request: Request,
+    payload: EmailVerificationTokenRequest,
+    db: Session = Depends(get_db),
+):
+    await enforce_rate_limit(
+        request,
+        scope="email-token-verify-ip",
+        identifier=get_client_ip(request),
+        limit=12,
+        window_seconds=900,
+    )
+
+    player = verify_player_email_token(db, payload.token)
+    if not player:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired verification link",
+        )
+
+    return verification_login_response(player, request, db)
+
+
 @router.post("/resend-verification", tags=["Players"])
 async def resend_email_verification_route(
     request: Request,
@@ -162,9 +220,9 @@ async def resend_email_verification_route(
     if player.email_verified:
         return {"message": "Email already verified"}
 
-    send_player_email_verification_code(player, db)
+    send_player_email_verification_link(player, db)
 
-    return {"message": "Verification code sent"}
+    return {"message": "Verification link sent"}
 
 
 @router.get("/me", response_model=PlayerResponse, tags=["Players"])

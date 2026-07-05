@@ -31,7 +31,9 @@ from app.utils.hash_password import hash_password
 from app.utils.email_verification import (
     email_verification_expires_at,
     generate_email_verification_code,
+    generate_email_verification_token,
     hash_email_verification_code,
+    hash_email_verification_token,
 )
 from app.utils.id_generator import (
     generate_assignment_id,
@@ -523,6 +525,18 @@ def issue_email_verification_code(db: Session, player: Players) -> str:
     return code
 
 
+def issue_email_verification_token(db: Session, player: Players) -> str:
+    """Create a fresh one-time email verification token for a player."""
+    token = generate_email_verification_token()
+    player.email_verified = False
+    player.email_verification_code_hash = hash_email_verification_token(token)
+    player.email_verification_expires_at = email_verification_expires_at()
+    db.add(player)
+    db.commit()
+    db.refresh(player)
+    return token
+
+
 def verify_player_email_code(db: Session, player_email: str, code: str) -> bool:
     """Validate a player's email verification code and mark the email verified."""
     player = get_player_by_email(db, player_email)
@@ -554,6 +568,31 @@ def verify_player_email_code(db: Session, player_email: str, code: str) -> bool:
     db.commit()
     db.refresh(player)
     return True
+
+
+def verify_player_email_token(db: Session, token: str) -> Players | None:
+    """Validate a one-time email verification token and return the verified player."""
+    token_hash = hash_email_verification_token(token)
+    player = (
+        db.query(Players)
+        .filter(Players.email_verification_code_hash == token_hash)
+        .filter(Players.is_deleted == False)
+        .first()
+    )
+    if not player:
+        return None
+
+    expires_at = player.email_verification_expires_at
+    if not expires_at or expires_at < utc_now():
+        return None
+
+    player.email_verified = True
+    player.email_verification_code_hash = None
+    player.email_verification_expires_at = None
+    db.add(player)
+    db.commit()
+    db.refresh(player)
+    return player
 
 
 def update_player_game_code(db: Session, player_id: str, game_code: str) -> Players:

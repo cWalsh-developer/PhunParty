@@ -92,3 +92,15 @@ class EmailVerificationResendRequest(BaseModel):
     @classmethod
     def validate_email(cls, value: str) -> str:
         return normalize_email(value)
+
+
+class EmailVerificationTokenRequest(BaseModel):
+    token: str = Field(..., min_length=32, max_length=256)
+
+    @field_validator("token")
+    @classmethod
+    def validate_token(cls, value: str) -> str:
+        token = (value or "").strip()
+        if not token:
+            raise ValueError("Verification token is required")
+        return token
