@@ -45,6 +45,11 @@ from app.schemas.social_models import (
     PlayerPresence,
     UserPushToken,
 )
+from app.security.request_guard import (
+    enforce_endpoint_pattern_limits,
+    read_and_validate_json_body,
+    validate_path_and_query,
+)
 from app.security.rate_limit import enforce_rate_limit, get_client_ip, rate_limiter
 from app.websockets import routes as websocket_routes
 from fastapi import FastAPI, Request
@@ -182,6 +187,23 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
+
+
+@app.middleware("http")
+async def request_validation_guard(request: Request, call_next):
+    path_or_query_error = validate_path_and_query(request)
+    if path_or_query_error:
+        return path_or_query_error
+
+    body_error = await read_and_validate_json_body(request)
+    if body_error:
+        return body_error
+
+    rate_error = await enforce_endpoint_pattern_limits(request)
+    if rate_error:
+        return rate_error
+
+    return await call_next(request)
 
 
 @app.middleware("http")

@@ -1,7 +1,8 @@
 from typing import List, Optional
 
 from app.models.enums import DifficultyLevel, HistoryResultType, ResultType
-from pydantic import BaseModel, ConfigDict
+from app.security.input_validation import SanitizedRequestModel
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
 
 class GameResponse(BaseModel):
@@ -35,12 +36,23 @@ class ScoresResponseModel(BaseModel):
     session_code: str
 
 
-class QuestionRequest(BaseModel):
+class QuestionRequest(SanitizedRequestModel):
+    model_config = ConfigDict(extra="ignore", strict=False, str_strip_whitespace=True)
+
     difficulty: DifficultyLevel
-    question: str
-    answer: str
-    genre: str
-    question_options: Optional[List[str]] = []
+    question: StrictStr
+    answer: StrictStr
+    genre: StrictStr
+    question_options: Optional[List[StrictStr]] = Field(default_factory=list)
+
+    @field_validator("difficulty", mode="before")
+    @classmethod
+    def validate_difficulty(cls, value):
+        if isinstance(value, DifficultyLevel):
+            return value
+        if isinstance(value, str):
+            return DifficultyLevel(value.lower())
+        raise ValueError("difficulty must be easy, medium, or hard")
 
 
 class QuestionsAddedResponseModel(BaseModel):
@@ -54,9 +66,7 @@ class QuestionsAddedResponseModel(BaseModel):
         from_attributes = True
 
 
-class SubmitAnswerRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
+class SubmitAnswerRequest(SanitizedRequestModel):
     session_code: str
     question_id: str
     player_answer: str

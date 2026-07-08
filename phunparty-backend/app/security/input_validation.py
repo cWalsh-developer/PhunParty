@@ -1,18 +1,65 @@
 import re
-from typing import Optional
+from html import unescape
+from typing import Any, Optional
 
 from app.utils.phone_numbers import normalize_phone_number
+from pydantic import BaseModel, ConfigDict, field_validator
 
 CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
 CODE_RE = re.compile(r"^[A-Z0-9]{6,12}$")
 AVATAR_SEED_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+SCRIPT_TAG_RE = re.compile(r"<\s*script\b[^>]*>.*?<\s*/\s*script\s*>", re.I | re.S)
+SCRIPT_OPEN_CLOSE_RE = re.compile(r"<\s*/?\s*script\b[^>]*>", re.I)
+EVENT_HANDLER_RE = re.compile(r"\s+on[a-z]+\s*=\s*(['\"]).*?\1", re.I | re.S)
+JS_PROTOCOL_RE = re.compile(r"javascript\s*:", re.I)
 
 
 def reject_control_chars(value: str, field_name: str) -> str:
     if CONTROL_CHARS.search(value):
         raise ValueError(f"{field_name} cannot contain control characters")
     return value
+
+
+def sanitize_string(value: str) -> str:
+    """Normalize dangerous string input before route handlers see it."""
+    value = unescape(value).strip()
+    value = CONTROL_CHARS.sub("", value)
+    value = SCRIPT_TAG_RE.sub("", value)
+    value = SCRIPT_OPEN_CLOSE_RE.sub("", value)
+    value = EVENT_HANDLER_RE.sub("", value)
+    value = JS_PROTOCOL_RE.sub("", value)
+    return value
+
+
+def sanitize_input(value: Any) -> Any:
+    if isinstance(value, str):
+        return sanitize_string(value)
+    if isinstance(value, list):
+        return [sanitize_input(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(sanitize_input(item) for item in value)
+    if isinstance(value, dict):
+        return {
+            sanitize_string(str(key)): sanitize_input(item)
+            for key, item in value.items()
+        }
+    return value
+
+
+class SanitizedRequestModel(BaseModel):
+    """Strict request model: reject wrong types, ignore extras, sanitize strings."""
+
+    model_config = ConfigDict(
+        extra="ignore",
+        strict=True,
+        str_strip_whitespace=True,
+    )
+
+    @field_validator("*", mode="before", check_fields=False)
+    @classmethod
+    def sanitize_all_fields(cls, value: Any) -> Any:
+        return sanitize_input(value)
 
 
 def validate_display_text(

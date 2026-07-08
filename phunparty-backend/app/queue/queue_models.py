@@ -1,19 +1,24 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from app.security.input_validation import SanitizedRequestModel, normalize_session_code
+from pydantic import BaseModel, Field, field_validator
 
 
-class JoinQueueRequest(BaseModel):
+class JoinQueueRequest(SanitizedRequestModel):
     """Request model for joining a session via queue"""
 
-    player_id: str = Field(..., description="ID of the player trying to join")
     session_code: str = Field(
         ..., description="Code of the session to join", min_length=4, max_length=10
     )
     websocket_id: Optional[str] = Field(
         None, description="Optional WebSocket connection ID for real-time updates"
     )
+
+    @field_validator("session_code")
+    @classmethod
+    def validate_session_code(cls, value: str) -> str:
+        return normalize_session_code(value)
 
 
 class JoinQueueResponse(BaseModel):

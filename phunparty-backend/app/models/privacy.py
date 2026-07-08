@@ -1,11 +1,12 @@
 from typing import Literal, Optional
 
+from app.security.input_validation import SanitizedRequestModel
 from pydantic import BaseModel
 
 ProfileVisibility = Literal["public", "friends", "private"]
 
 
-class PrivacySettingsUpdate(BaseModel):
+class PrivacySettingsUpdate(SanitizedRequestModel):
     profile_visibility: Optional[ProfileVisibility] = None
     show_online_status: Optional[bool] = None
     allow_friend_requests: Optional[bool] = None

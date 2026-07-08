@@ -1,5 +1,6 @@
 import glob
 import os
+import re
 from urllib.parse import quote
 import uuid
 from io import BytesIO
@@ -12,19 +13,42 @@ from app.security.cache import cache, invalidate_profile_cache
 from app.security.input_validation import validate_avatar_seed
 from app.security.ownership import assert_same_player
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image, ImageOps
 from sqlalchemy.orm import Session
 
 # Create photos directory if it doesn't exist
-UPLOAD_DIR = Path("uploads/photos")
+UPLOAD_DIR = Path("uploads/photos").resolve()
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Allowed image formats
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
+IMAGE_FORMAT_EXTENSIONS = {
+    "JPEG": {".jpg", ".jpeg"},
+    "PNG": {".png"},
+    "WEBP": {".webp"},
+}
+IMAGE_FORMAT_CANONICAL_EXTENSION = {
+    "JPEG": ".jpg",
+    "PNG": ".png",
+    "WEBP": ".webp",
+}
+PHOTO_MEDIA_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+PHOTO_FILENAME_PATTERN = re.compile(
+    r"^[A-Za-z0-9_-]+_[0-9a-fA-F]{8}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.(jpg|jpeg|png|webp)$"
+)
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+MAX_IMAGE_PIXELS = 25_000_000
+MAX_IMAGE_DIMENSION = 8192
+
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 # DiceBear avatar styles for generated avatars
 DICEBEAR_STYLES = [
@@ -40,6 +64,82 @@ DICEBEAR_STYLES = [
 router = APIRouter()
 
 
+def uploaded_filename_suffix(filename: str) -> str:
+    if not filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    original_name = filename.replace("\\", "/").split("/")[-1].strip()
+    if not original_name or original_name in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    suffix = Path(original_name).suffix.lower()
+    allowed_extensions = {
+        extension
+        for extensions in IMAGE_FORMAT_EXTENSIONS.values()
+        for extension in extensions
+    }
+    if suffix not in allowed_extensions:
+        raise HTTPException(status_code=400, detail="Invalid image extension")
+
+    return suffix
+
+
+def assert_image_dimensions(width: int, height: int) -> None:
+    if width <= 0 or height <= 0:
+        raise HTTPException(status_code=400, detail="Invalid image dimensions")
+
+    if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION:
+        raise HTTPException(status_code=400, detail="Image dimensions are too large")
+
+    if width * height > MAX_IMAGE_PIXELS:
+        raise HTTPException(status_code=400, detail="Image pixel count is too large")
+
+
+def safe_upload_child_path(filename: str) -> Path:
+    safe_name = Path(filename).name
+    if safe_name != filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    file_path = (UPLOAD_DIR / safe_name).resolve()
+    try:
+        file_path.relative_to(UPLOAD_DIR)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    return file_path
+
+
+def safe_generated_photo_path(filename: str) -> Path:
+    if not PHOTO_FILENAME_PATTERN.fullmatch(filename):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    return safe_upload_child_path(filename)
+
+
+def delete_photo_file(file_path: Path) -> bool:
+    resolved_path = file_path.resolve()
+    try:
+        resolved_path.relative_to(UPLOAD_DIR)
+    except ValueError:
+        return False
+
+    if resolved_path.is_file():
+        resolved_path.unlink()
+        return True
+
+    return False
+
+
+def create_unique_photo_path(player_id: str, extension: str) -> tuple[str, Path]:
+    for _ in range(5):
+        filename = f"{player_id}_{uuid.uuid4()}{extension}"
+        file_path = safe_generated_photo_path(filename)
+        if not file_path.exists():
+            return filename, file_path
+
+    raise HTTPException(status_code=500, detail="Could not allocate photo filename")
+
+
 def cleanup_old_player_photos(player_id: str, upload_dir: Path = UPLOAD_DIR):
     """
     Delete all existing uploaded photos for a specific player before uploading a new one.
@@ -53,7 +153,8 @@ def cleanup_old_player_photos(player_id: str, upload_dir: Path = UPLOAD_DIR):
         deleted_count = 0
         for photo_path in player_photos:
             try:
-                os.remove(photo_path)
+                if not delete_photo_file(Path(photo_path)):
+                    continue
                 deleted_count += 1
                 print(f"🗑️ Deleted old photo: {os.path.basename(photo_path)}")
             except OSError as e:
@@ -93,7 +194,8 @@ def cleanup_old_player_photos_safe(
                 continue
 
             try:
-                os.remove(photo_path)
+                if not delete_photo_file(Path(photo_path)):
+                    continue
                 deleted_count += 1
                 print(f"🗑️ Deleted old photo: {photo_filename}")
             except OSError as e:
@@ -109,49 +211,59 @@ def cleanup_old_player_photos_safe(
 
 
 def validate_uploaded_image(filename: str, content: bytes) -> str:
-    if not filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-
-    suffix = Path(filename).suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Invalid image extension")
-
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="File too large. Max size: 5MB")
 
+    suffix = uploaded_filename_suffix(filename)
+
     try:
-        image = Image.open(BytesIO(content))
-        image.verify()
+        with Image.open(BytesIO(content)) as image:
+            image_format = image.format
+            if image_format not in IMAGE_FORMAT_EXTENSIONS:
+                raise HTTPException(status_code=400, detail="Unsupported image format")
+
+            if suffix not in IMAGE_FORMAT_EXTENSIONS[image_format]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Image extension does not match image content",
+                )
+
+            assert_image_dimensions(*image.size)
+            image.verify()
+    except Image.DecompressionBombError:
+        raise HTTPException(status_code=400, detail="Image is too large to process")
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(
             status_code=400, detail="Uploaded file is not a valid image"
         )
 
-    image = Image.open(BytesIO(content))
-    if image.format not in ALLOWED_IMAGE_FORMATS:
-        raise HTTPException(status_code=400, detail="Unsupported image format")
-
-    return suffix
+    return IMAGE_FORMAT_CANONICAL_EXTENSION[image_format]
 
 
 def strip_image_metadata(content: bytes, suffix: str) -> bytes:
     try:
-        image = Image.open(BytesIO(content))
-        image = ImageOps.exif_transpose(image)
+        with Image.open(BytesIO(content)) as image:
+            image = ImageOps.exif_transpose(image)
+            assert_image_dimensions(image.width, image.height)
+            image.load()
 
-        output = BytesIO()
-        if suffix in {".jpg", ".jpeg"}:
-            if image.mode not in {"RGB", "L"}:
-                image = image.convert("RGB")
-            image.save(output, format="JPEG", quality=90, optimize=True)
-        elif suffix == ".png":
-            image.save(output, format="PNG", optimize=True)
-        elif suffix == ".webp":
-            image.save(output, format="WEBP", quality=90, method=6)
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported image format")
+            output = BytesIO()
+            if suffix == ".jpg":
+                if image.mode not in {"RGB", "L"}:
+                    image = image.convert("RGB")
+                image.save(output, format="JPEG", quality=90, optimize=True)
+            elif suffix == ".png":
+                image.save(output, format="PNG", optimize=True)
+            elif suffix == ".webp":
+                image.save(output, format="WEBP", quality=90, method=6)
+            else:
+                raise HTTPException(status_code=400, detail="Unsupported image format")
 
         return output.getvalue()
+    except Image.DecompressionBombError:
+        raise HTTPException(status_code=400, detail="Image is too large to process")
     except HTTPException:
         raise
     except Exception:
@@ -159,18 +271,7 @@ def strip_image_metadata(content: bytes, suffix: str) -> bytes:
 
 
 def safe_photo_path(filename: str) -> Path:
-    safe_name = Path(filename).name
-    if safe_name != filename:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-
-    file_path = UPLOAD_DIR / safe_name
-    resolved_upload_dir = UPLOAD_DIR.resolve()
-    resolved_file_path = file_path.resolve()
-
-    if not str(resolved_file_path).startswith(str(resolved_upload_dir)):
-        raise HTTPException(status_code=400, detail="Invalid filename")
-
-    return file_path
+    return safe_generated_photo_path(filename)
 
 
 @router.post("/upload/{player_id}", tags=["Photos"])
@@ -205,12 +306,12 @@ async def upload_player_photo(
 
         cleanup_old_player_photos(player_id, UPLOAD_DIR)
 
-        # Generate unique filename
-        unique_filename = f"{player_id}_{uuid.uuid4()}{file_extension}"
-        file_path = UPLOAD_DIR / unique_filename
+        # Generate a server-controlled filename. The browser-provided filename
+        # is never used for the saved path.
+        unique_filename, file_path = create_unique_photo_path(player_id, file_extension)
 
         # Save file
-        with open(file_path, "wb") as buffer:
+        with open(file_path, "xb") as buffer:
             buffer.write(sanitized_content)
 
         # Update player record with photo URL
@@ -276,8 +377,8 @@ async def delete_player_photo(
 async def set_player_avatar(
     player_id: str,
     request: Request,
-    avatar_style: str,
-    avatar_seed: str = "default",
+    avatar_style: str = Query(..., min_length=1, max_length=32),
+    avatar_seed: str = Query("default", min_length=1, max_length=64),
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
@@ -401,8 +502,8 @@ async def get_avatar_styles():
 async def generate_avatar_preview(
     style: str,
     request: Request,
-    seed: str = "preview",
-    size: int = 128,
+    seed: str = Query("preview", min_length=1, max_length=64),
+    size: int = Query(128, ge=16, le=512),
 ):
     """
     Generate a preview of an avatar with specific style and seed.
@@ -420,10 +521,6 @@ async def generate_avatar_preview(
                 status_code=400,
                 detail=f"Invalid avatar style. Available: {', '.join(DICEBEAR_STYLES)}",
             )
-
-        # Validate size (DiceBear supports sizes up to 512)
-        if size < 16 or size > 512:
-            size = 128
 
         seed = validate_avatar_seed(seed)
         encoded_seed = quote(seed, safe="")
@@ -451,7 +548,7 @@ async def get_photo(filename: str):
 
         return FileResponse(
             path=file_path,
-            media_type="image/*",
+            media_type=PHOTO_MEDIA_TYPES.get(file_path.suffix.lower(), "image/jpeg"),
             headers={"Cache-Control": "public, max-age=86400, immutable"},
         )
     except HTTPException:
@@ -490,7 +587,8 @@ async def cleanup_orphaned_photos(
         deleted_count = 0
         for orphaned_file in orphaned_files:
             try:
-                os.remove(orphaned_file)
+                if not delete_photo_file(Path(orphaned_file)):
+                    continue
                 deleted_count += 1
                 print(f"🗑️ Deleted orphaned photo: {os.path.basename(orphaned_file)}")
             except OSError as e:

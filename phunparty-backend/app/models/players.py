@@ -1,15 +1,16 @@
 from typing import Optional
 
 from app.security.input_validation import (
+    SanitizedRequestModel,
     normalize_email,
     normalize_mobile,
     validate_password,
     validate_player_name,
 )
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, field_validator
 
 
-class Player(BaseModel):
+class Player(SanitizedRequestModel):
     game_code: Optional[str] = None
     player_name: str
     player_email: str
@@ -38,7 +39,7 @@ class Player(BaseModel):
         return validate_password(value)
 
 
-class PlayerUpdate(BaseModel):
+class PlayerUpdate(SanitizedRequestModel):
     game_code: Optional[str] = None
     player_name: Optional[str] = None
     player_email: Optional[str] = None
@@ -67,7 +68,7 @@ class PlayerUpdate(BaseModel):
         return validate_password(value) if value is not None else None
 
 
-class EmailVerificationRequest(BaseModel):
+class EmailVerificationRequest(SanitizedRequestModel):
     player_email: str
     code: str = Field(..., min_length=6, max_length=6)
 
@@ -85,7 +86,7 @@ class EmailVerificationRequest(BaseModel):
         return code
 
 
-class EmailVerificationResendRequest(BaseModel):
+class EmailVerificationResendRequest(SanitizedRequestModel):
     player_email: str
 
     @field_validator("player_email")
@@ -94,7 +95,7 @@ class EmailVerificationResendRequest(BaseModel):
         return normalize_email(value)
 
 
-class EmailVerificationTokenRequest(BaseModel):
+class EmailVerificationTokenRequest(SanitizedRequestModel):
     token: str = Field(..., min_length=32, max_length=256)
 
     @field_validator("token")

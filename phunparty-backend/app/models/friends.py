@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Optional
 
 from app.security.input_validation import (
+    SanitizedRequestModel,
     normalize_friend_code,
     validate_friend_request_message,
 )
@@ -15,7 +16,7 @@ class FriendCodeResponse(BaseModel):
     friend_request_notifications_enabled: bool
 
 
-class FriendSearchRequest(BaseModel):
+class FriendSearchRequest(SanitizedRequestModel):
     friend_code: str = Field(..., min_length=3, max_length=20)
 
     @field_validator("friend_code")
@@ -24,7 +25,7 @@ class FriendSearchRequest(BaseModel):
         return normalize_friend_code(value)
 
 
-class FriendRequestCreate(BaseModel):
+class FriendRequestCreate(SanitizedRequestModel):
     friend_code: str = Field(..., min_length=3, max_length=20)
     message: Optional[str] = Field(default=None, max_length=240)
 

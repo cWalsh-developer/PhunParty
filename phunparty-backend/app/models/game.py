@@ -1,17 +1,19 @@
 from typing import Optional
 
-from app.security.input_validation import normalize_session_code, validate_player_name
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from app.security.input_validation import (
+    SanitizedRequestModel,
+    normalize_session_code,
+    validate_player_name,
+)
+from pydantic import Field, field_validator
 
 
-class GameCreation(BaseModel):
+class GameCreation(SanitizedRequestModel):
     genre: str
     rules: str
 
 
-class GameSessionCreation(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
+class GameSessionCreation(SanitizedRequestModel):
     host_name: str = Field(..., max_length=40)
     # Beat the Clock uses a large question pool sentinel from the website.
     number_of_questions: int = Field(..., ge=1, le=1000)
@@ -28,9 +30,7 @@ class GameSessionCreation(BaseModel):
         return validate_player_name(value)
 
 
-class GameJoinRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
+class GameJoinRequest(SanitizedRequestModel):
     session_code: str
 
     @field_validator("session_code")
