@@ -7,7 +7,11 @@ from app.logic.game_logic import (
 )
 from app.models.response_models import GameStatusResponse, SubmitAnswerRequest
 from app.schemas.players_model import Players
-from app.security.ownership import assert_session_member_or_owner, assert_session_owner
+from app.security.ownership import (
+    assert_session_member_or_owner,
+    assert_session_owner,
+    is_session_owner,
+)
 from app.security.game_phase import (
     assert_question_accepting_answers,
     should_expose_current_question,
@@ -85,8 +89,10 @@ def get_session_status(
             if isinstance(current_question, dict)
             else None
         )
-        if current_question and not should_expose_current_question(
-            session_code, question_id
+        if (
+            current_question
+            and not is_session_owner(db, current_player, session_code)
+            and not should_expose_current_question(session_code, question_id)
         ):
             status["current_question"] = None
         return status
@@ -109,8 +115,12 @@ def get_current_question(
         assert_session_member_or_owner(db, current_player, session_code)
         result = get_current_question_for_session(db, session_code)
         result = strip_answer_fields(result)
-        if result.get("question_id") and not should_expose_current_question(
-            session_code, result.get("question_id")
+        if (
+            result.get("question_id")
+            and not is_session_owner(db, current_player, session_code)
+            and not should_expose_current_question(
+                session_code, result.get("question_id")
+            )
         ):
             raise HTTPException(status_code=409, detail="Question is not active yet")
         return result
