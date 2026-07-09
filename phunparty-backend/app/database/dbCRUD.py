@@ -1262,6 +1262,19 @@ def get_game_session_state(db: Session, session_code: str) -> GameSessionState:
     )
 
 
+def lock_game_session_state_for_update(
+    db: Session, session_code: str
+) -> GameSessionState:
+    """Get and lock active game state for serialized progression decisions."""
+    return (
+        db.query(GameSessionState)
+        .filter(GameSessionState.session_code == session_code)
+        .filter(GameSessionState.is_active == True)
+        .with_for_update()
+        .first()
+    )
+
+
 def get_session_details(db: Session, session_code: str) -> dict:
     """
     Get comprehensive session information including session code, genre,

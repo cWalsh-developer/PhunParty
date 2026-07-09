@@ -43,7 +43,9 @@ sys.modules.setdefault("passlib", passlib_module)
 sys.modules.setdefault("passlib.context", passlib_context_module)
 
 from app.database import dbCRUD
+from app.database import performance_migrations
 from app.logic import answer_validation, game_logic
+from app.routes import players as player_routes
 from app.schemas.game_state_models import GameSessionState
 from app.security import game_phase
 from app.websockets import game_handlers, game_lifecycle, game_modes, routes, scheduler
@@ -376,19 +378,26 @@ def test_check_and_advance_game_counts_fair_play_resolved_players():
                     return_value=1,
                 ):
                     with patch.object(
-                        game_logic, "get_game_session_state", return_value=game_state
+                        game_logic,
+                        "lock_game_session_state_for_update",
+                        return_value=game_state,
                     ):
                         with patch.object(
-                            game_logic, "update_game_state_waiting_status"
+                            game_logic,
+                            "get_game_session_state",
+                            return_value=game_state,
                         ):
                             with patch.object(
-                                game_logic,
-                                "advance_to_next_question",
-                                return_value={"action": "next_question"},
+                                game_logic, "update_game_state_waiting_status"
                             ):
-                                result = game_logic.check_and_advance_game(
-                                    MagicMock(), "SESSION123", "Q1"
-                                )
+                                with patch.object(
+                                    game_logic,
+                                    "advance_to_next_question",
+                                    return_value={"action": "next_question"},
+                                ):
+                                    result = game_logic.check_and_advance_game(
+                                        MagicMock(), "SESSION123", "Q1"
+                                    )
 
     assert result["players_answered"] == 2
     assert result["submitted_answers"] == 1
@@ -416,7 +425,9 @@ def test_check_and_advance_game_ignores_kicked_players_denominator():
                     return_value=0,
                 ):
                     with patch.object(
-                        game_logic, "get_game_session_state", return_value=game_state
+                        game_logic,
+                        "lock_game_session_state_for_update",
+                        return_value=game_state,
                     ):
                         with patch.object(
                             game_logic, "update_game_state_waiting_status"
@@ -435,6 +446,335 @@ def test_check_and_advance_game_ignores_kicked_players_denominator():
     assert result["eligible_players"] == 2
     assert result["players_answered"] == 2
     assert result["action"] == "game_ended"
+
+
+def test_check_and_advance_game_locks_state_before_counting_responses():
+    events = []
+    game_state = SimpleNamespace(
+        isstarted=True,
+        current_question_index=0,
+        current_question_id="Q1",
+        total_questions=2,
+        is_active=True,
+    )
+
+    def lock_state(db, session_code):
+        events.append("lock")
+        return game_state
+
+    def count_players(db, session_code):
+        events.append("count_players")
+        return 1
+
+    def count_responses(db, session_code, question_id):
+        events.append("count_responses")
+        return 0
+
+    with patch.object(
+        game_logic, "lock_game_session_state_for_update", side_effect=lock_state
+    ):
+        with patch.object(
+            game_logic, "get_number_of_players_in_session", side_effect=count_players
+        ):
+            with patch.object(game_logic, "count_kicked_players", return_value=0):
+                with patch.object(
+                    game_logic,
+                    "count_responses_for_question",
+                    side_effect=count_responses,
+                ):
+                    with patch.object(
+                        game_logic,
+                        "count_fair_play_resolved_players_for_question",
+                        return_value=0,
+                    ):
+                        result = game_logic.check_and_advance_game(
+                            MagicMock(), "SESSION123", "Q1"
+                        )
+
+    assert events == ["lock", "count_players", "count_responses"]
+    assert result["waiting_for_players"] is True
+
+
+def test_check_and_advance_game_skips_stale_question_after_lock():
+    game_state = SimpleNamespace(
+        isstarted=True,
+        current_question_index=1,
+        current_question_id="Q2",
+        total_questions=5,
+        is_active=True,
+    )
+
+    with patch.object(
+        game_logic,
+        "lock_game_session_state_for_update",
+        return_value=game_state,
+    ):
+        with patch.object(
+            game_logic, "get_number_of_players_in_session"
+        ) as count_players:
+            result = game_logic.check_and_advance_game(MagicMock(), "SESSION123", "Q1")
+
+    count_players.assert_not_called()
+    assert result["stale_question"] is True
+    assert result["current_question_index"] == 1
+
+
+def test_join_game_locks_active_session_and_player_rows():
+    mock_db = MagicMock()
+    game_session = SimpleNamespace(session_code="SESSION123")
+    player = SimpleNamespace(player_id="P1", active_game_code=None)
+
+    game_query = MagicMock()
+    game_query.join.return_value = game_query
+    game_query.filter.return_value = game_query
+    game_query.with_for_update.return_value = game_query
+    game_query.first.return_value = game_session
+
+    player_query = MagicMock()
+    player_query.filter.return_value = player_query
+    player_query.with_for_update.return_value = player_query
+    player_query.first.return_value = player
+
+    mock_db.query.side_effect = [game_query, player_query]
+
+    with patch.object(dbCRUD, "assign_player_to_session") as assign_player:
+        with patch.object(dbCRUD, "create_score") as create_score:
+            result = dbCRUD.join_game(mock_db, "SESSION123", "P1")
+
+    assert result is game_session
+    game_query.with_for_update.assert_called_once_with(of=dbCRUD.GameSession)
+    player_query.with_for_update.assert_called_once_with()
+    assign_player.assert_called_once_with(mock_db, "P1", "SESSION123")
+    create_score.assert_called_once_with(mock_db, "SESSION123", "P1")
+    mock_db.commit.assert_called_once()
+
+
+def test_join_game_rejects_inactive_sessions_before_membership_changes():
+    mock_db = MagicMock()
+    game_query = MagicMock()
+    game_query.join.return_value = game_query
+    game_query.filter.return_value = game_query
+    game_query.with_for_update.return_value = game_query
+    game_query.first.return_value = None
+    mock_db.query.return_value = game_query
+
+    with patch.object(dbCRUD, "assign_player_to_session") as assign_player:
+        with patch.object(dbCRUD, "create_score") as create_score:
+            with pytest.raises(ValueError, match="Game session not found"):
+                dbCRUD.join_game(mock_db, "SESSION123", "P1")
+
+    assign_player.assert_not_called()
+    create_score.assert_not_called()
+    mock_db.commit.assert_not_called()
+
+
+def test_score_and_session_assignment_models_prevent_duplicate_membership_rows():
+    score_constraints = {
+        constraint.name: tuple(column.name for column in constraint.columns)
+        for constraint in dbCRUD.Scores.__table__.constraints
+        if isinstance(constraint, sqlalchemy.UniqueConstraint)
+    }
+    assignment_constraints = {
+        constraint.name: tuple(column.name for column in constraint.columns)
+        for constraint in dbCRUD.SessionAssignment.__table__.constraints
+        if isinstance(constraint, sqlalchemy.UniqueConstraint)
+    }
+
+    assert score_constraints["uq_scores_session_player"] == (
+        "session_code",
+        "player_id",
+    )
+    assert assignment_constraints["uq_session_player_assignments_session_player"] == (
+        "session_code",
+        "player_id",
+    )
+
+
+def test_security_constraint_migration_deduplicates_scores_and_assignments():
+    engine = sqlalchemy.create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE scores (
+                score_id TEXT PRIMARY KEY,
+                session_code TEXT,
+                player_id TEXT,
+                score INTEGER,
+                result TEXT
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE session_player_assignments (
+                assignment_id TEXT PRIMARY KEY,
+                session_code TEXT,
+                player_id TEXT,
+                session_start TEXT,
+                session_end TEXT
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO scores
+                (score_id, session_code, player_id, score, result)
+            VALUES
+                ('S_LOW', 'SESSION123', 'P1', 1, NULL),
+                ('S_HIGH', 'SESSION123', 'P1', 5, 'win')
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO session_player_assignments
+                (assignment_id, session_code, player_id, session_start, session_end)
+            VALUES
+                ('A_ACTIVE', 'SESSION123', 'P1', '2026-01-01', NULL),
+                ('A_OLD', 'SESSION123', 'P1', '2025-01-01', '2025-01-02')
+            """
+        )
+
+        removed_scores = performance_migrations._deduplicate_scores(connection)
+        removed_assignments = performance_migrations._deduplicate_session_assignments(
+            connection
+        )
+
+        remaining_score = connection.exec_driver_sql(
+            "SELECT score_id FROM scores"
+        ).scalar()
+        remaining_assignment = connection.exec_driver_sql(
+            "SELECT assignment_id FROM session_player_assignments"
+        ).scalar()
+
+    assert removed_scores == 1
+    assert removed_assignments == 1
+    assert remaining_score == "S_HIGH"
+    assert remaining_assignment == "A_ACTIVE"
+
+
+def test_sqlite_unique_index_verification_rejects_partial_same_named_index():
+    engine = sqlalchemy.create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE scores (
+                score_id TEXT PRIMARY KEY,
+                session_code TEXT,
+                player_id TEXT,
+                score INTEGER
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE UNIQUE INDEX uq_scores_session_player
+            ON scores (session_code, player_id)
+            WHERE score > 0
+            """
+        )
+
+        with pytest.raises(RuntimeError, match="must not be partial"):
+            performance_migrations._verify_unique_index_sqlite(
+                connection,
+                table_name="scores",
+                index_name="uq_scores_session_player",
+                columns=("session_code", "player_id"),
+            )
+
+
+def test_postgres_invalid_unique_index_is_dropped_and_recreated():
+    class FakeResult:
+        def __init__(self, row=None):
+            self.row = row
+
+        def first(self):
+            return self.row
+
+    invalid_row = SimpleNamespace(
+        column_names=("session_code", "player_id"),
+        indisunique=True,
+        indisvalid=False,
+        indisready=True,
+        indislive=True,
+        is_not_partial=True,
+    )
+    valid_row = SimpleNamespace(
+        column_names=("session_code", "player_id"),
+        indisunique=True,
+        indisvalid=True,
+        indisready=True,
+        indislive=True,
+        is_not_partial=True,
+    )
+
+    class FakeConnection:
+        def __init__(self):
+            self.rows = [invalid_row, valid_row]
+            self.statements = []
+
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            self.statements.append(sql)
+            if "FROM pg_class idx" in sql:
+                return FakeResult(self.rows.pop(0))
+            return FakeResult()
+
+    connection = FakeConnection()
+
+    performance_migrations._create_and_verify_unique_index(
+        connection,
+        create_statement=performance_migrations.UNIQUE_SCORE_INDEX_POSTGRES,
+        table_name="scores",
+        index_name="uq_scores_session_player",
+        columns=("session_code", "player_id"),
+        is_postgres=True,
+    )
+
+    assert any("DROP INDEX CONCURRENTLY" in sql for sql in connection.statements)
+    assert any(
+        "CREATE UNIQUE INDEX CONCURRENTLY uq_scores_session_player" in sql
+        for sql in connection.statements
+    )
+
+
+def test_duplicate_phone_registration_returns_generic_response():
+    player = SimpleNamespace(
+        player_name="Player",
+        player_email="player@example.com",
+        player_mobile="07708030680",
+        hashed_password="secret-password",
+    )
+    request = MagicMock()
+    request.headers = {}
+
+    with patch.object(player_routes, "enforce_rate_limit", new_callable=AsyncMock):
+        with patch.object(
+            player_routes,
+            "enforce_email_verification_send_limits",
+            new_callable=AsyncMock,
+        ):
+            with patch.object(player_routes, "ensure_email_verification_columns"):
+                with patch.object(player_routes, "set_rls_login_email"):
+                    with patch.object(
+                        player_routes, "get_player_by_email", return_value=None
+                    ):
+                        with patch.object(
+                            player_routes,
+                            "create_player",
+                            side_effect=ValueError(
+                                "Account with this phone number already exists"
+                            ),
+                        ):
+                            result = asyncio.run(
+                                player_routes.create_player_route(
+                                    request,
+                                    MagicMock(),
+                                    player,
+                                    MagicMock(),
+                                )
+                            )
+
+    assert result == {"message": player_routes.GENERIC_REGISTRATION_MESSAGE}
 
 
 def test_build_sync_state_recovers_active_game_to_question_not_intro():

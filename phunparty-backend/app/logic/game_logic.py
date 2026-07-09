@@ -15,6 +15,7 @@ from app.database.dbCRUD import (
     count_responses_for_question,
     create_player_response,
     get_game_session_state,
+    lock_game_session_state_for_update,
     get_number_of_players_in_session,
     get_player_response,
     get_question_by_id,
@@ -196,7 +197,38 @@ def check_and_advance_game(
     Check if all players have answered and advance the game if needed
     """
     try:
-        # Get counts from database
+        # Serialize the last-answer advancement decision across workers.
+        game_state = lock_game_session_state_for_update(db, session_code)
+        if not game_state:
+            raise ValueError("Game state not found")
+
+        locked_question_id = getattr(
+            game_state, "current_question_id", current_question_id
+        )
+        if locked_question_id != current_question_id:
+            logger.info(
+                "Skipping stale progression check for session=%s incoming_question=%s current_question=%s",
+                session_code,
+                current_question_id,
+                locked_question_id,
+            )
+            return {
+                "players_total": 0,
+                "players_answered": 0,
+                "waiting_for_players": False,
+                "current_question_index": game_state.current_question_index,
+                "total_questions": game_state.total_questions,
+                "game_state": "active" if game_state.isstarted else "waiting",
+                "currentQuestion": game_state.current_question_index + 1,
+                "totalQuestions": game_state.total_questions,
+                "playersCount": 0,
+                "playersAnswered": 0,
+                "isstarted": game_state.isstarted,
+                "is_active": game_state.is_active,
+                "stale_question": True,
+            }
+
+        # Get counts from database after the state row lock is held.
         total_players = get_number_of_players_in_session(db, session_code)
         kicked_players = count_kicked_players(db, session_code)
         players_in_session = max(0, total_players - kicked_players)
@@ -209,11 +241,6 @@ def check_and_advance_game(
         resolved_players = min(
             players_in_session, responses_to_question + fair_play_resolved_players
         )
-
-        # Get current game state
-        game_state = get_game_session_state(db, session_code)
-        if not game_state:
-            raise ValueError("Game state not found")
 
         # Determine the appropriate game state for frontend
         frontend_game_state = "active" if game_state.isstarted else "waiting"
