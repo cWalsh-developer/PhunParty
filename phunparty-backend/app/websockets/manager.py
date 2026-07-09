@@ -419,6 +419,8 @@ class ConnectionManager:
         return any(
             metadata.get("client_type") == "mobile"
             and metadata.get("player_id") == player_id
+            and metadata.get("connection_state")
+            not in {"fair_play_focus_lost", "disconnected"}
             for metadata in self._shared_presence_metadata(session_code)
         )
 
@@ -1114,6 +1116,9 @@ class ConnectionManager:
             self._shared_state_key(session_code, "game-type"),
             self._shared_state_key(session_code, "buzzer"),
             self._shared_state_key(session_code, "beat-clock"),
+            self._shared_state_key(session_code, "fair-play-status"),
+            self._shared_state_key(session_code, "fair-play-frozen"),
+            self._shared_state_key(session_code, "pending-focus"),
         )
 
         session_key_prefix = f"{session_code}:"
@@ -1220,6 +1225,55 @@ class ConnectionManager:
             break
 
         return sent
+
+    async def _send_local_message_to_player(
+        self,
+        session_code: str,
+        player_id: str,
+        message: dict,
+        critical: bool = False,
+    ) -> None:
+        for connection_info in self.get_player_connections(
+            session_code,
+            player_id,
+        ).values():
+            websocket = connection_info.get("websocket")
+            if not websocket:
+                continue
+
+            if critical:
+                await self.send_personal_critical_message(
+                    session_code,
+                    message,
+                    websocket,
+                )
+            else:
+                await self.send_personal_message(message, websocket)
+
+    async def send_message_to_player(
+        self,
+        session_code: str,
+        player_id: str,
+        message: dict,
+        critical: bool = False,
+    ) -> None:
+        await asyncio.gather(
+            self._send_local_message_to_player(
+                session_code=session_code,
+                player_id=player_id,
+                message=message,
+                critical=critical,
+            ),
+            websocket_bus.publish(
+                {
+                    "kind": "player_message",
+                    "session_code": session_code,
+                    "player_id": player_id,
+                    "message": message,
+                    "critical": critical,
+                }
+            ),
+        )
 
     async def _broadcast_local_to_session(
         self,
@@ -1400,6 +1454,15 @@ class ConnectionManager:
                 exclude_client_types=event.get("exclude_client_types"),
                 critical=bool(event.get("critical")),
                 require_ack=bool(event.get("require_ack")),
+            )
+            return
+
+        if kind == "player_message":
+            await self._send_local_message_to_player(
+                session_code=event["session_code"],
+                player_id=event["player_id"],
+                message=event["message"],
+                critical=bool(event.get("critical")),
             )
             return
 
@@ -1909,9 +1972,15 @@ class ConnectionManager:
     def freeze_player_for_question(
         self, session_code: str, player_id: str, question_id: str
     ) -> None:
-        self.fair_play_frozen_players.setdefault(session_code, {})[
-            player_id
-        ] = question_id
+        frozen_players = self._redis_json_get(
+            self._shared_state_key(session_code, "fair-play-frozen")
+        ) or self.fair_play_frozen_players.get(session_code, {})
+        frozen_players[player_id] = question_id
+        self.fair_play_frozen_players[session_code] = frozen_players
+        self._redis_json_set(
+            self._shared_state_key(session_code, "fair-play-frozen"),
+            frozen_players,
+        )
         self.update_fair_play_status(
             session_code,
             player_id,
@@ -1922,6 +1991,13 @@ class ConnectionManager:
     def is_player_frozen_for_question(
         self, session_code: str, player_id: str, question_id: str
     ) -> bool:
+        shared_frozen = self._redis_json_get(
+            self._shared_state_key(session_code, "fair-play-frozen")
+        )
+        if shared_frozen is not None:
+            self.fair_play_frozen_players[session_code] = shared_frozen
+            return shared_frozen.get(player_id) == question_id
+
         return (
             self.fair_play_frozen_players.get(session_code, {}).get(player_id)
             == question_id
@@ -1930,7 +2006,9 @@ class ConnectionManager:
     def clear_player_fair_play_freeze(
         self, session_code: str, player_id: str, question_id: Optional[str] = None
     ) -> None:
-        frozen_players = self.fair_play_frozen_players.get(session_code)
+        frozen_players = self._redis_json_get(
+            self._shared_state_key(session_code, "fair-play-frozen")
+        ) or self.fair_play_frozen_players.get(session_code)
         if not frozen_players:
             self.update_fair_play_status(
                 session_code,
@@ -1948,6 +2026,13 @@ class ConnectionManager:
         frozen_players.pop(player_id, None)
         if not frozen_players:
             self.fair_play_frozen_players.pop(session_code, None)
+            self._redis_delete(self._shared_state_key(session_code, "fair-play-frozen"))
+        else:
+            self.fair_play_frozen_players[session_code] = frozen_players
+            self._redis_json_set(
+                self._shared_state_key(session_code, "fair-play-frozen"),
+                frozen_players,
+            )
 
         self.update_fair_play_status(
             session_code,
@@ -1961,9 +2046,16 @@ class ConnectionManager:
         self, session_code: str, player_id: str, **status: Any
     ) -> Dict[str, Any]:
         """Store host-visible Fair Play state for roster updates."""
-        session_status = self.fair_play_player_status.setdefault(session_code, {})
+        session_status = self._redis_json_get(
+            self._shared_state_key(session_code, "fair-play-status")
+        ) or self.fair_play_player_status.setdefault(session_code, {})
         player_status = session_status.setdefault(player_id, {})
         player_status.update(status)
+        self.fair_play_player_status[session_code] = session_status
+        self._redis_json_set(
+            self._shared_state_key(session_code, "fair-play-status"),
+            session_status,
+        )
         for connection_info in self.get_player_connections(
             session_code, player_id
         ).values():
@@ -1973,6 +2065,13 @@ class ConnectionManager:
         return player_status
 
     def get_fair_play_status(self, session_code: str, player_id: str) -> Dict[str, Any]:
+        shared_status = self._redis_json_get(
+            self._shared_state_key(session_code, "fair-play-status")
+        )
+        if shared_status is not None:
+            self.fair_play_player_status[session_code] = shared_status
+            return dict(shared_status.get(player_id, {}))
+
         return dict(
             self.fair_play_player_status.get(session_code, {}).get(player_id, {})
         )
@@ -2013,25 +2112,50 @@ class ConnectionManager:
             "reason": reason,
             "lost_at": lost_at,
         }
-        self.pending_focus_losses.setdefault(session_code, {})[player_id] = pending
+        session_pending = self._redis_json_get(
+            self._shared_state_key(session_code, "pending-focus")
+        ) or self.pending_focus_losses.setdefault(session_code, {})
+        session_pending[player_id] = pending
+        self.pending_focus_losses[session_code] = session_pending
+        self._redis_json_set(
+            self._shared_state_key(session_code, "pending-focus"),
+            session_pending,
+        )
         return pending
 
     def get_pending_focus_loss(
         self, session_code: str, player_id: str
     ) -> Optional[Dict[str, Any]]:
+        shared_pending = self._redis_json_get(
+            self._shared_state_key(session_code, "pending-focus")
+        )
+        if shared_pending is not None:
+            self.pending_focus_losses[session_code] = shared_pending
+            pending = shared_pending.get(player_id)
+            return dict(pending) if pending else None
+
         pending = self.pending_focus_losses.get(session_code, {}).get(player_id)
         return dict(pending) if pending else None
 
     def clear_pending_focus_loss(
         self, session_code: str, player_id: str
     ) -> Optional[Dict[str, Any]]:
-        session_pending = self.pending_focus_losses.get(session_code)
+        session_pending = self._redis_json_get(
+            self._shared_state_key(session_code, "pending-focus")
+        ) or self.pending_focus_losses.get(session_code)
         if not session_pending:
             return None
 
         pending = session_pending.pop(player_id, None)
         if not session_pending:
             self.pending_focus_losses.pop(session_code, None)
+            self._redis_delete(self._shared_state_key(session_code, "pending-focus"))
+        else:
+            self.pending_focus_losses[session_code] = session_pending
+            self._redis_json_set(
+                self._shared_state_key(session_code, "pending-focus"),
+                session_pending,
+            )
         return pending
 
     def update_heartbeat(self, websocket: WebSocket):

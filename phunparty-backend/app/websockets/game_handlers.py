@@ -524,19 +524,13 @@ class BeatTheClockGameHandler(GameEventHandler):
         if not payload:
             return False
 
-        sent = False
-        for connection_info in manager.get_player_connections(
-            self.session_code, player_id
-        ).values():
-            websocket = connection_info.get("websocket")
-            if websocket:
-                await manager.send_personal_message(
-                    {"type": "beat_clock_question", "data": payload},
-                    websocket,
-                )
-                sent = True
+        await manager.send_message_to_player(
+            session_code=self.session_code,
+            player_id=player_id,
+            message={"type": "beat_clock_question", "data": payload},
+        )
         manager.set_beat_clock_state(self.session_code, state)
-        return sent
+        return True
 
     async def handle_fair_play_skip(
         self,
@@ -940,16 +934,11 @@ class BeatTheClockGameHandler(GameEventHandler):
                 "ends_at": state.get("ends_at"),
                 "server_time_ms": manager._utc_now_ms(),
             }
-            for connection_info in manager.get_player_connections(
-                self.session_code,
-                player_id,
-            ).values():
-                websocket = connection_info.get("websocket")
-                if websocket:
-                    await manager.send_personal_message(
-                        {"type": "beat_clock_answer_result", "data": rejection_payload},
-                        websocket,
-                    )
+            await manager.send_message_to_player(
+                session_code=self.session_code,
+                player_id=player_id,
+                message={"type": "beat_clock_answer_result", "data": rejection_payload},
+            )
             return
 
         question = get_question_by_id(question_id, db)
@@ -998,15 +987,11 @@ class BeatTheClockGameHandler(GameEventHandler):
             },
         }
 
-        for connection_info in manager.get_player_connections(
-            self.session_code, player_id
-        ).values():
-            websocket = connection_info.get("websocket")
-            if websocket:
-                await manager.send_personal_message(
-                    {"type": "beat_clock_answer_result", "data": answer_payload},
-                    websocket,
-                )
+        await manager.send_message_to_player(
+            session_code=self.session_code,
+            player_id=player_id,
+            message={"type": "beat_clock_answer_result", "data": answer_payload},
+        )
 
         if utc_now() >= state.get("ends_at_dt", utc_now()):
             state["active"] = False
@@ -1116,23 +1101,18 @@ class BuzzerGameHandler(GameEventHandler):
             safe_player_ref(player_id),
             question_id,
         )
-        for connection_info in manager.get_player_connections(
-            self.session_code,
-            player_id,
-        ).values():
-            websocket = connection_info.get("websocket")
-            if websocket:
-                await manager.send_personal_message(
-                    {
-                        "type": "buzzer_rejected",
-                        "data": {
-                            "reason": "fair_play_restriction",
-                            "question_id": question_id,
-                            "message": "You are frozen for this question because of Fair Play Mode.",
-                        },
-                    },
-                    websocket,
-                )
+        await manager.send_message_to_player(
+            session_code=self.session_code,
+            player_id=player_id,
+            message={
+                "type": "buzzer_rejected",
+                "data": {
+                    "reason": "fair_play_restriction",
+                    "question_id": question_id,
+                    "message": "You are frozen for this question because of Fair Play Mode.",
+                },
+            },
+        )
 
         await manager.broadcast_buzzer_state_update(self.session_code)
         await self.update_mobile_buzzer_ui(
@@ -1270,24 +1250,19 @@ class BuzzerGameHandler(GameEventHandler):
                 state_question_id,
             )
 
-            for connection_info in manager.get_player_connections(
-                self.session_code,
-                player_id,
-            ).values():
-                websocket = connection_info.get("websocket")
-                if websocket:
-                    await manager.send_personal_message(
-                        {
-                            "type": "answer_rejected",
-                            "data": {
-                                "reason": "stale_question",
-                                "message": "That question has already moved on.",
-                                "question_id": question_id,
-                                "current_question_id": current_phase_question_id,
-                            },
-                        },
-                        websocket,
-                    )
+            await manager.send_message_to_player(
+                session_code=self.session_code,
+                player_id=player_id,
+                message={
+                    "type": "answer_rejected",
+                    "data": {
+                        "reason": "stale_question",
+                        "message": "That question has already moved on.",
+                        "question_id": question_id,
+                        "current_question_id": current_phase_question_id,
+                    },
+                },
+            )
 
             await manager.broadcast_buzzer_state_update(self.session_code)
             await self.update_mobile_buzzer_ui(db)
