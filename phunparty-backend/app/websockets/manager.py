@@ -35,6 +35,7 @@ class ConnectionManager:
     HEARTBEAT_CHECK_INTERVAL_SECONDS = 10
     HEARTBEAT_STALE_SECONDS = 90
     MOBILE_HEARTBEAT_STALE_SECONDS = 300
+    PRESENCE_KEY_TTL_SECONDS = 600
     HEARTBEAT_UNSTABLE_SECONDS = 20
     HEARTBEAT_DISCONNECTED_SECONDS = 60
     PING_INTERVAL_SECONDS = 10
@@ -180,7 +181,9 @@ class ConnectionManager:
                 await asyncio.sleep(self.MOBILE_DISCONNECT_GRACE_SECONDS)
 
                 # If player reconnected during grace window, do not broadcast leave.
-                if self.get_player_connections(session_code, player_id):
+                if self.get_player_connections(
+                    session_code, player_id
+                ) or self.has_shared_player_connections(session_code, player_id):
                     logger.info(
                         f"✅ Player {player_name} reconnected within grace window in session {session_code}"
                     )
@@ -237,6 +240,151 @@ class ConnectionManager:
 
     def _utc_now_iso(self) -> str:
         return self._utc_now().isoformat() + "Z"
+
+    def _presence_keys(self, session_code: str) -> tuple[str, str]:
+        return (
+            f"phun:prod:session:{session_code}:presence",
+            f"phun:prod:session:{session_code}:presence-meta",
+        )
+
+    def _presence_member(self, ws_id: str) -> str:
+        return f"{websocket_bus.worker_id}:{ws_id}"
+
+    def _presence_expiry(self, connection_info: Dict[str, Any]) -> int:
+        stale_seconds = (
+            self.MOBILE_HEARTBEAT_STALE_SECONDS
+            if connection_info.get("client_type") == "mobile"
+            else self.HEARTBEAT_STALE_SECONDS
+        )
+        return int(time.time() + stale_seconds)
+
+    def _presence_metadata(
+        self,
+        session_code: str,
+        ws_id: str,
+        connection_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        player_id = connection_info.get("player_id")
+        metadata = {
+            "member": self._presence_member(ws_id),
+            "worker_id": websocket_bus.worker_id,
+            "ws_id": ws_id,
+            "session_code": session_code,
+            "client_type": connection_info.get("client_type"),
+            "connected_at": connection_info.get("connected_at"),
+            "player_id": player_id,
+            "roster_player_id": make_roster_player_id(session_code, player_id),
+            "player_name": connection_info.get("player_name")
+            or player_id
+            or "Unknown player",
+            "player_photo": connection_info.get("player_photo"),
+            "player_answered": connection_info.get("player_answered", False),
+            "connection_state": connection_info.get("connection_state", "connected"),
+            "is_ready": bool(connection_info.get("is_ready", False)),
+            "connection_confirmed": bool(
+                connection_info.get("connection_confirmed", False)
+            ),
+            "updated_at": self._utc_now_iso(),
+        }
+        if player_id:
+            metadata.update(
+                self.fair_play_player_status.get(session_code, {}).get(player_id, {})
+            )
+        return metadata
+
+    def _upsert_presence(
+        self,
+        session_code: str,
+        ws_id: str,
+        connection_info: Dict[str, Any],
+    ) -> None:
+        client = websocket_bus.sync_client
+        if not client:
+            return
+
+        presence_key, meta_key = self._presence_keys(session_code)
+        member = self._presence_member(ws_id)
+        metadata = self._presence_metadata(session_code, ws_id, connection_info)
+        try:
+            pipe = client.pipeline()
+            pipe.zadd(presence_key, {member: self._presence_expiry(connection_info)})
+            pipe.hset(meta_key, member, json.dumps(metadata, separators=(",", ":")))
+            pipe.expire(presence_key, self.PRESENCE_KEY_TTL_SECONDS)
+            pipe.expire(meta_key, self.PRESENCE_KEY_TTL_SECONDS)
+            pipe.execute()
+        except Exception:
+            logger.exception("Failed to upsert shared presence for %s", session_code)
+
+    def _remove_presence(self, session_code: str, ws_id: str) -> None:
+        client = websocket_bus.sync_client
+        if not client:
+            return
+
+        presence_key, meta_key = self._presence_keys(session_code)
+        member = self._presence_member(ws_id)
+        try:
+            pipe = client.pipeline()
+            pipe.zrem(presence_key, member)
+            pipe.hdel(meta_key, member)
+            pipe.execute()
+        except Exception:
+            logger.exception("Failed to remove shared presence for %s", session_code)
+
+    def _shared_presence_metadata(self, session_code: str) -> List[Dict[str, Any]]:
+        client = websocket_bus.sync_client
+        if not client:
+            return []
+
+        presence_key, meta_key = self._presence_keys(session_code)
+        now = int(time.time())
+        try:
+            client.zremrangebyscore(presence_key, "-inf", now)
+            members = client.zrangebyscore(presence_key, now + 1, "+inf")
+        except Exception:
+            logger.exception("Failed to read shared presence for %s", session_code)
+            return []
+        if not members:
+            return []
+
+        try:
+            raw_values = client.hmget(meta_key, members)
+        except Exception:
+            logger.exception(
+                "Failed to read shared presence metadata for %s", session_code
+            )
+            return []
+        metadata: List[Dict[str, Any]] = []
+        stale_members = []
+        for member, raw_value in zip(members, raw_values):
+            if not raw_value:
+                stale_members.append(member)
+                continue
+            try:
+                parsed = json.loads(raw_value)
+            except json.JSONDecodeError:
+                stale_members.append(member)
+                continue
+            metadata.append(parsed)
+
+        if stale_members:
+            try:
+                pipe = client.pipeline()
+                pipe.zrem(presence_key, *stale_members)
+                pipe.hdel(meta_key, *stale_members)
+                pipe.execute()
+            except Exception:
+                logger.exception(
+                    "Failed to cleanup stale shared presence for %s", session_code
+                )
+
+        return metadata
+
+    def has_shared_player_connections(self, session_code: str, player_id: str) -> bool:
+        return any(
+            metadata.get("client_type") == "mobile"
+            and metadata.get("player_id") == player_id
+            for metadata in self._shared_presence_metadata(session_code)
+        )
 
     def make_event_id(
         self, session_code: str, event_type: str, data: Optional[Dict[str, Any]] = None
@@ -513,6 +661,7 @@ class ConnectionManager:
             "session_code": session_code,
             "websocket": websocket,
         }
+        self._upsert_presence(session_code, ws_id, connection_info)
 
         logger.info(
             f"Client connected: {client_type} to session {session_code} (ws_id: {ws_id}, player: {player_name or 'N/A'})"
@@ -553,6 +702,7 @@ class ConnectionManager:
 
             # Mark connection as confirmed after successful send
             connection_info["connection_confirmed"] = True
+            self._upsert_presence(session_code, ws_id, connection_info)
             logger.info(
                 f"Connection confirmation sent to {client_type} client (ws_id: {ws_id})"
             )
@@ -655,6 +805,7 @@ class ConnectionManager:
                     )
                     client_info["connection_state"] = "fair_play_focus_lost"
                     client_info["last_heartbeat"] = datetime.now()
+                    self._upsert_presence(session_code, ws_id, client_info)
                     self.update_fair_play_status(
                         session_code,
                         player_id,
@@ -675,6 +826,7 @@ class ConnectionManager:
             # Remove from registry
             if ws_id in self.websocket_registry:
                 del self.websocket_registry[ws_id]
+            self._remove_presence(session_code, ws_id)
 
             logger.info(f"Client disconnected from session {session_code}")
 
@@ -1124,6 +1276,60 @@ class ConnectionManager:
 
     def get_mobile_players(self, session_code: str) -> List[Dict[str, Any]]:
         """Get list of mobile players in session"""
+        shared_presence = self._shared_presence_metadata(session_code)
+        if shared_presence:
+            latest_by_player: Dict[str, Dict[str, Any]] = {}
+            unnamed_mobile_players: List[Dict[str, Any]] = []
+
+            for metadata in shared_presence:
+                if metadata.get("client_type") != "mobile":
+                    continue
+                if not metadata.get("connection_confirmed"):
+                    continue
+
+                player_id = metadata.get("player_id")
+                player_data = {
+                    "player_id": player_id,
+                    "roster_player_id": metadata.get("roster_player_id")
+                    or make_roster_player_id(session_code, player_id),
+                    "player_name": metadata.get("player_name")
+                    or player_id
+                    or "Unknown player",
+                    "player_photo": metadata.get("player_photo"),
+                    "connected_at": metadata.get("connected_at"),
+                    "player_answered": metadata.get("player_answered", None),
+                    "connection_state": metadata.get("connection_state", "connected"),
+                    "is_ready": metadata.get("is_ready", False),
+                }
+                for key in (
+                    "strike_count",
+                    "max_strikes",
+                    "is_frozen",
+                    "frozen_question_id",
+                    "is_kicked",
+                    "answer_status",
+                    "fair_play_reason",
+                ):
+                    if key in metadata:
+                        player_data[key] = metadata[key]
+
+                if player_id:
+                    existing = latest_by_player.get(player_id)
+                    existing_connected_at = (
+                        existing.get("connected_at") if existing else ""
+                    )
+                    candidate_connected_at = player_data.get("connected_at") or ""
+                    if not existing or candidate_connected_at >= existing_connected_at:
+                        latest_by_player[player_id] = player_data
+                else:
+                    unnamed_mobile_players.append(player_data)
+
+            deduped_players = list(latest_by_player.values()) + unnamed_mobile_players
+            deduped_players.sort(
+                key=lambda p: (p.get("player_name") or "", p.get("connected_at") or "")
+            )
+            return deduped_players
+
         connections = self.get_session_connections(session_code)
         latest_by_player: Dict[str, Dict[str, Any]] = {}
         unnamed_mobile_players: List[Dict[str, Any]] = []
@@ -1181,6 +1387,30 @@ class ConnectionManager:
 
     def get_session_stats(self, session_code: str) -> Dict[str, Any]:
         """Get statistics for a session"""
+        shared_presence = self._shared_presence_metadata(session_code)
+        if shared_presence:
+            mobile_players = self.get_mobile_players(session_code)
+            web_clients = sum(
+                1
+                for metadata in shared_presence
+                if metadata.get("client_type") == "web"
+                and metadata.get("connection_confirmed")
+            )
+            mobile_clients = sum(
+                1
+                for metadata in shared_presence
+                if metadata.get("client_type") == "mobile"
+                and metadata.get("connection_confirmed")
+            )
+            return {
+                "total_connections": web_clients + mobile_clients,
+                "web_clients": web_clients,
+                "mobile_clients": mobile_clients,
+                "mobile_players": mobile_players,
+                "phase": self.get_session_phase_state(session_code).get("phase"),
+                "pending_acks": self.get_pending_ack_summary(session_code),
+            }
+
         connections = self.get_session_connections(session_code)
         web_clients = sum(
             1 for conn in connections.values() if conn["client_type"] == "web"
@@ -1306,6 +1536,58 @@ class ConnectionManager:
         Returns:
             Dictionary with connection statistics
         """
+        shared_presence = self._shared_presence_metadata(session_code)
+        if shared_presence:
+            mobile_players = self.get_mobile_players(session_code)
+            web_clients = sum(
+                1
+                for metadata in shared_presence
+                if metadata.get("client_type") == "web"
+                and metadata.get("connection_confirmed")
+            )
+            mobile_clients = sum(
+                1
+                for metadata in shared_presence
+                if metadata.get("client_type") == "mobile"
+                and metadata.get("connection_confirmed")
+            )
+            player_breakdown: Dict[str, Dict[str, Any]] = {}
+            for metadata in shared_presence:
+                player_id = metadata.get("player_id")
+                if not player_id or metadata.get("client_type") != "mobile":
+                    continue
+                player_breakdown.setdefault(
+                    player_id,
+                    {
+                        "connection_count": 0,
+                        "player_name": metadata.get("player_name", "Unknown"),
+                    },
+                )
+                player_breakdown[player_id]["connection_count"] += 1
+
+            return {
+                "exists": True,
+                "total_connections": web_clients + mobile_clients,
+                "web_clients": web_clients,
+                "mobile_clients": mobile_clients,
+                "mobile_players": mobile_players,
+                "phase": self.get_session_phase_state(session_code).get("phase"),
+                "pending_acks": self.get_pending_ack_summary(session_code),
+                "players": len(player_breakdown),
+                "hosts": 0,
+                "observers": 0,
+                "player_breakdown": player_breakdown,
+                "duplicate_connections": [
+                    {
+                        "player_id": pid,
+                        "player_name": info["player_name"],
+                        "connection_count": info["connection_count"],
+                    }
+                    for pid, info in player_breakdown.items()
+                    if info["connection_count"] > 1
+                ],
+            }
+
         if session_code not in self.active_connections:
             return {
                 "exists": False,
@@ -1386,6 +1668,9 @@ class ConnectionManager:
                 and connection_info.get("client_type") == "mobile"
             ):
                 connection_info["player_answered"] = answered
+                ws_id = connection_info.get("ws_id")
+                if ws_id:
+                    self._upsert_presence(session_code, ws_id, connection_info)
                 logger.debug(
                     f"Set player_answered={answered} for player {player_id} in session {session_code}"
                 )
@@ -1408,6 +1693,9 @@ class ConnectionManager:
         for connection_info in self.active_connections[session_code].values():
             if connection_info.get("client_type") == "mobile":
                 connection_info["player_answered"] = False
+                ws_id = connection_info.get("ws_id")
+                if ws_id:
+                    self._upsert_presence(session_code, ws_id, connection_info)
                 count += 1
 
         logger.debug(
@@ -1498,6 +1786,12 @@ class ConnectionManager:
         session_status = self.fair_play_player_status.setdefault(session_code, {})
         player_status = session_status.setdefault(player_id, {})
         player_status.update(status)
+        for connection_info in self.get_player_connections(
+            session_code, player_id
+        ).values():
+            ws_id = connection_info.get("ws_id")
+            if ws_id:
+                self._upsert_presence(session_code, ws_id, connection_info)
         return player_status
 
     def get_fair_play_status(self, session_code: str, player_id: str) -> Dict[str, Any]:
@@ -1577,6 +1871,11 @@ class ConnectionManager:
                     self.active_connections[session_code][ws_id][
                         "connection_state"
                     ] = "connected"
+                    self._upsert_presence(
+                        session_code,
+                        ws_id,
+                        self.active_connections[session_code][ws_id],
+                    )
                 break
 
     def mark_client_ready(self, websocket: WebSocket):
@@ -1589,6 +1888,11 @@ class ConnectionManager:
                     and ws_id in self.active_connections[session_code]
                 ):
                     self.active_connections[session_code][ws_id]["is_ready"] = True
+                    self._upsert_presence(
+                        session_code,
+                        ws_id,
+                        self.active_connections[session_code][ws_id],
+                    )
                     logger.info(f"Client {ws_id} marked as ready")
                 break
 
@@ -1626,7 +1930,15 @@ class ConnectionManager:
         start_time = datetime.now()
 
         while (datetime.now() - start_time).total_seconds() < timeout:
-            connections = self.get_session_connections(session_code)
+            shared_presence = self._shared_presence_metadata(session_code)
+            if shared_presence:
+                connections = {
+                    metadata.get("member") or metadata.get("ws_id"): metadata
+                    for metadata in shared_presence
+                    if metadata.get("connection_confirmed")
+                }
+            else:
+                connections = self.get_session_connections(session_code)
 
             # Check if all connections are ready
             all_ready = all(

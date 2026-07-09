@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import redis.asyncio as redis
+import redis as sync_redis
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class RedisWebSocketBus:
         self.worker_id = uuid.uuid4().hex
 
         self._redis: redis.Redis | None = None
+        self._sync_redis: sync_redis.Redis | None = None
         self._pubsub = None
         self._reader_task: asyncio.Task | None = None
         self._dispatcher: EventDispatcher | None = None
@@ -49,6 +51,10 @@ class RedisWebSocketBus:
     @property
     def connected(self) -> bool:
         return self._redis is not None
+
+    @property
+    def sync_client(self) -> sync_redis.Redis | None:
+        return self._sync_redis
 
     async def connect(self, dispatcher: EventDispatcher) -> None:
         self._dispatcher = dispatcher
@@ -65,6 +71,11 @@ class RedisWebSocketBus:
             return
 
         self._redis = redis.from_url(
+            self.redis_url,
+            encoding="utf-8",
+            decode_responses=True,
+        )
+        self._sync_redis = sync_redis.from_url(
             self.redis_url,
             encoding="utf-8",
             decode_responses=True,
@@ -139,10 +150,13 @@ class RedisWebSocketBus:
 
         if self._redis:
             await self._redis.aclose()
+        if self._sync_redis:
+            self._sync_redis.close()
 
         self._reader_task = None
         self._pubsub = None
         self._redis = None
+        self._sync_redis = None
 
 
 websocket_bus = RedisWebSocketBus()
