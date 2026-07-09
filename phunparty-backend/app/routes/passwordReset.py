@@ -4,6 +4,7 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone
 
+from app.config import SessionLocal
 from app.database.refresh_token_crud import (
     create_refresh_session,
     revoke_all_player_refresh_tokens,
@@ -34,7 +35,7 @@ from app.utils.generateJWT import (
 )
 from app.utils.phone_numbers import normalize_phone_number
 from app.utils.sendSMS import format_number_uk, send_sms
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
@@ -70,6 +71,20 @@ async def equalize_reset_request_timing(started_at: float) -> None:
     remaining = RESET_REQUEST_MIN_SECONDS - (time.perf_counter() - started_at)
     if remaining > 0:
         await asyncio.sleep(remaining)
+
+
+def deliver_password_reset_sms(number: str, message: str, phone_ref: str) -> None:
+    db = SessionLocal()
+    try:
+        if not send_sms(number, message, db):
+            logger.warning(
+                "Password reset SMS provider did not send to %s",
+                phone_ref,
+            )
+    except Exception:
+        logger.exception("Password reset SMS delivery failed for %s", phone_ref)
+    finally:
+        db.close()
 
 
 def create_password_reset_token(db: Session, player_id: str, phone_number: str) -> str:
@@ -140,6 +155,7 @@ def find_player_for_reset(db: Session, phone_number: str):
 @router.post("/request", tags=["Password Reset"])
 async def request_password_reset(
     request: Request,
+    background_tasks: BackgroundTasks,
     phone: PasswordResetRequest,
     db: Session = Depends(get_db),
 ):
@@ -176,19 +192,12 @@ async def request_password_reset(
 
         message = f"Your password reset code is: {otp}"
         number = format_number_uk(stored_phone)
-        try:
-            result = send_sms(number, message, db)
-        except Exception:
-            logger.exception(
-                "Password reset SMS delivery failed for %s",
-                mask_phone_for_log(stored_phone),
-            )
-            result = False
-        if not result:
-            logger.warning(
-                "Password reset SMS provider did not send to %s",
-                mask_phone_for_log(stored_phone),
-            )
+        background_tasks.add_task(
+            deliver_password_reset_sms,
+            number,
+            message,
+            mask_phone_for_log(stored_phone),
+        )
 
         await equalize_reset_request_timing(started_at)
         return {"message": GENERIC_RESET_MESSAGE}

@@ -130,7 +130,7 @@ def assert_public_or_member_or_owner(
         .first()
     )
 
-    if state and state.ispublic:
+    if state and state.ispublic and state.is_active:
         return
 
     raise forbidden()

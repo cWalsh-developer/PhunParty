@@ -76,7 +76,7 @@ class SanitizedRequestModel(BaseModel):
     model_config = ConfigDict(
         extra="ignore",
         strict=True,
-        str_strip_whitespace=True,
+        str_strip_whitespace=False,
     )
 
     @field_validator("*", mode="before", check_fields=False)

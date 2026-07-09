@@ -41,6 +41,7 @@ from app.utils.email_verification import (
     send_email_verification_link,
 )
 from app.utils.generateJWT import ACCESS_TOKEN_EXPIRE_MINUTES, create_access_token
+from app.utils.hash_password import hash_password
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -148,6 +149,7 @@ async def create_player_route(
         set_rls_login_email(db, player.player_email)
         existing_player = get_player_by_email(db, player.player_email)
         if existing_player:
+            hash_password(player.hashed_password)
             if not existing_player.email_verified:
                 await enforce_email_verification_send_limits(
                     request, player.player_email
@@ -182,8 +184,9 @@ async def create_player_route(
             verification_token,
         )
         return {"message": GENERIC_REGISTRATION_MESSAGE}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError:
+        db.rollback()
+        return {"message": GENERIC_REGISTRATION_MESSAGE}
     except IntegrityError:
         db.rollback()
         return {"message": GENERIC_REGISTRATION_MESSAGE}

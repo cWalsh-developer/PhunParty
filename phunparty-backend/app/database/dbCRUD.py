@@ -276,7 +276,7 @@ def get_session_by_code(db: Session, session_code: str) -> GameSession:
             GameSessionState, GameSession.session_code == GameSessionState.session_code
         )
         .filter(GameSession.session_code == session_code)
-        .filter(GameSessionState.is_active == True)
+        .filter(GameSessionState.is_active.is_(True))
         .first()
     )
 
@@ -302,8 +302,13 @@ def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
     """Join an existing game session."""
     gameSession = (
         db.query(GameSession)
+        .join(
+            GameSessionState,
+            GameSession.session_code == GameSessionState.session_code,
+        )
         .filter(GameSession.session_code == session_code)
-        .with_for_update()
+        .filter(GameSessionState.is_active.is_(True))
+        .with_for_update(of=GameSession)
         .first()
     )
     if not gameSession:
@@ -312,6 +317,8 @@ def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
     player = (
         db.query(Players)
         .filter(Players.player_id == player_id)
+        .filter(Players.is_deleted.is_(False))
+        .filter(Players.is_deactivated.is_(False))
         .with_for_update()
         .first()
     )

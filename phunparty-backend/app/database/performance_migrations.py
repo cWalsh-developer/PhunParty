@@ -245,6 +245,8 @@ SELECT
     i.indisunique,
     i.indisvalid,
     i.indisready,
+    i.indislive,
+    i.indpred IS NULL AS is_not_partial,
     array_agg(a.attname ORDER BY key_ordinal.ordinality) AS column_names
 FROM pg_class idx
 JOIN pg_index i
@@ -262,7 +264,7 @@ WHERE
     ns.nspname = current_schema()
     AND tbl.relname = :table_name
     AND idx.relname = :index_name
-GROUP BY i.indisunique, i.indisvalid, i.indisready
+GROUP BY i.indisunique, i.indisvalid, i.indisready, i.indislive, i.indpred
 LIMIT 1
 """
 
@@ -299,10 +301,18 @@ def _verify_unique_index_postgres(
         raise RuntimeError(f"Required unique index {index_name} was not created")
 
     actual_columns = tuple(row.column_names or ())
-    if not row.indisunique or not row.indisvalid or not row.indisready:
+    if (
+        not row.indisunique
+        or not row.indisvalid
+        or not row.indisready
+        or not row.indislive
+        or not row.is_not_partial
+    ):
         raise RuntimeError(
             f"Required unique index {index_name} is not ready: "
-            f"unique={row.indisunique} valid={row.indisvalid} ready={row.indisready}"
+            f"unique={row.indisunique} valid={row.indisvalid} "
+            f"ready={row.indisready} live={row.indislive} "
+            f"not_partial={row.is_not_partial}"
         )
 
     if actual_columns != columns:
@@ -329,6 +339,8 @@ def _verify_unique_index_sqlite(
         raise RuntimeError(f"Required unique index {index_name} was not created")
     if not matching_index["unique"]:
         raise RuntimeError(f"Required index {index_name} is not unique")
+    if matching_index.get("partial"):
+        raise RuntimeError(f"Required index {index_name} must not be partial")
 
     indexed_columns = tuple(
         row["name"]
