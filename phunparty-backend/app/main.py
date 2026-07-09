@@ -9,7 +9,10 @@ from app.database.email_verification_migrations import (
     ensure_email_verification_columns,
 )
 from app.database.fair_play_migrations import ensure_fair_play_columns
-from app.database.performance_migrations import ensure_performance_indexes
+from app.database.performance_migrations import (
+    ensure_performance_indexes,
+    ensure_required_security_constraints,
+)
 from app.database.refresh_token_crud import cleanup_stale_user_sessions
 from app.database.social_migrations import ensure_social_player_columns
 from app.routes import (
@@ -55,6 +58,7 @@ from app.websockets import routes as websocket_routes
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +121,7 @@ def set_cache_control(request: Request, response) -> None:
     if "cache-control" in response.headers:
         return
 
-    path = request.url.path
+    path = request.scope.get("path") or request.url.path
     method = request.method.upper()
 
     if path.startswith("/photos/avatars"):
@@ -148,6 +152,12 @@ async def lifespan(app: FastAPI):
         ensure_social_player_columns()
         ensure_email_verification_columns()
         ensure_beat_clock_session_columns()
+        ensure_required_security_constraints()
+    except Exception:
+        logger.exception("Could not prepare required database security schema")
+        raise
+
+    try:
         ensure_performance_indexes()
         with SessionLocal() as db:
             cleanup_stale_user_sessions(db)
@@ -159,7 +169,7 @@ async def lifespan(app: FastAPI):
                     repaired_assignments,
                 )
     except Exception:
-        logger.exception("Could not prepare database schema")
+        logger.exception("Could not complete optional database maintenance")
 
     await rate_limiter.connect()
     warn_about_websocket_process_state()
@@ -170,6 +180,22 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="PhunParty Backend API", lifespan=lifespan)
+
+
+def trusted_hosts_from_env() -> list[str]:
+    configured_hosts = os.getenv("TRUSTED_HOSTS")
+    if configured_hosts:
+        return [host.strip() for host in configured_hosts.split(",") if host.strip()]
+
+    if os.getenv("ENVIRONMENT", "").lower() == "production":
+        return ["api.phun.party", "www.phun.party", "phun.party"]
+
+    return ["*"]
+
+
+TRUSTED_HOSTS = trusted_hosts_from_env()
+if TRUSTED_HOSTS != ["*"]:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
 
 ALLOWED_ORIGINS = [
     origin.strip()
@@ -208,7 +234,8 @@ async def request_validation_guard(request: Request, call_next):
 
 @app.middleware("http")
 async def global_rate_limit(request: Request, call_next):
-    if request.url.path not in {"/health"}:
+    path = request.scope.get("path") or request.url.path
+    if path not in {"/health"}:
         await enforce_rate_limit(
             request,
             scope="global-ip",

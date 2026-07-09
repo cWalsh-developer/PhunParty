@@ -194,7 +194,6 @@ class TriviaGameHandler(GameEventHandler):
                         ),
                         "player_name": player_name,
                         "answered_at": datetime.now().isoformat(),
-                        "is_correct": result.get("is_correct", False),
                         "game_state": result.get("game_state", {}),
                     },
                 },

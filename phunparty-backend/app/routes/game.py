@@ -30,6 +30,7 @@ from app.security.ownership import (
     assert_public_or_member_or_owner,
     assert_same_player,
     assert_session_owner,
+    is_session_member,
 )
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
 from app.websockets.manager import manager
@@ -228,6 +229,7 @@ async def join_game_route(
 @router.post("/join-queue", response_model=JoinQueueResponse, tags=["Game"])
 async def join_game_queue(
     request: JoinQueueRequest,
+    http_request: Request,
     current_player: Players = Depends(get_current_player),
     db: Session = Depends(get_db),
 ):
@@ -237,16 +239,39 @@ async def join_game_queue(
     Returns a queue_id for tracking the join status.
     """
     try:
+        await enforce_rate_limit(
+            http_request,
+            scope="join-queue-player",
+            identifier=current_player.player_id,
+            limit=20,
+            window_seconds=300,
+        )
+        await enforce_rate_limit(
+            http_request,
+            scope="join-queue-ip",
+            identifier=get_client_ip(http_request),
+            limit=60,
+            window_seconds=300,
+        )
+        assert_public_or_member_or_owner(db, current_player, request.session_code)
+        if is_session_member(db, current_player, request.session_code):
+            return JoinQueueResponse(
+                success=True,
+                message="Already joined this session",
+                queue_id=None,
+                estimated_wait_time=0,
+            )
+
         # Ensure queue manager is running (start if not already running)
         if not join_queue_manager._running:
             try:
                 await join_queue_manager.start()
-            except Exception as e:
+            except Exception:
+                logger.exception("Could not start join queue manager")
                 return JoinQueueResponse(
-                    success=False, message=f"Failed to start queue system: {str(e)}"
+                    success=False,
+                    message="Join queue is temporarily unavailable",
                 )
-        if not join_queue_manager._running:
-            await join_queue_manager.start()
 
         # Add to queue
         queue_id = await join_queue_manager.add_to_queue(
@@ -266,10 +291,13 @@ async def join_game_queue(
             estimated_wait_time=estimated_wait,
         )
 
-    except Exception as e:
-        return JoinQueueResponse(
-            success=False, message=f"Failed to add to join queue: {str(e)}"
+    except Exception:
+        logger.exception(
+            "Failed to add player %s to join queue for session %s",
+            current_player.player_id,
+            request.session_code,
         )
+        return JoinQueueResponse(success=False, message="Failed to add to join queue")
 
 
 @router.get(
@@ -289,10 +317,9 @@ async def get_queue_status(queue_id: str):
             success=True, message="Queue status retrieved successfully", **status
         )
 
-    except Exception as e:
-        return QueueStatusResponse(
-            success=False, message=f"Failed to get queue status: {str(e)}"
-        )
+    except Exception:
+        logger.exception("Failed to get queue status for %s", queue_id)
+        return QueueStatusResponse(success=False, message="Failed to get queue status")
 
 
 @router.get("/queue-stats", response_model=QueueStatsResponse, tags=["Game"])
@@ -307,9 +334,10 @@ async def get_queue_stats(_: str = Depends(require_admin_api_key)):
             success=True, message="Queue statistics retrieved successfully", stats=stats
         )
 
-    except Exception as e:
+    except Exception:
+        logger.exception("Failed to get queue statistics")
         return QueueStatsResponse(
-            success=False, message=f"Failed to get queue statistics: {str(e)}"
+            success=False, message="Failed to get queue statistics"
         )
 
 

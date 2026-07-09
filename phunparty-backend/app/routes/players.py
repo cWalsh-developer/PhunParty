@@ -47,6 +47,12 @@ from sqlalchemy.orm import Session
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+GENERIC_REGISTRATION_MESSAGE = (
+    "If the account can be registered, a verification link will be sent."
+)
+GENERIC_VERIFICATION_RESEND_MESSAGE = (
+    "If that account requires verification, a verification link will be sent."
+)
 
 
 def utc_now() -> datetime:
@@ -152,12 +158,7 @@ async def create_player_route(
                     existing_player.player_email,
                     verification_token,
                 )
-                return {
-                    "message": "If the account can be registered, a verification link will be sent."
-                }
-            raise HTTPException(
-                status_code=400, detail="Account with this email already exists"
-            )
+            return {"message": GENERIC_REGISTRATION_MESSAGE}
         await enforce_email_verification_send_limits(request, player.player_email)
         verification_token = generate_email_verification_token()
         new_player = create_player(
@@ -284,10 +285,10 @@ async def resend_email_verification_route(
     ensure_email_verification_columns()
     player = get_player_by_email(db, payload.player_email)
     if not player:
-        return {"message": "If that account exists, a verification code was sent"}
+        return {"message": GENERIC_VERIFICATION_RESEND_MESSAGE}
 
     if player.email_verified:
-        return {"message": "Email already verified"}
+        return {"message": GENERIC_VERIFICATION_RESEND_MESSAGE}
 
     verification_token = issue_email_verification_token(db, player)
     background_tasks.add_task(
@@ -296,7 +297,7 @@ async def resend_email_verification_route(
         verification_token,
     )
 
-    return {"message": "Verification link sent"}
+    return {"message": GENERIC_VERIFICATION_RESEND_MESSAGE}
 
 
 @router.get("/me", response_model=PlayerResponse, tags=["Players"])

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.config import Base
 from sqlalchemy import (
@@ -32,7 +32,9 @@ class PlayerResponse(Base):
     question_id = Column(String, ForeignKey("questions.question_id"), nullable=False)
     player_answer = Column(String, nullable=False)  # A, B, C, D or text answer
     is_correct = Column(Boolean, nullable=False)
-    submitted_at = Column(DateTime, default=datetime.utcnow)
+    submitted_at = Column(
+        DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None)
+    )
 
 
 class GameSessionState(Base):

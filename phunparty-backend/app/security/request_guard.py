@@ -45,6 +45,10 @@ GUARD_EXCLUDED_PATHS = {
 }
 
 
+def request_path(request: Request) -> str:
+    return request.scope.get("path") or request.url.path
+
+
 def json_error(status_code: int, detail: str, headers: dict[str, str] | None = None):
     return JSONResponse(
         status_code=status_code,
@@ -80,7 +84,7 @@ def decode_subject_from_bearer_token(request: Request) -> str | None:
 
 def endpoint_key(request: Request) -> str:
     segments = []
-    for segment in request.url.path.strip("/").split("/"):
+    for segment in request_path(request).strip("/").split("/"):
         decoded = unquote_plus(segment)
         if PATH_TOKEN_PATTERN.fullmatch(decoded):
             segments.append("{id}")
@@ -109,7 +113,7 @@ def contains_suspicious_value(value: Any) -> bool:
 
 
 def validate_path_and_query(request: Request):
-    if contains_suspicious_string(request.url.path):
+    if contains_suspicious_string(request_path(request)):
         return json_error(400, "Invalid request path")
 
     for key, value in request.query_params.multi_items():
@@ -157,7 +161,7 @@ async def read_and_validate_json_body(request: Request) -> JSONResponse | None:
 
 
 async def enforce_endpoint_pattern_limits(request: Request) -> JSONResponse | None:
-    if request.url.path in GUARD_EXCLUDED_PATHS:
+    if request_path(request) in GUARD_EXCLUDED_PATHS:
         return None
 
     subject = decode_subject_from_bearer_token(request)

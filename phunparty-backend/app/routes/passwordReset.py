@@ -1,4 +1,7 @@
+import asyncio
+import logging
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 
 from app.database.refresh_token_crud import (
@@ -36,13 +39,22 @@ from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 GENERIC_RESET_MESSAGE = "If that phone number is registered, a reset code will be sent."
+RESET_REQUEST_MIN_SECONDS = 0.6
 
 
 def generate_otp():
     """Generate a 6-digit OTP"""
     return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def mask_phone_for_log(phone_number: str | None) -> str:
+    if not phone_number:
+        return "unknown"
+    digits = "".join(ch for ch in phone_number if ch.isdigit())
+    return f"***{digits[-4:]}" if len(digits) >= 4 else "***"
 
 
 def reset_rate_identifier(phone_number: str) -> str:
@@ -52,6 +64,12 @@ def reset_rate_identifier(phone_number: str) -> str:
         normalized = None
 
     return normalized or phone_number.strip().lower()
+
+
+async def equalize_reset_request_timing(started_at: float) -> None:
+    remaining = RESET_REQUEST_MIN_SECONDS - (time.perf_counter() - started_at)
+    if remaining > 0:
+        await asyncio.sleep(remaining)
 
 
 def create_password_reset_token(db: Session, player_id: str, phone_number: str) -> str:
@@ -125,6 +143,7 @@ async def request_password_reset(
     phone: PasswordResetRequest,
     db: Session = Depends(get_db),
 ):
+    started_at = time.perf_counter()
     phone_identifier = reset_rate_identifier(phone.phone_number)
     await enforce_rate_limit(
         request,
@@ -144,6 +163,7 @@ async def request_password_reset(
     try:
         player, stored_phone = find_player_for_reset(db, phone.phone_number)
         if not player:
+            await equalize_reset_request_timing(started_at)
             return {"message": GENERIC_RESET_MESSAGE}
 
         otp = generate_otp()
@@ -158,12 +178,19 @@ async def request_password_reset(
         number = format_number_uk(stored_phone)
         result = send_sms(number, message, db)
         if not result:
-            raise HTTPException(status_code=500, detail="Failed to send SMS")
+            logger.warning(
+                "Password reset SMS provider did not send to %s",
+                mask_phone_for_log(stored_phone),
+            )
 
+        await equalize_reset_request_timing(started_at)
         return {"message": GENERIC_RESET_MESSAGE}
     except HTTPException:
+        await equalize_reset_request_timing(started_at)
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Password reset request failed")
+        await equalize_reset_request_timing(started_at)
         raise HTTPException(
             status_code=500, detail="Password reset service temporarily unavailable"
         )

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -51,6 +52,10 @@ class JoinQueueManager:
         self.processing_sessions: Set[str] = set()
         self.queue_timeout = 30  # seconds
         self.cleanup_interval = 60  # seconds
+        self.max_total_entries = int(os.getenv("JOIN_QUEUE_MAX_TOTAL", "500"))
+        self.max_outstanding_per_player = int(
+            os.getenv("JOIN_QUEUE_MAX_OUTSTANDING_PER_PLAYER", "3")
+        )
         self._processor_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
         self._running = False
@@ -101,15 +106,45 @@ class JoinQueueManager:
         Returns:
             queue_id: Unique identifier for tracking this queue entry
         """
+        session_code = session_code.upper()
+        outstanding_statuses = {QueueStatus.PENDING, QueueStatus.PROCESSING}
+
+        for existing in self.queue.values():
+            if (
+                existing.player_id == player_id
+                and existing.session_code == session_code
+                and existing.status in outstanding_statuses
+            ):
+                logger.info(
+                    "Reusing outstanding queue entry %s for player %s session %s",
+                    existing.queue_id,
+                    player_id,
+                    session_code,
+                )
+                return existing.queue_id
+
+        if len(self.queue) >= self.max_total_entries:
+            raise ValueError("Join queue is currently full. Please try again shortly.")
+
+        outstanding_for_player = sum(
+            1
+            for entry in self.queue.values()
+            if entry.player_id == player_id and entry.status in outstanding_statuses
+        )
+        if outstanding_for_player >= self.max_outstanding_per_player:
+            raise ValueError(
+                "Too many pending join requests. Please wait and try again."
+            )
+
         queue_id = str(uuid.uuid4())
 
         entry = QueueEntry(
             queue_id=queue_id,
             player_id=player_id,
-            session_code=session_code.upper(),
+            session_code=session_code,
             websocket_id=websocket_id,
             status=QueueStatus.PENDING,
-            created_at=datetime.now(),
+            created_at=utc_now(),
         )
 
         self.queue[queue_id] = entry

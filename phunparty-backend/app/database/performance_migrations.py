@@ -139,6 +139,52 @@ UNIQUE_PLAYER_RESPONSE_INDEX_SQLITE = UNIQUE_PLAYER_RESPONSE_INDEX_POSTGRES.repl
     " CONCURRENTLY", ""
 )
 
+PLAYER_RESPONSE_DUPLICATE_REMOVAL_COUNT = """
+SELECT COALESCE(SUM(duplicate_count - 1), 0) AS duplicate_rows
+FROM (
+    SELECT COUNT(*) AS duplicate_count
+    FROM player_responses
+    GROUP BY session_code, player_id, question_id
+    HAVING COUNT(*) > 1
+) duplicates
+"""
+
+DEDUPLICATE_PLAYER_RESPONSES = """
+WITH ranked AS (
+    SELECT
+        response_id,
+        ROW_NUMBER() OVER (
+            PARTITION BY session_code, player_id, question_id
+            ORDER BY (submitted_at IS NULL), submitted_at, response_id
+        ) AS row_number
+    FROM player_responses
+)
+DELETE FROM player_responses
+WHERE response_id IN (
+    SELECT response_id
+    FROM ranked
+    WHERE row_number > 1
+)
+"""
+
+VERIFY_PLAYER_RESPONSE_INDEX_POSTGRES = """
+SELECT 1
+FROM pg_indexes
+WHERE schemaname = current_schema()
+  AND tablename = 'player_responses'
+  AND indexname = 'uq_player_responses_session_player_question'
+LIMIT 1
+"""
+
+VERIFY_PLAYER_RESPONSE_INDEX_SQLITE = """
+SELECT 1
+FROM sqlite_master
+WHERE type = 'index'
+  AND tbl_name = 'player_responses'
+  AND name = 'uq_player_responses_session_player_question'
+LIMIT 1
+"""
+
 
 def _execute_index(connection, statement: str) -> None:
     connection.execute(text(statement))
@@ -169,22 +215,66 @@ def _create_unique_score_index(connection, statement: str) -> None:
         logger.warning("Could not create unique score index: %s", exc)
 
 
-def _create_unique_player_response_index(connection, statement: str) -> None:
-    try:
-        duplicate = connection.execute(text(PLAYER_RESPONSE_DUPLICATE_CHECK)).first()
-        if duplicate:
-            logger.warning(
-                "Skipping uq_player_responses_session_player_question because duplicate "
-                "response rows exist for session %s player %s question %s",
-                duplicate.session_code,
-                duplicate.player_id,
-                duplicate.question_id,
-            )
-            return
+def _deduplicate_player_responses(connection) -> int:
+    duplicate_rows = (
+        connection.execute(text(PLAYER_RESPONSE_DUPLICATE_REMOVAL_COUNT)).scalar() or 0
+    )
+    if not duplicate_rows:
+        return 0
 
-        _execute_index(connection, statement)
-    except Exception as exc:
-        logger.warning("Could not create unique player response index: %s", exc)
+    logger.warning(
+        "Removing %s duplicate player response rows before enforcing unique answers",
+        duplicate_rows,
+    )
+    connection.execute(text(DEDUPLICATE_PLAYER_RESPONSES))
+    remaining_duplicate = connection.execute(
+        text(PLAYER_RESPONSE_DUPLICATE_CHECK)
+    ).first()
+    if remaining_duplicate:
+        raise RuntimeError(
+            "Could not remove duplicate player response rows for "
+            f"session={remaining_duplicate.session_code} "
+            f"player={remaining_duplicate.player_id} "
+            f"question={remaining_duplicate.question_id}"
+        )
+    return int(duplicate_rows)
+
+
+def _verify_unique_player_response_index(connection, statement: str) -> None:
+    if not connection.execute(text(statement)).first():
+        raise RuntimeError(
+            "Required unique index uq_player_responses_session_player_question "
+            "was not created"
+        )
+
+
+def ensure_required_security_constraints() -> None:
+    """Apply required DB invariants that game integrity depends on."""
+    is_postgres = engine.dialect.name == "postgresql"
+    unique_player_response_statement = (
+        UNIQUE_PLAYER_RESPONSE_INDEX_POSTGRES
+        if is_postgres
+        else UNIQUE_PLAYER_RESPONSE_INDEX_SQLITE
+    )
+    verify_statement = (
+        VERIFY_PLAYER_RESPONSE_INDEX_POSTGRES
+        if is_postgres
+        else VERIFY_PLAYER_RESPONSE_INDEX_SQLITE
+    )
+
+    connectable = engine.connect()
+    if is_postgres:
+        connectable = connectable.execution_options(isolation_level="AUTOCOMMIT")
+
+    with connectable as connection:
+        removed_count = _deduplicate_player_responses(connection)
+        _execute_index(connection, unique_player_response_statement)
+        _verify_unique_player_response_index(connection, verify_statement)
+
+    logger.info(
+        "Required security constraints are ready; removed %s duplicate player response rows",
+        removed_count,
+    )
 
 
 def ensure_performance_indexes() -> None:
@@ -194,11 +284,6 @@ def ensure_performance_indexes() -> None:
     unique_score_statement = (
         UNIQUE_SCORE_INDEX_POSTGRES if is_postgres else UNIQUE_SCORE_INDEX_SQLITE
     )
-    unique_player_response_statement = (
-        UNIQUE_PLAYER_RESPONSE_INDEX_POSTGRES
-        if is_postgres
-        else UNIQUE_PLAYER_RESPONSE_INDEX_SQLITE
-    )
 
     connectable = engine.connect()
     if is_postgres:
@@ -207,8 +292,5 @@ def ensure_performance_indexes() -> None:
     with connectable as connection:
         _create_indexes(connection, statements)
         _create_unique_score_index(connection, unique_score_statement)
-        _create_unique_player_response_index(
-            connection, unique_player_response_statement
-        )
 
     logger.info("Performance indexes are ready")
