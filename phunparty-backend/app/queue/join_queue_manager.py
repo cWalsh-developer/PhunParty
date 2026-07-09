@@ -271,6 +271,7 @@ class JoinQueueManager:
         """
         try:
             from app.dependencies import get_db
+            from app.security.rls import set_rls_current_player
             from sqlalchemy.orm import Session
 
             # Get database session - this is a workaround since we don't have async db functions
@@ -280,6 +281,7 @@ class JoinQueueManager:
 
             try:
                 # Use the existing join_game function which handles all the logic
+                set_rls_current_player(db, player_id)
                 result = join_game(db, session_code, player_id)
 
                 return {
@@ -298,13 +300,13 @@ class JoinQueueManager:
                 return {"success": False, "message": str(e)}
             except Exception as e:
                 logger.error(f"Unexpected error in join_game: {e}", exc_info=True)
-                return {"success": False, "message": f"Internal error: {str(e)}"}
+                return {"success": False, "message": "Internal error"}
             finally:
-                db.close()
+                db_gen.close()
 
         except Exception as e:
             logger.error(f"Error in _attempt_join: {e}", exc_info=True)
-            return {"success": False, "message": f"Internal error: {str(e)}"}
+            return {"success": False, "message": "Internal error"}
 
     async def _notify_websocket(self, websocket_id: str, message: Dict):
         """Send notification via WebSocket"""

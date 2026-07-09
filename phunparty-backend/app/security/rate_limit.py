@@ -121,6 +121,10 @@ class RateLimiter:
             await self._redis.expire(key, window_seconds)
 
         ttl = await self._redis.ttl(key)
+        if ttl < 0:
+            await self._redis.expire(key, window_seconds)
+            ttl = window_seconds
+
         retry_after = ttl if ttl > 0 else window_seconds
         return current <= limit, retry_after
 

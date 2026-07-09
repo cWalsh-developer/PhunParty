@@ -3,7 +3,7 @@ from html import unescape
 from typing import Any, Optional
 
 from app.utils.phone_numbers import normalize_phone_number
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 
 CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 EMAIL_RE = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
@@ -13,6 +13,15 @@ SCRIPT_TAG_RE = re.compile(r"<\s*script\b[^>]*>.*?<\s*/\s*script\s*>", re.I | re
 SCRIPT_OPEN_CLOSE_RE = re.compile(r"<\s*/?\s*script\b[^>]*>", re.I)
 EVENT_HANDLER_RE = re.compile(r"\s+on[a-z]+\s*=\s*(['\"]).*?\1", re.I | re.S)
 JS_PROTOCOL_RE = re.compile(r"javascript\s*:", re.I)
+SENSITIVE_STRING_FIELDS = {
+    "password",
+    "hashed_password",
+    "new_password",
+    "reset_token",
+    "refresh_token",
+    "access_token",
+    "token",
+}
 
 
 def reject_control_chars(value: str, field_name: str) -> str:
@@ -32,7 +41,21 @@ def sanitize_string(value: str) -> str:
     return value
 
 
-def sanitize_input(value: Any) -> Any:
+def is_sensitive_field_name(field_name: str | None) -> bool:
+    if not field_name:
+        return False
+    normalized = field_name.strip().lower()
+    return (
+        normalized in SENSITIVE_STRING_FIELDS
+        or normalized.endswith("_password")
+        or normalized.endswith("_token")
+    )
+
+
+def sanitize_input(value: Any, field_name: str | None = None) -> Any:
+    if is_sensitive_field_name(field_name):
+        return value
+
     if isinstance(value, str):
         return sanitize_string(value)
     if isinstance(value, list):
@@ -41,7 +64,7 @@ def sanitize_input(value: Any) -> Any:
         return tuple(sanitize_input(item) for item in value)
     if isinstance(value, dict):
         return {
-            sanitize_string(str(key)): sanitize_input(item)
+            sanitize_string(str(key)): sanitize_input(item, str(key))
             for key, item in value.items()
         }
     return value
@@ -58,8 +81,8 @@ class SanitizedRequestModel(BaseModel):
 
     @field_validator("*", mode="before", check_fields=False)
     @classmethod
-    def sanitize_all_fields(cls, value: Any) -> Any:
-        return sanitize_input(value)
+    def sanitize_all_fields(cls, value: Any, info: ValidationInfo) -> Any:
+        return sanitize_input(value, info.field_name)
 
 
 def validate_display_text(

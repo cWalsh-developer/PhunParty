@@ -300,11 +300,21 @@ def get_all_games(db: Session) -> list[Game]:
 
 def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
     """Join an existing game session."""
-    gameSession = get_session_by_code(db, session_code)
+    gameSession = (
+        db.query(GameSession)
+        .filter(GameSession.session_code == session_code)
+        .with_for_update()
+        .first()
+    )
     if not gameSession:
         raise ValueError("Game session not found")
 
-    player = get_player_by_ID(db, player_id)
+    player = (
+        db.query(Players)
+        .filter(Players.player_id == player_id)
+        .with_for_update()
+        .first()
+    )
     if not player:
         raise ValueError("Player not found")
 
@@ -325,7 +335,8 @@ def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
             player.active_game_code = None
             db.flush()
 
-    update_player_game_code(db, player_id, gameSession.session_code)
+    player.active_game_code = gameSession.session_code
+    db.flush()
     assign_player_to_session(db, player_id, session_code)
     create_score(db, session_code, player_id)
     db.commit()
@@ -861,9 +872,10 @@ def get_number_of_players_in_session(db: Session, session_code: str) -> int:
     if not session:
         raise ValueError("Session not found")
     return (
-        db.query(SessionAssignment)
+        db.query(func.count(func.distinct(SessionAssignment.player_id)))
         .filter(SessionAssignment.session_code == session_code)
-        .count()
+        .scalar()
+        or 0
     )
 
 
@@ -1513,9 +1525,10 @@ def get_session_player_count(db: Session, session_code: str) -> int:
     """Get the number of players currently in a session"""
     try:
         count = (
-            db.query(SessionAssignment)
+            db.query(func.count(func.distinct(SessionAssignment.player_id)))
             .filter(SessionAssignment.session_code == session_code)
-            .count()
+            .scalar()
+            or 0
         )
         return count
     except Exception:

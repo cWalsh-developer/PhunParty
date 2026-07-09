@@ -176,7 +176,14 @@ async def request_password_reset(
 
         message = f"Your password reset code is: {otp}"
         number = format_number_uk(stored_phone)
-        result = send_sms(number, message, db)
+        try:
+            result = send_sms(number, message, db)
+        except Exception:
+            logger.exception(
+                "Password reset SMS delivery failed for %s",
+                mask_phone_for_log(stored_phone),
+            )
+            result = False
         if not result:
             logger.warning(
                 "Password reset SMS provider did not send to %s",

@@ -181,15 +181,12 @@ async def create_player_route(
             new_player.player_email,
             verification_token,
         )
-        return PlayerResponse.model_validate(new_player).model_dump()
+        return {"message": GENERIC_REGISTRATION_MESSAGE}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except IntegrityError:
         db.rollback()
-        raise HTTPException(
-            status_code=400,
-            detail="Account with this email or phone number already exists",
-        )
+        return {"message": GENERIC_REGISTRATION_MESSAGE}
     except HTTPException:
         raise
     except Exception:

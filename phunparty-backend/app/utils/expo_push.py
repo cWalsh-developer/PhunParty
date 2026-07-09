@@ -1,4 +1,5 @@
 import logging
+from hashlib import sha256
 from typing import Optional
 
 import aiohttp
@@ -6,6 +7,10 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
+
+
+def token_ref(token: str) -> str:
+    return sha256(token.encode("utf-8")).hexdigest()[:12]
 
 
 async def send_expo_push(
@@ -24,26 +29,21 @@ async def send_expo_push(
             timeout=aiohttp.ClientTimeout(total=10)
         ) as client:
             async with client.post(EXPO_PUSH_URL, json=payload) as response:
+                response_text = await response.text()
                 if response.status >= 400:
-                    response_text = await response.text()
                     logger.warning(
-                        "Expo push failed for token %s: %s %s",
-                        token,
+                        "Expo push failed token_ref=%s status=%s",
+                        token_ref(token),
                         response.status,
-                        response_text,
                     )
                     return False
-                logger.warning(
-                    "Expo push response: status=%s body=%s",
-                    response.status,
-                    response_text,
-                )
+                logger.debug("Expo push response status=%s", response.status)
                 return (
                     '"status":"ok"' in response_text
                     or '"status": "ok"' in response_text
                 )
     except Exception:
-        logger.exception("Expo push failed for token %s", token)
+        logger.exception("Expo push failed token_ref=%s", token_ref(token))
         return False
 
 

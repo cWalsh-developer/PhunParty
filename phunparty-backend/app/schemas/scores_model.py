@@ -2,11 +2,18 @@ from app.config import Base
 from app.models.enums import ResultType
 from sqlalchemy import Column
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import ForeignKey, Integer, String
+from sqlalchemy import ForeignKey, Integer, String, UniqueConstraint
 
 
 class Scores(Base):
     __tablename__ = "scores"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_code",
+            "player_id",
+            name="uq_scores_session_player",
+        ),
+    )
 
     score_id = Column(String, primary_key=True, index=False)
     score = Column(Integer, nullable=False)
