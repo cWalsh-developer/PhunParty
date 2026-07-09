@@ -69,6 +69,10 @@ class RateLimiter:
             try:
                 return await self._hit_redis(key, limit, window_seconds)
             except Exception as exc:
+                if self._require_redis:
+                    raise RuntimeError(
+                        "Redis rate limiter is required but failed"
+                    ) from exc
                 logger.warning(
                     "Redis rate limiter failed; falling back to in-memory limits: %s",
                     exc,

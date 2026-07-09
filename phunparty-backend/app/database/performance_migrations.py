@@ -122,6 +122,23 @@ ON scores (session_code, player_id)
 
 UNIQUE_SCORE_INDEX_SQLITE = UNIQUE_SCORE_INDEX_POSTGRES.replace(" CONCURRENTLY", "")
 
+PLAYER_RESPONSE_DUPLICATE_CHECK = """
+SELECT session_code, player_id, question_id, COUNT(*) AS duplicate_count
+FROM player_responses
+GROUP BY session_code, player_id, question_id
+HAVING COUNT(*) > 1
+LIMIT 1
+"""
+
+UNIQUE_PLAYER_RESPONSE_INDEX_POSTGRES = """
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS uq_player_responses_session_player_question
+ON player_responses (session_code, player_id, question_id)
+"""
+
+UNIQUE_PLAYER_RESPONSE_INDEX_SQLITE = UNIQUE_PLAYER_RESPONSE_INDEX_POSTGRES.replace(
+    " CONCURRENTLY", ""
+)
+
 
 def _execute_index(connection, statement: str) -> None:
     connection.execute(text(statement))
@@ -152,12 +169,35 @@ def _create_unique_score_index(connection, statement: str) -> None:
         logger.warning("Could not create unique score index: %s", exc)
 
 
+def _create_unique_player_response_index(connection, statement: str) -> None:
+    try:
+        duplicate = connection.execute(text(PLAYER_RESPONSE_DUPLICATE_CHECK)).first()
+        if duplicate:
+            logger.warning(
+                "Skipping uq_player_responses_session_player_question because duplicate "
+                "response rows exist for session %s player %s question %s",
+                duplicate.session_code,
+                duplicate.player_id,
+                duplicate.question_id,
+            )
+            return
+
+        _execute_index(connection, statement)
+    except Exception as exc:
+        logger.warning("Could not create unique player response index: %s", exc)
+
+
 def ensure_performance_indexes() -> None:
     """Create indexes used by social, game, score, and refresh-token queries."""
     is_postgres = engine.dialect.name == "postgresql"
     statements = POSTGRES_INDEXES if is_postgres else SQLITE_INDEXES
     unique_score_statement = (
         UNIQUE_SCORE_INDEX_POSTGRES if is_postgres else UNIQUE_SCORE_INDEX_SQLITE
+    )
+    unique_player_response_statement = (
+        UNIQUE_PLAYER_RESPONSE_INDEX_POSTGRES
+        if is_postgres
+        else UNIQUE_PLAYER_RESPONSE_INDEX_SQLITE
     )
 
     connectable = engine.connect()
@@ -167,5 +207,8 @@ def ensure_performance_indexes() -> None:
     with connectable as connection:
         _create_indexes(connection, statements)
         _create_unique_score_index(connection, unique_score_statement)
+        _create_unique_player_response_index(
+            connection, unique_player_response_statement
+        )
 
     logger.info("Performance indexes are ready")

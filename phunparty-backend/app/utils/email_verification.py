@@ -33,9 +33,7 @@ def generate_email_verification_token() -> str:
 
 
 def email_verification_expires_at() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None) + timedelta(
-        minutes=TOKEN_TTL_MINUTES
-    )
+    return datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=TOKEN_TTL_MINUTES)
 
 
 def hash_email_verification_code(email: str, code: str) -> str:
@@ -58,13 +56,17 @@ def hash_email_verification_token(token: str) -> str:
 
 
 def build_email_verification_url(token: str) -> str:
-    base_url = os.getenv("EMAIL_VERIFICATION_WEB_URL", "https://phun.party/#/verify-email")
+    base_url = os.getenv(
+        "EMAIL_VERIFICATION_WEB_URL", "https://phun.party/#/verify-email"
+    )
     separator = "&" if "?" in base_url else "?"
     return f"{base_url}{separator}{urlencode({'token': token})}"
 
 
 def build_app_email_verification_url(token: str) -> str | None:
-    base_url = os.getenv("EMAIL_VERIFICATION_APP_URL", "phunpartymobileapp://verify-email")
+    base_url = os.getenv(
+        "EMAIL_VERIFICATION_APP_URL", "phunpartymobileapp://verify-email"
+    )
     if not base_url:
         return None
     separator = "&" if "?" in base_url else "?"
@@ -224,9 +226,7 @@ def _send_with_resend(
 def send_email_verification_link(to_email: str, token: str) -> bool:
     smtp_username = os.getenv("SMTP_USERNAME")
     from_email = (
-        os.getenv("SMTP_FROM_EMAIL")
-        or os.getenv("RESEND_FROM_EMAIL")
-        or smtp_username
+        os.getenv("SMTP_FROM_EMAIL") or os.getenv("RESEND_FROM_EMAIL") or smtp_username
     )
     from_name = os.getenv("SMTP_FROM_NAME", "PhunParty")
     has_smtp = bool(os.getenv("SMTP_HOST"))
@@ -234,9 +234,8 @@ def send_email_verification_link(to_email: str, token: str) -> bool:
 
     if not from_email and not os.getenv("RESEND_FROM"):
         logger.warning(
-            "Email verification sender is not configured. Verification link for %s is %s",
+            "Email verification sender is not configured for %s; not logging live verification URL",
             to_email,
-            build_email_verification_url(token),
         )
         return False
 
@@ -268,9 +267,8 @@ def send_email_verification_link(to_email: str, token: str) -> bool:
 
     if not sent:
         logger.warning(
-            "No email verification provider sent a message. Verification link for %s is %s",
+            "No email verification provider sent a message for %s; not logging live verification URL",
             to_email,
-            build_email_verification_url(token),
         )
         return False
 

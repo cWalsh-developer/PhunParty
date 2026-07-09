@@ -45,6 +45,7 @@ sys.modules.setdefault("passlib.context", passlib_context_module)
 from app.database import dbCRUD
 from app.logic import answer_validation, game_logic
 from app.schemas.game_state_models import GameSessionState
+from app.security import game_phase
 from app.websockets import game_handlers, game_lifecycle, game_modes, routes, scheduler
 from app.websockets.manager import SessionPhase, manager
 
@@ -775,6 +776,68 @@ def test_resolve_session_game_type_uses_game_rules():
         )
 
     assert result == "buzzer"
+
+
+def test_question_phase_rejects_countdown_answers():
+    with patch.object(game_phase, "manager") as mock_manager:
+        mock_manager.get_session_phase_state.return_value = {
+            "phase": SessionPhase.COUNTDOWN.value,
+            "current_question_id": "Q1",
+        }
+
+        allowed, reason = game_phase.is_question_accepting_answers("SESSION123", "Q1")
+
+    assert allowed is False
+    assert reason == "question_not_active"
+
+
+def test_question_phase_rejects_future_start_time():
+    future_start = (datetime.now(UTC) + timedelta(seconds=5)).isoformat()
+
+    with patch.object(game_phase, "manager") as mock_manager:
+        mock_manager.get_session_phase_state.return_value = {
+            "phase": SessionPhase.QUESTION.value,
+            "current_question_id": "Q1",
+            "start_at": future_start,
+        }
+
+        allowed, reason = game_phase.is_question_accepting_answers("SESSION123", "Q1")
+
+    assert allowed is False
+    assert reason == "question_not_started"
+
+
+def test_deprecated_ws_question_request_never_returns_question_payload():
+    websocket = MagicMock()
+
+    with patch.object(routes, "manager") as mock_manager:
+        mock_manager.send_personal_message = AsyncMock(return_value=True)
+
+        asyncio.run(
+            routes.handle_get_question_with_options(websocket, "Q1", MagicMock())
+        )
+
+    mock_manager.send_personal_message.assert_awaited_once()
+    payload = mock_manager.send_personal_message.await_args.args[0]
+    assert payload["type"] == "error"
+    assert "question_with_options" not in str(payload)
+
+
+def test_mobile_handshake_ignores_requested_game_type():
+    session = SimpleNamespace(game_code="GAME1")
+    game = SimpleNamespace(rules="Trivia", genre="Trivia")
+
+    with patch.object(game_modes.manager, "set_session_game_type") as set_game_type:
+        with patch.object(game_modes, "get_game_by_code", return_value=game):
+            result = game_modes.resolve_session_game_type(
+                MagicMock(),
+                "SESSION123",
+                session=session,
+                requested_game_type=None,
+            )
+
+    assert result == "trivia"
+    set_game_type.assert_called_with("SESSION123", "trivia")
 
 
 def test_mobile_initial_state_sends_queued_question_during_question_phase():

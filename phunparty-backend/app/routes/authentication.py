@@ -151,11 +151,11 @@ async def refresh_access_token(
     if not existing:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-    if match_type == "reused_previous":
+    if match_type in {"previous", "reused_previous"}:
         revoke_refresh_session(
             db,
             existing,
-            reason="previous_refresh_token_reused",
+            reason=f"{match_type}_refresh_token_reused",
         )
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 

@@ -31,6 +31,7 @@ from app.database.fair_play_crud import (
 from app.logic.answer_validation import validate_answer_against_question
 from app.security.question_payload import sanitize_question_for_client
 from app.security.rls import set_rls_current_player
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -106,14 +107,18 @@ def submit_player_answer(
     is_correct = validation.is_correct
 
     # Record the player's response
-    create_player_response(
-        db,
-        session_code,
-        player_id,
-        authoritative_question_id,
-        player_answer,
-        is_correct,
-    )
+    try:
+        create_player_response(
+            db,
+            session_code,
+            player_id,
+            authoritative_question_id,
+            player_answer,
+            is_correct,
+        )
+    except IntegrityError:
+        db.rollback()
+        return {"error": "Player has already answered this question"}
 
     # Update score if correct
     if is_correct:

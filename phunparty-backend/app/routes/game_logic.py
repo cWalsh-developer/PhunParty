@@ -8,6 +8,10 @@ from app.logic.game_logic import (
 from app.models.response_models import GameStatusResponse, SubmitAnswerRequest
 from app.schemas.players_model import Players
 from app.security.ownership import assert_session_member_or_owner, assert_session_owner
+from app.security.game_phase import (
+    assert_question_accepting_answers,
+    should_expose_current_question,
+)
 from app.security.question_payload import sanitize_question_for_client
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -40,6 +44,7 @@ async def submit_answer(
             window_seconds=60,
         )
         assert_session_member_or_owner(db, current_player, request.session_code)
+        assert_question_accepting_answers(request.session_code, request.question_id)
         result = submit_player_answer(
             db=db,
             session_code=request.session_code,
@@ -73,7 +78,18 @@ def get_session_status(
         status = get_current_question_details(db, session_code)
         if "error" in status:
             raise HTTPException(status_code=404, detail=status["error"])
-        return strip_answer_fields(status)
+        status = strip_answer_fields(status)
+        current_question = status.get("current_question") if status else None
+        question_id = (
+            current_question.get("question_id")
+            if isinstance(current_question, dict)
+            else None
+        )
+        if current_question and not should_expose_current_question(
+            session_code, question_id
+        ):
+            status["current_question"] = None
+        return status
     except HTTPException:
         raise
     except Exception as e:
@@ -92,7 +108,12 @@ def get_current_question(
     try:
         assert_session_member_or_owner(db, current_player, session_code)
         result = get_current_question_for_session(db, session_code)
-        return strip_answer_fields(result)
+        result = strip_answer_fields(result)
+        if result.get("question_id") and not should_expose_current_question(
+            session_code, result.get("question_id")
+        ):
+            raise HTTPException(status_code=409, detail="Question is not active yet")
+        return result
     except HTTPException:
         raise
     except Exception as e:

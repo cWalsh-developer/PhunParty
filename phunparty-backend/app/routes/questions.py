@@ -1,10 +1,9 @@
 import json
 
 from app.database.dbCRUD import get_question_by_id, submit_questions
-from app.dependencies import get_current_player, get_db, require_admin_api_key
+from app.dependencies import get_db, require_admin_api_key
 from app.models.enums import DifficultyLevel
 from app.models.response_models import QuestionRequest, QuestionsAddedResponseModel
-from app.schemas.players_model import Players
 from app.schemas.questions_model import Questions
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -16,7 +15,7 @@ router = APIRouter()
 def get_question_by_id_route(
     question_id: str,
     db: Session = Depends(get_db),
-    current_player: Players = Depends(get_current_player),
+    _: str = Depends(require_admin_api_key),
 ):
     """
     Retrieve public metadata for a question by ID.

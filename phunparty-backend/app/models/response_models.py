@@ -82,7 +82,7 @@ class GameStatusResponse(BaseModel):
     isstarted: bool
     current_question_index: int
     total_questions: int
-    current_question: dict
+    current_question: Optional[dict] = None
     players: dict
     started_at: Optional[str] = None
     ended_at: Optional[str] = None

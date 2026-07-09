@@ -5,7 +5,12 @@ from app.database.refresh_token_crud import (
     create_refresh_session,
     revoke_all_player_refresh_tokens,
 )
-from app.database.dbCRUD import get_player_by_phone, store_otp
+from app.database.dbCRUD import (
+    consume_password_reset_jti,
+    get_player_by_phone,
+    store_otp,
+    store_password_reset_jti,
+)
 from app.database.dbCRUD import update_password as updatePassword
 from app.database.dbCRUD import verify_otp
 from app.dependencies import get_db
@@ -49,18 +54,22 @@ def reset_rate_identifier(phone_number: str) -> str:
     return normalized or phone_number.strip().lower()
 
 
-def create_password_reset_token(player_id: str, phone_number: str) -> str:
+def create_password_reset_token(db: Session, player_id: str, phone_number: str) -> str:
+    jti = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    store_password_reset_jti(db, phone_number, jti, expires_at)
     return create_password_reset_jwt(
         data={
             "sub": player_id,
             "phone": phone_number,
             "purpose": "password_reset",
+            "jti": jti,
         },
-        expires_delta=timedelta(minutes=10),
+        expires_delta=expires_at - datetime.now(timezone.utc),
     )
 
 
-def verify_password_reset_token(token: str, phone_number: str) -> str:
+def verify_password_reset_token(token: str, phone_number: str) -> tuple[str, str]:
     try:
         payload = jwt.decode(
             token,
@@ -76,10 +85,11 @@ def verify_password_reset_token(token: str, phone_number: str) -> str:
         or payload.get("purpose") != "password_reset"
         or payload.get("phone") != phone_number
         or not payload.get("sub")
+        or not payload.get("jti")
     ):
         raise HTTPException(status_code=401, detail="Invalid reset token")
 
-    return payload["sub"]
+    return payload["sub"], payload["jti"]
 
 
 def get_phone_candidates(phone_number: str) -> list[str]:
@@ -198,6 +208,7 @@ async def verify_otp_route(
         return {
             "message": "Verification code confirmed",
             "reset_token": create_password_reset_token(
+                db,
                 player.player_id,
                 stored_phone,
             ),
@@ -229,26 +240,33 @@ async def update_password(
         if not player:
             raise HTTPException(status_code=401, detail="Invalid reset token")
 
-        player_id = verify_password_reset_token(phone.reset_token, stored_phone)
+        player_id, reset_jti = verify_password_reset_token(
+            phone.reset_token, stored_phone
+        )
         set_rls_reset_phone(db, stored_phone)
         if not player or player.player_id != player_id:
             raise HTTPException(status_code=401, detail="Invalid reset token")
 
         set_rls_current_player(db, player.player_id)
-        is_updated = updatePassword(db, stored_phone, phone.new_password)
+        if not consume_password_reset_jti(db, stored_phone, reset_jti):
+            raise HTTPException(status_code=401, detail="Invalid reset token")
+
+        is_updated = updatePassword(db, stored_phone, phone.new_password, commit=False)
         if not is_updated:
             raise HTTPException(
                 status_code=400,
                 detail="Failed to update password",
             )
 
-        revoke_all_player_refresh_tokens(db, player.player_id)
+        revoke_all_player_refresh_tokens(db, player.player_id, commit=False)
         refresh_token, _refresh_record = create_refresh_session(
             db,
             player.player_id,
             user_agent=request.headers.get("user-agent"),
             ip_address=get_client_ip(request),
+            commit=False,
         )
+        db.commit()
         access_token = create_access_token(
             data={
                 "sub": player.player_id,

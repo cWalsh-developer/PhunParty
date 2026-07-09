@@ -32,6 +32,7 @@ from app.dependencies import (
     require_admin_api_key,
 )
 from app.logic.game_logic import check_and_advance_game
+from app.security.game_phase import is_question_accepting_answers
 from app.security.loggingUtils import safe_player_ref
 from app.security.ownership import assert_session_member_or_owner, assert_session_owner
 from app.security.question_payload import sanitize_question_for_client
@@ -84,6 +85,7 @@ WEBSOCKET_MESSAGE_LIMITS = {
     "request_current_question": (20, 60),
 }
 WEBSOCKET_CONNECTION_LIMIT = (20, 300)
+WEBSOCKET_GLOBAL_MESSAGE_LIMIT = (120, 60)
 WEBSOCKET_BUZZER_LIMIT = (5, 3600)
 
 
@@ -116,6 +118,32 @@ async def enforce_websocket_message_rate_limit(
     player_id: Optional[str],
     data: dict,
 ) -> bool:
+    global_limit, global_window_seconds = WEBSOCKET_GLOBAL_MESSAGE_LIMIT
+    global_identifier = (
+        f"{session_code}:{player_id}"
+        if player_id
+        else f"{session_code}:{get_websocket_client_ip(websocket)}"
+    )
+    allowed, retry_after = await hit_websocket_limit(
+        scope="message-all",
+        identifier=global_identifier,
+        limit=global_limit,
+        window_seconds=global_window_seconds,
+    )
+    if not allowed:
+        await send_websocket_error_safely(
+            websocket,
+            "Too many realtime messages. Please slow down and try again later.",
+        )
+        logger.warning(
+            "WebSocket global message rate limit exceeded: session=%s player=%s type=%s retry_after=%s",
+            session_code,
+            safe_player_ref(player_id),
+            message_type,
+            retry_after,
+        )
+        return False
+
     if not player_id:
         return True
 
@@ -719,9 +747,9 @@ async def websocket_endpoint(
                     )
                     return
 
-                # Use player info from database if not provided in query params
-                player_name = player_name or player.player_name
-                player_photo = player_photo or player.profile_photo_url
+                # Authenticated roster identity is always sourced from the database.
+                player_name = player.player_name
+                player_photo = player.profile_photo_url
 
                 # CRITICAL: Check for existing connections from this player
                 # Prevent duplicate registrations that cause the 7x join bug
@@ -760,8 +788,14 @@ async def websocket_endpoint(
                         f"Cleanup complete - ready for new connection from {player_name}"
                     )
 
+            requested_handshake_game_type = (
+                game_type if client_type != "mobile" else None
+            )
             resolved_game_type = resolve_session_game_type(
-                db, session_code, session=session, requested_game_type=game_type
+                db,
+                session_code,
+                session=session,
+                requested_game_type=requested_handshake_game_type,
             )
             if (
                 resolved_game_type != BEAT_THE_CLOCK_GAME_TYPE
@@ -1341,19 +1375,23 @@ async def handle_websocket_message(
             )
             return
 
-        if current_phase != SessionPhase.QUESTION.value:
+        phase_allowed, phase_reason = is_question_accepting_answers(
+            session_code, question_id
+        )
+        if not phase_allowed:
             logger.warning(
-                "STALE ANSWER REJECTED phase mismatch session=%s player=%s incoming_question=%s phase=%s",
+                "STALE ANSWER REJECTED phase mismatch session=%s player=%s incoming_question=%s phase=%s reason=%s",
                 session_code,
                 player_id,
                 question_id,
                 current_phase,
+                phase_reason,
             )
             await manager.send_personal_message(
                 {
                     "type": "answer_rejected",
                     "data": {
-                        "reason": "question_not_active",
+                        "reason": phase_reason,
                         "message": "This question is no longer active.",
                         "question_id": question_id,
                         "current_question_id": current_question_id,
@@ -1774,15 +1812,21 @@ async def handle_websocket_message(
         )
 
     elif message_type == "get_question_with_options":
-        # Request for a specific question with randomized options
-        question_id = data.get("question_id")
-        if question_id:
-            await handle_get_question_with_options(websocket, question_id, db)
-        else:
-            await manager.send_personal_message(
-                {"type": "error", "data": {"message": "Question ID required"}},
-                websocket,
-            )
+        logger.warning(
+            "Blocked deprecated get_question_with_options message from %s client in session %s",
+            client_type,
+            session_code,
+        )
+        await manager.send_personal_message(
+            {
+                "type": "error",
+                "data": {
+                    "message": "This question request is no longer supported.",
+                    "reason": "deprecated_question_endpoint",
+                },
+            },
+            websocket,
+        )
 
     elif message_type == "broadcast_current_question" and client_type == "web":
         # Legacy host command: route through synchronized countdown.
@@ -3002,24 +3046,17 @@ async def kick_player_for_fair_play(
 async def handle_get_question_with_options(
     websocket: WebSocket, question_id: str, db: Session
 ):
-    """
-    Handle request for a question with randomized options
-    """
-    try:
-        from app.logic.game_logic import get_question_with_randomized_options
-
-        question_data = get_question_with_randomized_options(db, question_id)
-
-        await manager.send_personal_message(
-            {"type": "question_with_options", "data": question_data}, websocket
-        )
-
-    except Exception as e:
-        logger.error(f"Error getting question with options: {e}")
-        await manager.send_personal_message(
-            {"type": "error", "data": {"message": f"Failed to get question: {str(e)}"}},
-            websocket,
-        )
+    """Deprecated compatibility hook. Do not return arbitrary question payloads."""
+    await manager.send_personal_message(
+        {
+            "type": "error",
+            "data": {
+                "message": "This question request is no longer supported.",
+                "reason": "deprecated_question_endpoint",
+            },
+        },
+        websocket,
+    )
 
 
 async def handle_broadcast_current_question(

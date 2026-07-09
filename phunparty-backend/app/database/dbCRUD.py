@@ -589,6 +589,14 @@ def verify_player_email_code(db: Session, player_email: str, code: str) -> bool:
     player = get_player_by_email(db, player_email)
     if not player:
         return False
+    player = (
+        db.query(Players)
+        .filter(Players.player_id == player.player_id)
+        .with_for_update()
+        .first()
+    )
+    if not player:
+        return False
 
     if player.email_verified:
         return True
@@ -624,6 +632,7 @@ def verify_player_email_token(db: Session, token: str) -> Players | None:
         db.query(Players)
         .filter(Players.email_verification_code_hash == token_hash)
         .filter(Players.is_deleted == False)
+        .with_for_update()
         .first()
     )
     if not player:
@@ -1556,12 +1565,13 @@ def count_responses_for_question(
 ) -> int:
     """Count how many players have answered a specific question"""
     return (
-        db.query(PlayerResponse)
+        db.query(func.count(func.distinct(PlayerResponse.player_id)))
         .filter(
             PlayerResponse.session_code == session_code,
             PlayerResponse.question_id == question_id,
         )
-        .count()
+        .scalar()
+        or 0
     )
 
 
@@ -1765,6 +1775,14 @@ def hash_reset_otp(phone: str, otp: str) -> str:
     return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
+def hash_password_reset_jti(jti: str) -> str:
+    secret = os.getenv("RESET_OTP_SECRET") or SECRET_KEY
+    if not secret:
+        raise RuntimeError("RESET_OTP_SECRET or SECRET_KEY must be configured")
+    message = f"password-reset-jti:{jti}".encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
 def store_otp(db: Session, phone: str, otp: str, expires_at: datetime):
     record = PasswordReset(
         mobile=phone, code=hash_reset_otp(phone, otp), expires_at=expires_at
@@ -1772,6 +1790,39 @@ def store_otp(db: Session, phone: str, otp: str, expires_at: datetime):
     db.add(record)
     db.commit()
     return record
+
+
+def store_password_reset_jti(
+    db: Session, phone: str, jti: str, expires_at: datetime
+) -> PasswordReset:
+    record = PasswordReset(
+        mobile=phone,
+        code=hash_password_reset_jti(jti),
+        expires_at=expires_at,
+    )
+    db.add(record)
+    db.commit()
+    return record
+
+
+def consume_password_reset_jti(db: Session, phone: str, jti: str) -> bool:
+    record = (
+        db.query(PasswordReset)
+        .filter(
+            PasswordReset.mobile == phone,
+            PasswordReset.code == hash_password_reset_jti(jti),
+            PasswordReset.used == False,
+            PasswordReset.expires_at > datetime.now(timezone.utc),
+        )
+        .with_for_update(skip_locked=True)
+        .first()
+    )
+    if not record:
+        return False
+
+    record.used = True
+    db.flush()
+    return True
 
 
 def verify_otp(db: Session, phone: str, otp: str) -> bool:
@@ -1812,11 +1863,15 @@ def verify_and_reset_password(
     return False
 
 
-def update_password(db: Session, phone: str, new_password: str) -> bool:
+def update_password(
+    db: Session, phone: str, new_password: str, *, commit: bool = True
+) -> bool:
     player = get_player_by_phone(db, phone)
     if player:
         player.hashed_password = hash_password(new_password)
-        db.commit()
+        db.flush()
+        if commit:
+            db.commit()
         return True
     return False
 

@@ -142,7 +142,9 @@ def revoke_refresh_session(
         db.commit()
 
 
-def revoke_all_player_refresh_tokens(db: Session, player_id: str) -> None:
+def revoke_all_player_refresh_tokens(
+    db: Session, player_id: str, *, commit: bool = True
+) -> None:
     now = utc_now()
     (
         db.query(UserSession)
@@ -157,7 +159,8 @@ def revoke_all_player_refresh_tokens(db: Session, player_id: str) -> None:
             synchronize_session=False,
         )
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def cleanup_stale_user_sessions(db: Session) -> int:

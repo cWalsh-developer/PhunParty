@@ -1,13 +1,29 @@
 from datetime import datetime
 
 from app.config import Base
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 
 
 class PlayerResponse(Base):
     """Track individual player responses to questions in a session"""
 
     __tablename__ = "player_responses"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_code",
+            "player_id",
+            "question_id",
+            name="uq_player_responses_session_player_question",
+        ),
+    )
     response_id = Column(String, primary_key=True, index=True)
     session_code = Column(
         String, ForeignKey("game_sessions.session_code"), nullable=False
