@@ -36,6 +36,7 @@ class ConnectionManager:
     HEARTBEAT_STALE_SECONDS = 90
     MOBILE_HEARTBEAT_STALE_SECONDS = 300
     PRESENCE_KEY_TTL_SECONDS = 600
+    SHARED_STATE_TTL_SECONDS = 7200
     HEARTBEAT_UNSTABLE_SECONDS = 20
     HEARTBEAT_DISCONNECTED_SECONDS = 60
     PING_INTERVAL_SECONDS = 10
@@ -386,6 +387,42 @@ class ConnectionManager:
             for metadata in self._shared_presence_metadata(session_code)
         )
 
+    def _shared_state_key(self, session_code: str, name: str) -> str:
+        return f"phun:prod:session:{session_code}:{name}"
+
+    def _redis_json_get(self, key: str) -> Optional[Dict[str, Any]]:
+        client = websocket_bus.sync_client
+        if not client:
+            return None
+        try:
+            raw_value = client.get(key)
+            return json.loads(raw_value) if raw_value else None
+        except Exception:
+            logger.exception("Failed to read shared state key %s", key)
+            return None
+
+    def _redis_json_set(self, key: str, value: Dict[str, Any]) -> None:
+        client = websocket_bus.sync_client
+        if not client:
+            return
+        try:
+            client.set(
+                key,
+                json.dumps(value, separators=(",", ":")),
+                ex=self.SHARED_STATE_TTL_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to write shared state key %s", key)
+
+    def _redis_delete(self, *keys: str) -> None:
+        client = websocket_bus.sync_client
+        if not client or not keys:
+            return
+        try:
+            client.delete(*keys)
+        except Exception:
+            logger.exception("Failed to delete shared state keys %s", keys)
+
     def make_event_id(
         self, session_code: str, event_type: str, data: Optional[Dict[str, Any]] = None
     ) -> str:
@@ -443,11 +480,22 @@ class ConnectionManager:
         state.update(
             {key: value for key, value in updates.items() if value is not None}
         )
+        self._redis_json_set(
+            self._shared_state_key(session_code, "phase"),
+            state,
+        )
         logger.info(f"Session {session_code} phase set to {phase_value}")
         return dict(state)
 
     def get_session_phase_state(self, session_code: str) -> Dict[str, Any]:
         """Return the authoritative phase snapshot, defaulting to lobby."""
+        shared_state = self._redis_json_get(
+            self._shared_state_key(session_code, "phase")
+        )
+        if shared_state:
+            self.session_phase_state[session_code] = shared_state
+            return {**shared_state, "server_time_ms": self._utc_now_ms()}
+
         state = self.session_phase_state.get(session_code)
         if state:
             return {**state, "server_time_ms": self._utc_now_ms()}
@@ -937,6 +985,11 @@ class ConnectionManager:
         self.fair_play_frozen_players.pop(session_code, None)
         self.fair_play_player_status.pop(session_code, None)
         self.pending_focus_losses.pop(session_code, None)
+        self._redis_delete(
+            self._shared_state_key(session_code, "phase"),
+            self._shared_state_key(session_code, "current-question"),
+            self._shared_state_key(session_code, "game-type"),
+        )
 
         session_key_prefix = f"{session_code}:"
         for task_key, task in list(self.pending_player_leave_tasks.items()):
@@ -2085,10 +2138,15 @@ class ConnectionManager:
 
         question_id = question_data.get("question_id")
         if question_id:
-            self.question_queue[session_code][question_id] = {
+            queued = {
                 "question_data": question_data,
                 "queued_at": datetime.now().isoformat(),
             }
+            self.question_queue[session_code][question_id] = queued
+            self._redis_json_set(
+                self._shared_state_key(session_code, "current-question"),
+                queued,
+            )
             logger.info(f"📥 Queued question {question_id} for session {session_code}")
 
     def get_current_question(self, session_code: str) -> Optional[Dict[str, Any]]:
@@ -2096,6 +2154,12 @@ class ConnectionManager:
         Get the most recently queued question for a session.
         Returns None if no questions are queued.
         """
+        shared_question = self._redis_json_get(
+            self._shared_state_key(session_code, "current-question")
+        )
+        if shared_question and shared_question.get("question_data"):
+            return shared_question["question_data"]
+
         if session_code not in self.question_queue:
             return None
 
@@ -2114,7 +2178,8 @@ class ConnectionManager:
         """Clear all queued questions for a session (e.g., when game ends)"""
         if session_code in self.question_queue:
             del self.question_queue[session_code]
-            logger.info(f"🗑️ Cleared question queue for session {session_code}")
+            logger.info("Cleared question queue for session %s", session_code)
+        self._redis_delete(self._shared_state_key(session_code, "current-question"))
 
     def get_buzzer_state(self, session_code: str) -> Dict[str, Any]:
         """Return shared per-session buzzer state."""
@@ -2221,10 +2286,22 @@ class ConnectionManager:
     def set_session_game_type(self, session_code: str, game_type: str):
         """Store the resolved game type for scheduler and reconnect paths."""
         self.session_game_types[session_code] = game_type
+        self._redis_json_set(
+            self._shared_state_key(session_code, "game-type"),
+            {"session_code": session_code, "game_type": game_type},
+        )
         logger.info(f"Session {session_code} game type set to {game_type}")
 
     def get_session_game_type(self, session_code: str) -> Optional[str]:
         """Return the resolved game type for a session if known."""
+        shared_game_type = self._redis_json_get(
+            self._shared_state_key(session_code, "game-type")
+        )
+        if shared_game_type and shared_game_type.get("game_type"):
+            game_type = str(shared_game_type["game_type"])
+            self.session_game_types[session_code] = game_type
+            return game_type
+
         return self.session_game_types.get(session_code)
 
     def set_beat_clock_state(self, session_code: str, state: Dict[str, Any]) -> None:
