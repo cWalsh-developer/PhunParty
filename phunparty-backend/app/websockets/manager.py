@@ -18,6 +18,41 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
 
+BUZZER_CLAIM_SCRIPT = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then
+    return 0
+end
+
+local state = cjson.decode(raw)
+if state['accepting_buzzes'] ~= true then
+    return 0
+end
+if state['question_active'] ~= true then
+    return 0
+end
+if state['transitioning'] == true then
+    return 0
+end
+if state['current_question_id'] ~= ARGV[2] then
+    return 0
+end
+
+local winner = state['current_buzzer_winner']
+if winner ~= nil and winner ~= cjson.null and winner ~= '' then
+    return 0
+end
+
+state['current_buzzer_winner'] = ARGV[1]
+state['question_active'] = true
+state['transitioning'] = false
+state['accepting_buzzes'] = false
+state['updated_at'] = ARGV[3]
+
+redis.call('SET', KEYS[1], cjson.encode(state), 'EX', ARGV[4])
+return 1
+"""
+
 
 class SessionPhase(str, Enum):
     LOBBY = "lobby"
@@ -422,6 +457,94 @@ class ConnectionManager:
             client.delete(*keys)
         except Exception:
             logger.exception("Failed to delete shared state keys %s", keys)
+
+    def _serialize_buzzer_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        serialized = dict(state)
+        frozen_players = serialized.get("frozen_players", set())
+        if isinstance(frozen_players, set):
+            serialized["frozen_players"] = sorted(frozen_players)
+        serialized["updated_at"] = self._utc_now_iso()
+        return serialized
+
+    def _deserialize_buzzer_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        deserialized = dict(state)
+        frozen_players = deserialized.get("frozen_players", [])
+        if not isinstance(frozen_players, set):
+            deserialized["frozen_players"] = set(frozen_players or [])
+        return deserialized
+
+    def _json_safe_state(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): self._json_safe_state(item)
+                for key, item in value.items()
+                if not str(key).endswith("_dt")
+            }
+        if isinstance(value, list):
+            return [self._json_safe_state(item) for item in value]
+        if isinstance(value, set):
+            return sorted(value)
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return value
+
+    def save_buzzer_state(self, session_code: str, state: Dict[str, Any]) -> None:
+        self.buzzer_states[session_code] = state
+        self._redis_json_set(
+            self._shared_state_key(session_code, "buzzer"),
+            self._serialize_buzzer_state(state),
+        )
+
+    def claim_buzzer_winner(
+        self,
+        session_code: str,
+        player_id: str,
+        question_id: str,
+    ) -> bool:
+        client = websocket_bus.sync_client
+        state = self.get_buzzer_state(session_code)
+
+        if not client:
+            if (
+                not state.get("accepting_buzzes")
+                or not state.get("question_active")
+                or state.get("transitioning")
+                or state.get("current_question_id") != question_id
+                or state.get("current_buzzer_winner")
+            ):
+                return False
+            state["current_buzzer_winner"] = player_id
+            state["question_active"] = True
+            state["transitioning"] = False
+            state["accepting_buzzes"] = False
+            self.save_buzzer_state(session_code, state)
+            return True
+
+        try:
+            won = client.eval(
+                BUZZER_CLAIM_SCRIPT,
+                1,
+                self._shared_state_key(session_code, "buzzer"),
+                player_id,
+                question_id,
+                self._utc_now_iso(),
+                self.SHARED_STATE_TTL_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to claim buzzer winner in Redis")
+            return False
+
+        if int(won or 0) != 1:
+            return False
+
+        shared_state = self._redis_json_get(
+            self._shared_state_key(session_code, "buzzer")
+        )
+        if shared_state:
+            self.buzzer_states[session_code] = self._deserialize_buzzer_state(
+                shared_state
+            )
+        return True
 
     def make_event_id(
         self, session_code: str, event_type: str, data: Optional[Dict[str, Any]] = None
@@ -989,6 +1112,8 @@ class ConnectionManager:
             self._shared_state_key(session_code, "phase"),
             self._shared_state_key(session_code, "current-question"),
             self._shared_state_key(session_code, "game-type"),
+            self._shared_state_key(session_code, "buzzer"),
+            self._shared_state_key(session_code, "beat-clock"),
         )
 
         session_key_prefix = f"{session_code}:"
@@ -2183,7 +2308,15 @@ class ConnectionManager:
 
     def get_buzzer_state(self, session_code: str) -> Dict[str, Any]:
         """Return shared per-session buzzer state."""
-        return self.buzzer_states.setdefault(
+        shared_state = self._redis_json_get(
+            self._shared_state_key(session_code, "buzzer")
+        )
+        if shared_state:
+            state = self._deserialize_buzzer_state(shared_state)
+            self.buzzer_states[session_code] = state
+            return state
+
+        state = self.buzzer_states.setdefault(
             session_code,
             {
                 "current_buzzer_winner": None,
@@ -2195,6 +2328,8 @@ class ConnectionManager:
                 "attempts": [],
             },
         )
+        self.save_buzzer_state(session_code, state)
+        return state
 
     def start_buzzer_question(self, session_code: str, question_id: Optional[str]):
         """Mark a buzzer question active for all connections in the session."""
@@ -2210,6 +2345,7 @@ class ConnectionManager:
                 "attempts": [],
             }
         )
+        self.save_buzzer_state(session_code, state)
         logger.info(f"Buzzer question active for session {session_code}: {question_id}")
         return state
 
@@ -2224,6 +2360,7 @@ class ConnectionManager:
             "current_question_id": None,
             "attempts": [],
         }
+        self.save_buzzer_state(session_code, self.buzzer_states[session_code])
         logger.info(f"Reset buzzer state for session {session_code}")
 
     def lock_buzzer_until_next_question(self, session_code: str):
@@ -2237,6 +2374,7 @@ class ConnectionManager:
                 "accepting_buzzes": False,
             }
         )
+        self.save_buzzer_state(session_code, state)
         logger.info(f"Locked buzzer state during transition for session {session_code}")
         return state
 
@@ -2306,9 +2444,25 @@ class ConnectionManager:
 
     def set_beat_clock_state(self, session_code: str, state: Dict[str, Any]) -> None:
         self.beat_clock_states[session_code] = state
+        self._redis_json_set(
+            self._shared_state_key(session_code, "beat-clock"),
+            self._json_safe_state(state),
+        )
 
     def get_beat_clock_state(self, session_code: str) -> Dict[str, Any]:
-        return self.beat_clock_states.setdefault(
+        shared_state = self._redis_json_get(
+            self._shared_state_key(session_code, "beat-clock")
+        )
+        if shared_state:
+            local_state = self.beat_clock_states.get(session_code, {})
+            merged_state = {**shared_state, **local_state}
+            for key, value in shared_state.items():
+                if key not in {"ends_at_dt", "started_at_dt"}:
+                    merged_state[key] = value
+            self.beat_clock_states[session_code] = merged_state
+            return merged_state
+
+        state = self.beat_clock_states.setdefault(
             session_code,
             {
                 "active": False,
@@ -2317,9 +2471,12 @@ class ConnectionManager:
                 "leaderboard": [],
             },
         )
+        self.set_beat_clock_state(session_code, state)
+        return state
 
     def clear_beat_clock_state(self, session_code: str) -> None:
         self.beat_clock_states.pop(session_code, None)
+        self._redis_delete(self._shared_state_key(session_code, "beat-clock"))
 
 
 # Global connection manager instance

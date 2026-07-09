@@ -2729,6 +2729,7 @@ async def apply_buzzer_fair_play_freeze(
                 question_id,
             )
 
+        manager.save_buzzer_state(session_code, state)
         await manager.broadcast_buzzer_state_update(session_code)
 
         buzzer_handler = create_game_handler(session_code, BUZZER_GAME_TYPE)
