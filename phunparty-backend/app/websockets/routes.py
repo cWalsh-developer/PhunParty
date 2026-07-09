@@ -3,6 +3,7 @@ WebSocket routes for real-time game functionality
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -2729,6 +2730,7 @@ async def apply_buzzer_fair_play_freeze(
                 question_id,
             )
 
+        manager.save_buzzer_state(session_code, state)
         await manager.broadcast_buzzer_state_update(session_code)
 
         buzzer_handler = create_game_handler(session_code, BUZZER_GAME_TYPE)
@@ -2902,28 +2904,29 @@ async def handle_focus_violation(
         },
         critical=True,
     )
-    for connection_info in manager.get_player_connections(
-        session_code, player_id
-    ).values():
-        player_websocket = connection_info.get("websocket")
-        if not player_websocket:
-            continue
-        try:
-            await manager.send_personal_critical_message(
-                session_code,
-                {
-                    "type": "fair_play_status_update",
-                    "data": status_payload,
-                },
-                player_websocket,
-            )
-        except Exception:
-            logger.info(
-                "Removing stale Fair Play websocket for session=%s player=%s",
-                session_code,
-                safe_player_ref(player_id),
-            )
-            manager.disconnect_player_by_id(session_code, player_id)
+    personal_message = {
+        "type": "fair_play_status_update",
+        "data": status_payload,
+    }
+    send_result = manager.send_message_to_player(
+        session_code=session_code,
+        player_id=player_id,
+        message=personal_message,
+        critical=True,
+    )
+    if inspect.isawaitable(send_result):
+        await send_result
+    else:
+        for connection_info in manager.get_player_connections(
+            session_code, player_id
+        ).values():
+            player_websocket = connection_info.get("websocket")
+            if player_websocket:
+                await manager.send_personal_critical_message(
+                    session_code,
+                    personal_message,
+                    player_websocket,
+                )
     await manager.broadcast_to_session(
         session_code,
         {

@@ -524,18 +524,13 @@ class BeatTheClockGameHandler(GameEventHandler):
         if not payload:
             return False
 
-        sent = False
-        for connection_info in manager.get_player_connections(
-            self.session_code, player_id
-        ).values():
-            websocket = connection_info.get("websocket")
-            if websocket:
-                await manager.send_personal_message(
-                    {"type": "beat_clock_question", "data": payload},
-                    websocket,
-                )
-                sent = True
-        return sent
+        await manager.send_message_to_player(
+            session_code=self.session_code,
+            player_id=player_id,
+            message={"type": "beat_clock_question", "data": payload},
+        )
+        manager.set_beat_clock_state(self.session_code, state)
+        return True
 
     async def handle_fair_play_skip(
         self,
@@ -575,6 +570,7 @@ class BeatTheClockGameHandler(GameEventHandler):
         state = manager.get_beat_clock_state(self.session_code)
         leaderboard = self._leaderboard(db)
         state["leaderboard"] = leaderboard
+        manager.set_beat_clock_state(self.session_code, state)
         payload = {
             "game_type": self.game_type,
             "duration_seconds": state.get("duration_seconds"),
@@ -938,16 +934,11 @@ class BeatTheClockGameHandler(GameEventHandler):
                 "ends_at": state.get("ends_at"),
                 "server_time_ms": manager._utc_now_ms(),
             }
-            for connection_info in manager.get_player_connections(
-                self.session_code,
-                player_id,
-            ).values():
-                websocket = connection_info.get("websocket")
-                if websocket:
-                    await manager.send_personal_message(
-                        {"type": "beat_clock_answer_result", "data": rejection_payload},
-                        websocket,
-                    )
+            await manager.send_message_to_player(
+                session_code=self.session_code,
+                player_id=player_id,
+                message={"type": "beat_clock_answer_result", "data": rejection_payload},
+            )
             return
 
         question = get_question_by_id(question_id, db)
@@ -996,15 +987,11 @@ class BeatTheClockGameHandler(GameEventHandler):
             },
         }
 
-        for connection_info in manager.get_player_connections(
-            self.session_code, player_id
-        ).values():
-            websocket = connection_info.get("websocket")
-            if websocket:
-                await manager.send_personal_message(
-                    {"type": "beat_clock_answer_result", "data": answer_payload},
-                    websocket,
-                )
+        await manager.send_message_to_player(
+            session_code=self.session_code,
+            player_id=player_id,
+            message={"type": "beat_clock_answer_result", "data": answer_payload},
+        )
 
         if utc_now() >= state.get("ends_at_dt", utc_now()):
             state["active"] = False
@@ -1106,6 +1093,7 @@ class BuzzerGameHandler(GameEventHandler):
             state["question_active"] = True
             state["transitioning"] = False
             state["accepting_buzzes"] = True
+        manager.save_buzzer_state(self.session_code, state)
 
         logger.info(
             "Rejected Fair Play locked buzzer press: session=%s player=%s question=%s",
@@ -1113,23 +1101,18 @@ class BuzzerGameHandler(GameEventHandler):
             safe_player_ref(player_id),
             question_id,
         )
-        for connection_info in manager.get_player_connections(
-            self.session_code,
-            player_id,
-        ).values():
-            websocket = connection_info.get("websocket")
-            if websocket:
-                await manager.send_personal_message(
-                    {
-                        "type": "buzzer_rejected",
-                        "data": {
-                            "reason": "fair_play_restriction",
-                            "question_id": question_id,
-                            "message": "You are frozen for this question because of Fair Play Mode.",
-                        },
-                    },
-                    websocket,
-                )
+        await manager.send_message_to_player(
+            session_code=self.session_code,
+            player_id=player_id,
+            message={
+                "type": "buzzer_rejected",
+                "data": {
+                    "reason": "fair_play_restriction",
+                    "question_id": question_id,
+                    "message": "You are frozen for this question because of Fair Play Mode.",
+                },
+            },
+        )
 
         await manager.broadcast_buzzer_state_update(self.session_code)
         await self.update_mobile_buzzer_ui(
@@ -1198,15 +1181,22 @@ class BuzzerGameHandler(GameEventHandler):
 
         # This player wins the buzzer.
         # Close buzzing immediately so every non-winner is greyed out.
-        state["current_buzzer_winner"] = player_id
-        state["question_active"] = True
-        state["transitioning"] = False
-        state["accepting_buzzes"] = False
+        if not manager.claim_buzzer_winner(
+            self.session_code,
+            player_id,
+            current_question_id,
+        ):
+            await manager.broadcast_buzzer_state_update(self.session_code)
+            await self.update_mobile_buzzer_ui(db)
+            return
+
+        state = self.buzzer_state
 
         answer_payload_cache = state.setdefault("answer_payload_cache", {})
 
         if answer_payload_cache.get("question_id") != current_question_id:
             answer_payload_cache.clear()
+        manager.save_buzzer_state(self.session_code, state)
 
         logger.warning(
             "BUZZER WINNER LOCKED session=%s player=%s question=%s accepting_buzzes=%s",
@@ -1260,24 +1250,19 @@ class BuzzerGameHandler(GameEventHandler):
                 state_question_id,
             )
 
-            for connection_info in manager.get_player_connections(
-                self.session_code,
-                player_id,
-            ).values():
-                websocket = connection_info.get("websocket")
-                if websocket:
-                    await manager.send_personal_message(
-                        {
-                            "type": "answer_rejected",
-                            "data": {
-                                "reason": "stale_question",
-                                "message": "That question has already moved on.",
-                                "question_id": question_id,
-                                "current_question_id": current_phase_question_id,
-                            },
-                        },
-                        websocket,
-                    )
+            await manager.send_message_to_player(
+                session_code=self.session_code,
+                player_id=player_id,
+                message={
+                    "type": "answer_rejected",
+                    "data": {
+                        "reason": "stale_question",
+                        "message": "That question has already moved on.",
+                        "question_id": question_id,
+                        "current_question_id": current_phase_question_id,
+                    },
+                },
+            )
 
             await manager.broadcast_buzzer_state_update(self.session_code)
             await self.update_mobile_buzzer_ui(db)
@@ -1418,6 +1403,7 @@ class BuzzerGameHandler(GameEventHandler):
                 "timestamp": datetime.now().isoformat(),
             }
         )
+        manager.save_buzzer_state(self.session_code, state)
 
         await manager.broadcast_to_session(
             self.session_code,
@@ -1524,6 +1510,7 @@ class BuzzerGameHandler(GameEventHandler):
         state["question_active"] = True
         state["transitioning"] = False
         state["accepting_buzzes"] = True
+        manager.save_buzzer_state(self.session_code, state)
 
         logger.warning(
             "BUZZER REOPENED AFTER WRONG ANSWER session=%s question=%s frozen_count=%s active_players=%s",
