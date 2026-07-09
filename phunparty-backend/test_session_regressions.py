@@ -216,27 +216,34 @@ def test_answer_validation_accepts_aliases_from_question():
 
 def test_submit_player_answer_returns_answer_match_metadata():
     question = SimpleNamespace(answer="James Cameron", accepted_answers=["Cameron"])
+    game_state = SimpleNamespace(
+        is_active=True,
+        isstarted=True,
+        current_question_id="Q1",
+        fair_play_enabled=False,
+    )
     mock_db = MagicMock()
 
-    with patch.object(game_logic, "get_player_response", return_value=None):
-        with patch.object(game_logic, "get_question_by_id", return_value=question):
-            with patch.object(game_logic, "create_player_response"):
-                with patch.object(game_logic, "update_scores"):
-                    with patch.object(
-                        game_logic,
-                        "check_and_advance_game",
-                        return_value={"players_answered": 1},
-                    ):
-                        result = game_logic.submit_player_answer(
-                            mock_db,
-                            "SESSION123",
-                            "P1",
-                            "Q1",
-                            "Camron",
-                        )
+    with patch.object(game_logic, "get_game_session_state", return_value=game_state):
+        with patch.object(game_logic, "get_player_response", return_value=None):
+            with patch.object(game_logic, "get_question_by_id", return_value=question):
+                with patch.object(game_logic, "create_player_response"):
+                    with patch.object(game_logic, "update_scores"):
+                        with patch.object(
+                            game_logic,
+                            "check_and_advance_game",
+                            return_value={"players_answered": 1},
+                        ):
+                            result = game_logic.submit_player_answer(
+                                mock_db,
+                                "SESSION123",
+                                "P1",
+                                "Q1",
+                                "Camron",
+                            )
 
     assert result["is_correct"] is True
-    assert result["answer_match"]["matched_answer"] == "Cameron"
+    assert "matched_answer" not in result["answer_match"]
 
 
 def test_submit_player_answer_uses_exact_validation_for_multiple_choice():
@@ -246,24 +253,31 @@ def test_submit_player_answer_uses_exact_validation_for_multiple_choice():
         difficulty="easy",
         question_options=["5", "6", "8"],
     )
+    game_state = SimpleNamespace(
+        is_active=True,
+        isstarted=True,
+        current_question_id="Q1",
+        fair_play_enabled=False,
+    )
     mock_db = MagicMock()
 
-    with patch.object(game_logic, "get_player_response", return_value=None):
-        with patch.object(game_logic, "get_question_by_id", return_value=question):
-            with patch.object(game_logic, "create_player_response"):
-                with patch.object(game_logic, "update_scores"):
-                    with patch.object(
-                        game_logic,
-                        "check_and_advance_game",
-                        return_value={"players_answered": 1},
-                    ):
-                        result = game_logic.submit_player_answer(
-                            mock_db,
-                            "SESSION123",
-                            "P1",
-                            "Q1",
-                            "8",
-                        )
+    with patch.object(game_logic, "get_game_session_state", return_value=game_state):
+        with patch.object(game_logic, "get_player_response", return_value=None):
+            with patch.object(game_logic, "get_question_by_id", return_value=question):
+                with patch.object(game_logic, "create_player_response"):
+                    with patch.object(game_logic, "update_scores"):
+                        with patch.object(
+                            game_logic,
+                            "check_and_advance_game",
+                            return_value={"players_answered": 1},
+                        ):
+                            result = game_logic.submit_player_answer(
+                                mock_db,
+                                "SESSION123",
+                                "P1",
+                                "Q1",
+                                "8",
+                            )
 
     assert result["is_correct"] is False
 
@@ -275,26 +289,54 @@ def test_submit_player_answer_uses_fuzzy_validation_for_hard_text_input():
         difficulty="hard",
         question_options=["Wrong", "Options", "Can", "Exist"],
     )
+    game_state = SimpleNamespace(
+        is_active=True,
+        isstarted=True,
+        current_question_id="Q1",
+        fair_play_enabled=False,
+    )
     mock_db = MagicMock()
 
-    with patch.object(game_logic, "get_player_response", return_value=None):
-        with patch.object(game_logic, "get_question_by_id", return_value=question):
-            with patch.object(game_logic, "create_player_response"):
-                with patch.object(game_logic, "update_scores"):
-                    with patch.object(
-                        game_logic,
-                        "check_and_advance_game",
-                        return_value={"players_answered": 1},
-                    ):
-                        result = game_logic.submit_player_answer(
-                            mock_db,
-                            "SESSION123",
-                            "P1",
-                            "Q1",
-                            "James Camaron",
-                        )
+    with patch.object(game_logic, "get_game_session_state", return_value=game_state):
+        with patch.object(game_logic, "get_player_response", return_value=None):
+            with patch.object(game_logic, "get_question_by_id", return_value=question):
+                with patch.object(game_logic, "create_player_response"):
+                    with patch.object(game_logic, "update_scores"):
+                        with patch.object(
+                            game_logic,
+                            "check_and_advance_game",
+                            return_value={"players_answered": 1},
+                        ):
+                            result = game_logic.submit_player_answer(
+                                mock_db,
+                                "SESSION123",
+                                "P1",
+                                "Q1",
+                                "James Camaron",
+                            )
 
     assert result["is_correct"] is True
+
+
+def test_submit_player_answer_rejects_non_current_question():
+    game_state = SimpleNamespace(
+        is_active=True,
+        isstarted=True,
+        current_question_id="Q2",
+        fair_play_enabled=False,
+    )
+    mock_db = MagicMock()
+
+    with patch.object(game_logic, "get_game_session_state", return_value=game_state):
+        result = game_logic.submit_player_answer(
+            mock_db,
+            "SESSION123",
+            "P1",
+            "Q1",
+            "A",
+        )
+
+    assert result == {"error": "Question is no longer active"}
 
 
 def test_buzzer_hard_answer_payload_uses_text_input_without_options():

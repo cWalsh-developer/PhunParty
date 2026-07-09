@@ -11,6 +11,10 @@ if env_path.exists():
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
+ACCESS_TOKEN_AUDIENCE = "phunparty-api"
+PASSWORD_RESET_AUDIENCE = "phunparty-password-reset"
+ACCESS_TOKEN_TYPE = "access"
+PASSWORD_RESET_TOKEN_TYPE = "password_reset"
 
 
 def int_env(name: str, default: int) -> int:
@@ -31,5 +35,25 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
         expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
 
-    to_encode.update({"exp": expire})
+    to_encode.update(
+        {
+            "aud": ACCESS_TOKEN_AUDIENCE,
+            "exp": expire,
+            "token_type": ACCESS_TOKEN_TYPE,
+        }
+    )
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_password_reset_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=10))
+
+    to_encode.update(
+        {
+            "aud": PASSWORD_RESET_AUDIENCE,
+            "exp": expire,
+            "token_type": PASSWORD_RESET_TOKEN_TYPE,
+        }
+    )
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)

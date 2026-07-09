@@ -5,7 +5,12 @@ from app.config import SessionLocal
 from app.database.email_verification_migrations import ensure_email_verification_columns
 from app.schemas.players_model import Players
 from app.security.rls import clear_rls_context, set_rls_current_player
-from app.utils.generateJWT import ALGORITHM, SECRET_KEY
+from app.utils.generateJWT import (
+    ACCESS_TOKEN_AUDIENCE,
+    ACCESS_TOKEN_TYPE,
+    ALGORITHM,
+    SECRET_KEY,
+)
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -47,9 +52,19 @@ def get_db():
 
 def decode_access_token(token: str) -> dict:
     try:
-        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+            audience=ACCESS_TOKEN_AUDIENCE,
+        )
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+    if payload.get("token_type") != ACCESS_TOKEN_TYPE:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+    return payload
 
 
 def get_player_from_token_value(token: str, db: Session) -> Players:

@@ -993,7 +993,6 @@ class BeatTheClockGameHandler(GameEventHandler):
             "server_time_ms": manager._utc_now_ms(),
             "answer_match": {
                 "method": validation.method,
-                "matched_answer": validation.matched_answer,
                 "score": validation.score,
             },
         }

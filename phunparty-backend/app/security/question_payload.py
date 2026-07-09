@@ -2,8 +2,12 @@ from typing import Any
 
 SENSITIVE_QUESTION_FIELDS = {
     "answer",
+    "accepted_answers",
+    "answer_aliases",
+    "aliases",
     "correct_answer",
     "correct_index",
+    "question_options",
 }
 
 

@@ -54,8 +54,25 @@ def submit_player_answer(
     Submit a player's answer and check if all players have answered
     Returns game state information
     """
-    # Check if player already answered this question
     game_state = get_game_session_state(db, session_code)
+    if not game_state:
+        raise ValueError("Game state not found")
+    if not game_state.is_active or not game_state.isstarted:
+        return {"error": "Game is not accepting answers"}
+
+    authoritative_question_id = game_state.current_question_id
+    if not authoritative_question_id:
+        return {"error": "No active question"}
+    if question_id and question_id != authoritative_question_id:
+        logger.warning(
+            "Rejected answer for non-current question: session=%s player=%s incoming=%s current=%s",
+            session_code,
+            player_id,
+            question_id,
+            authoritative_question_id,
+        )
+        return {"error": "Question is no longer active"}
+
     fair_play_enabled = getattr(game_state, "fair_play_enabled", False) is True
 
     if fair_play_enabled:
@@ -63,17 +80,21 @@ def submit_player_answer(
             return {"error": "Player has been removed from this session"}
 
         if (
-            is_player_frozen_for_question(db, session_code, player_id, question_id)
+            is_player_frozen_for_question(
+                db, session_code, player_id, authoritative_question_id
+            )
             is True
         ):
             return {"error": "Player is frozen for this question"}
 
-    existing_response = get_player_response(db, session_code, player_id, question_id)
+    existing_response = get_player_response(
+        db, session_code, player_id, authoritative_question_id
+    )
     if existing_response:
         return {"error": "Player has already answered this question"}
 
     # Get the correct answer and validate
-    question = get_question_by_id(question_id, db)
+    question = get_question_by_id(authoritative_question_id, db)
     if not question:
         raise ValueError("Question not found")
 
@@ -86,7 +107,12 @@ def submit_player_answer(
 
     # Record the player's response
     create_player_response(
-        db, session_code, player_id, question_id, player_answer, is_correct
+        db,
+        session_code,
+        player_id,
+        authoritative_question_id,
+        player_answer,
+        is_correct,
     )
 
     # Update score if correct
@@ -110,7 +136,9 @@ def submit_player_answer(
 
     set_rls_current_player(db, progression_actor_id)
 
-    game_progression = check_and_advance_game(db, session_code, question_id)
+    game_progression = check_and_advance_game(
+        db, session_code, authoritative_question_id
+    )
 
     if "error" in game_progression:
         db.rollback()
@@ -118,12 +146,12 @@ def submit_player_answer(
             "ANSWER SUBMIT ROLLED BACK session=%s player=%s question=%s reason=%s",
             session_code,
             player_id,
-            question_id,
+            authoritative_question_id,
             game_progression["error"],
         )
         return {
             "error": game_progression["error"],
-            "question_id": question_id,
+            "question_id": authoritative_question_id,
         }
 
     db.commit()
@@ -132,10 +160,10 @@ def submit_player_answer(
     set_rls_current_player(db, player_id)
     return {
         "player_answer": player_answer,
+        "question_id": authoritative_question_id,
         "is_correct": is_correct,
         "answer_match": {
             "method": validation.method,
-            "matched_answer": validation.matched_answer,
             "score": validation.score,
         },
         "game_state": game_progression,
@@ -430,7 +458,9 @@ def build_question_with_randomized_options(question) -> dict:
         }
 
         logger.debug(
-            f"Question {question_id} final randomized result: display_options={result['display_options']}, correct_index={result['correct_index']}"
+            "Question %s randomized with %s display options",
+            question_id,
+            len(result["display_options"]),
         )
         return result
 
@@ -555,7 +585,10 @@ async def broadcast_question_with_options(
         host_message["data"] = sanitize_question_for_client(host_message["data"])
 
         logger.info(
-            f"📝 Broadcasting question {question_id} - display_options: {question_data['display_options']}, correct_index: {question_data.get('correct_index')}, ui_mode: {ui_mode}"
+            "Broadcasting question %s - option_count=%s ui_mode=%s",
+            question_id,
+            len(question_data.get("display_options") or []),
+            ui_mode,
         )
 
         # CRITICAL: Queue the question data so mobile clients can retrieve it

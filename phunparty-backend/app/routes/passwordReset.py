@@ -1,10 +1,14 @@
 import secrets
 from datetime import datetime, timedelta, timezone
 
+from app.database.refresh_token_crud import (
+    create_refresh_session,
+    revoke_all_player_refresh_tokens,
+)
 from app.database.dbCRUD import get_player_by_phone, store_otp
 from app.database.dbCRUD import update_password as updatePassword
 from app.database.dbCRUD import verify_otp
-from app.dependencies import decode_access_token, get_db
+from app.dependencies import get_db
 from app.models.passwordResetModel import (
     PasswordResetRequest,
     PasswordUpdateRequest,
@@ -12,10 +16,18 @@ from app.models.passwordResetModel import (
 )
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
 from app.security.rls import set_rls_current_player, set_rls_reset_phone
-from app.utils.generateJWT import create_access_token
+from app.utils.generateJWT import (
+    ALGORITHM,
+    PASSWORD_RESET_AUDIENCE,
+    PASSWORD_RESET_TOKEN_TYPE,
+    SECRET_KEY,
+    create_access_token,
+    create_password_reset_token as create_password_reset_jwt,
+)
 from app.utils.phone_numbers import normalize_phone_number
 from app.utils.sendSMS import format_number_uk, send_sms
 from fastapi import APIRouter, Depends, HTTPException, Request
+from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
 router = APIRouter()
@@ -38,7 +50,7 @@ def reset_rate_identifier(phone_number: str) -> str:
 
 
 def create_password_reset_token(player_id: str, phone_number: str) -> str:
-    return create_access_token(
+    return create_password_reset_jwt(
         data={
             "sub": player_id,
             "phone": phone_number,
@@ -49,10 +61,19 @@ def create_password_reset_token(player_id: str, phone_number: str) -> str:
 
 
 def verify_password_reset_token(token: str, phone_number: str) -> str:
-    payload = decode_access_token(token)
+    try:
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+            audience=PASSWORD_RESET_AUDIENCE,
+        )
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid reset token")
 
     if (
-        payload.get("purpose") != "password_reset"
+        payload.get("token_type") != PASSWORD_RESET_TOKEN_TYPE
+        or payload.get("purpose") != "password_reset"
         or payload.get("phone") != phone_number
         or not payload.get("sub")
     ):
@@ -220,6 +241,14 @@ async def update_password(
                 status_code=400,
                 detail="Failed to update password",
             )
+
+        revoke_all_player_refresh_tokens(db, player.player_id)
+        refresh_token, _refresh_record = create_refresh_session(
+            db,
+            player.player_id,
+            user_agent=request.headers.get("user-agent"),
+            ip_address=get_client_ip(request),
+        )
         access_token = create_access_token(
             data={
                 "sub": player.player_id,
@@ -228,6 +257,7 @@ async def update_password(
         return {
             "message": "Password updated successfully",
             "access_token": access_token,
+            "refresh_token": refresh_token,
             "token_type": "bearer",
         }
     except HTTPException:

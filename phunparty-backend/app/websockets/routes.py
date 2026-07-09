@@ -33,7 +33,8 @@ from app.dependencies import (
 )
 from app.logic.game_logic import check_and_advance_game
 from app.security.loggingUtils import safe_player_ref
-from app.security.ownership import assert_session_owner
+from app.security.ownership import assert_session_member_or_owner, assert_session_owner
+from app.security.question_payload import sanitize_question_for_client
 from app.security.rate_limit import rate_limiter, stable_hash
 from app.security.rls import set_rls_current_player
 from app.security.roster_identity import make_roster_player_id
@@ -549,7 +550,7 @@ def build_sync_state(
     sync_state["current_question"] = get_mobile_current_question_payload(
         session_code, db, game_type
     )
-    return sync_state
+    return sanitize_question_for_client(sync_state)
 
 
 def get_mobile_current_question_payload(
@@ -558,7 +559,7 @@ def get_mobile_current_question_payload(
     """Return a recovery-safe current question payload for mobile clients."""
     queued_question = manager.get_current_question(session_code)
     if queued_question:
-        return queued_question
+        return sanitize_question_for_client(queued_question)
 
     game_type = game_type or resolve_session_game_type(db, session_code)
     if game_type == BEAT_THE_CLOCK_GAME_TYPE:
@@ -609,6 +610,7 @@ def get_mobile_current_question_payload(
         if game_type == BUZZER_GAME_TYPE
         else question_data
     )
+    payload = sanitize_question_for_client(payload)
     manager.queue_question(session_code, payload)
     logger.info(
         f"Rebuilt queued current question {payload.get('question_id')} for mobile recovery in session {session_code}"
@@ -687,6 +689,14 @@ async def websocket_endpoint(
 
             if client_type == "mobile":
                 player_id = current_player.player_id
+                try:
+                    assert_session_member_or_owner(db, current_player, session_code)
+                except HTTPException:
+                    await websocket.close(
+                        code=4003,
+                        reason="Join the session before opening a realtime connection",
+                    )
+                    return
             else:
                 try:
                     assert_session_owner(db, current_player, session_code)
@@ -937,7 +947,9 @@ async def send_initial_session_state(
             try:
                 current_question = get_current_question_details(db, session_code)
                 if current_question:
-                    initial_state["data"]["current_question"] = current_question
+                    initial_state["data"]["current_question"] = (
+                        sanitize_question_for_client(current_question)
+                    )
                     logger.info(
                         "Included current question in initial state for web client"
                     )

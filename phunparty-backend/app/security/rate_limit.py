@@ -26,6 +26,18 @@ class RateLimiter:
         self.redis_url = os.getenv("REDIS_URL")
         self._redis = None
         self._memory: dict[str, tuple[int, float]] = {}
+        self._memory_max_keys = int(os.getenv("RATE_LIMIT_MEMORY_MAX_KEYS", "50000"))
+        self._require_redis = (
+            os.getenv(
+                "REQUIRE_REDIS_RATE_LIMIT",
+                (
+                    "true"
+                    if os.getenv("ENVIRONMENT", "").lower() == "production"
+                    else "false"
+                ),
+            ).lower()
+            == "true"
+        )
 
     async def connect(self) -> None:
         if self.redis_url and redis:
@@ -43,6 +55,10 @@ class RateLimiter:
                 )
                 await self._redis.close()
                 self._redis = None
+                if self._require_redis:
+                    raise RuntimeError("Redis rate limiter is required but unavailable")
+        elif self._require_redis:
+            raise RuntimeError("Redis rate limiter is required but REDIS_URL is unset")
 
     async def close(self) -> None:
         if self._redis:
@@ -63,6 +79,7 @@ class RateLimiter:
                     self._redis = None
 
         now = time.time()
+        self._sweep_memory(now)
         count, reset_at = self._memory.get(key, (0, now + window_seconds))
 
         if now > reset_at:
@@ -74,6 +91,19 @@ class RateLimiter:
 
         retry_after = max(int(reset_at - now), 1)
         return count <= limit, retry_after
+
+    def _sweep_memory(self, now: float) -> None:
+        expired_keys = [
+            key for key, (_count, reset_at) in self._memory.items() if now > reset_at
+        ]
+        for key in expired_keys:
+            self._memory.pop(key, None)
+
+        while len(self._memory) > self._memory_max_keys:
+            oldest_key = next(iter(self._memory), None)
+            if oldest_key is None:
+                break
+            self._memory.pop(oldest_key, None)
 
     async def _hit_redis(
         self,

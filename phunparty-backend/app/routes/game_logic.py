@@ -8,6 +8,7 @@ from app.logic.game_logic import (
 from app.models.response_models import GameStatusResponse, SubmitAnswerRequest
 from app.schemas.players_model import Players
 from app.security.ownership import assert_session_member_or_owner, assert_session_owner
+from app.security.question_payload import sanitize_question_for_client
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -16,15 +17,7 @@ router = APIRouter()
 
 
 def strip_answer_fields(value):
-    if isinstance(value, dict):
-        return {
-            key: strip_answer_fields(item)
-            for key, item in value.items()
-            if key not in {"answer", "correct_index"}
-        }
-    if isinstance(value, list):
-        return [strip_answer_fields(item) for item in value]
-    return value
+    return sanitize_question_for_client(value)
 
 
 @router.post("/submit-answer", tags=["Game Logic"])

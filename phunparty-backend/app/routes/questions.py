@@ -1,5 +1,4 @@
 import json
-import random
 
 from app.database.dbCRUD import get_question_by_id, submit_questions
 from app.dependencies import get_current_player, get_db, require_admin_api_key
@@ -20,35 +19,18 @@ def get_question_by_id_route(
     current_player: Players = Depends(get_current_player),
 ):
     """
-    Retrieve a question by its ID with randomized answer options.
+    Retrieve public metadata for a question by ID.
     """
     try:
         question = get_question_by_id(question_id, db)
         if not question:
             raise HTTPException(status_code=404, detail="Question not found")
 
-        raw_options = getattr(question, "question_options", None)
-        # Always randomize the options
-        incorrect_options = []
-        if raw_options:
-            if isinstance(raw_options, str):
-                incorrect_options = json.loads(raw_options)
-            elif isinstance(raw_options, list):
-                incorrect_options = raw_options
-        all_options = []
-        correct_index = None
-        if incorrect_options:
-            all_options = incorrect_options + [question.answer]
-            random.shuffle(all_options)
-            correct_index = all_options.index(question.answer)
-
         return {
             "question_id": question.question_id,
             "question": question.question,
             "genre": question.genre,
             "difficulty": question.difficulty,
-            "question_options": raw_options if raw_options else [],
-            "display_options": all_options,
         }
     except HTTPException:
         raise

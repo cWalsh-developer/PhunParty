@@ -115,7 +115,7 @@ async def enforce_email_verification_send_limits(
     )
 
 
-@router.post("/create", response_model=PlayerResponse, tags=["Players"])
+@router.post("/create", tags=["Players"])
 async def create_player_route(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -146,15 +146,15 @@ async def create_player_route(
                 await enforce_email_verification_send_limits(
                     request, player.player_email
                 )
-                verification_token = issue_email_verification_token(
-                    db, existing_player
-                )
+                verification_token = issue_email_verification_token(db, existing_player)
                 background_tasks.add_task(
                     send_player_email_verification_link,
                     existing_player.player_email,
                     verification_token,
                 )
-                return existing_player
+                return {
+                    "message": "If the account can be registered, a verification link will be sent."
+                }
             raise HTTPException(
                 status_code=400, detail="Account with this email already exists"
             )
@@ -180,7 +180,7 @@ async def create_player_route(
             new_player.player_email,
             verification_token,
         )
-        return new_player
+        return PlayerResponse.model_validate(new_player).model_dump()
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except IntegrityError:
@@ -386,6 +386,26 @@ def update_player_route(
         existing_player = get_player_by_ID(db, player_id)
         if not existing_player:
             raise HTTPException(status_code=404, detail="Player not found")
+        requested_updates = player.model_dump(exclude_unset=True)
+        protected_fields = {
+            "hashed_password",
+            "player_email",
+            "player_mobile",
+            "profile_photo_url",
+        }
+        attempted_protected_updates = [
+            field
+            for field in protected_fields
+            if field in requested_updates and requested_updates[field] is not None
+        ]
+        if attempted_protected_updates:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Use the dedicated verification flow to update email, phone, "
+                    "password, or profile photo."
+                ),
+            )
         updated_player = update_player(db, player_id, player)
         if not updated_player:
             raise HTTPException(status_code=400, detail="Failed to update player")

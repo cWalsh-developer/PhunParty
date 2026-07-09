@@ -65,7 +65,12 @@ def decode_subject_from_bearer_token(request: Request) -> str | None:
         return None
 
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+            options={"verify_aud": False},
+        )
     except JWTError:
         return None
 
@@ -117,6 +122,14 @@ def validate_path_and_query(request: Request):
 async def read_and_validate_json_body(request: Request) -> JSONResponse | None:
     if not is_json_request(request):
         return None
+
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_JSON_BODY_BYTES:
+                return json_error(413, "JSON request body is too large")
+        except ValueError:
+            return json_error(400, "Invalid Content-Length header")
 
     body = await request.body()
     if not body:

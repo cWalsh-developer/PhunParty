@@ -274,6 +274,20 @@ def safe_photo_path(filename: str) -> Path:
     return safe_generated_photo_path(filename)
 
 
+async def read_upload_with_limit(file: UploadFile) -> bytes:
+    chunks: list[bytes] = []
+    total_size = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="File too large. Max size: 5MB")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post("/upload/{player_id}", tags=["Photos"])
 async def upload_player_photo(
     player_id: str,
@@ -300,7 +314,7 @@ async def upload_player_photo(
         if not player:
             raise HTTPException(status_code=404, detail="Player not found")
 
-        file_content = await file.read()
+        file_content = await read_upload_with_limit(file)
         file_extension = validate_uploaded_image(file.filename, file_content)
         sanitized_content = strip_image_metadata(file_content, file_extension)
 

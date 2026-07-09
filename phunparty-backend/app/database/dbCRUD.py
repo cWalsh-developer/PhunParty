@@ -1,6 +1,8 @@
 import logging
 import random
 import hmac
+import hashlib
+import os
 from datetime import datetime, timezone
 
 from sqlalchemy import and_, func, or_, text
@@ -28,6 +30,7 @@ from app.schemas.session_player_assignment_model import SessionAssignment
 from app.schemas.session_question_assignment import SessionQuestionAssignment
 from app.utils.friend_codes import generate_friend_code
 from app.utils.hash_password import hash_password
+from app.utils.generateJWT import SECRET_KEY
 from app.utils.email_verification import (
     email_verification_expires_at,
     generate_email_verification_code,
@@ -632,6 +635,8 @@ def verify_player_email_token(db: Session, token: str) -> Players | None:
 
     _set_player_mutation_context(db, player)
     player.email_verified = True
+    player.email_verification_code_hash = None
+    player.email_verification_expires_at = None
     db.add(player)
     db.commit()
     db.refresh(player)
@@ -1695,8 +1700,6 @@ def get_current_question_details(db: Session, session_code: str) -> dict:
             "options": question_details.get(
                 "display_options", []
             ),  # Alias for compatibility
-            "answer": question_details.get("answer"),
-            "correct_index": question_details.get("correct_index"),
             "ui_mode": ui_mode,
         }
     elif current_question:
@@ -1754,8 +1757,18 @@ def get_player_by_phone(db: Session, phone: str) -> Players:
 ## Password Reset CRUD operations --------------------------------------------------------------------------------------------------------------
 
 
+def hash_reset_otp(phone: str, otp: str) -> str:
+    secret = os.getenv("RESET_OTP_SECRET") or SECRET_KEY
+    if not secret:
+        raise RuntimeError("RESET_OTP_SECRET or SECRET_KEY must be configured")
+    message = f"{phone}:{otp}".encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
 def store_otp(db: Session, phone: str, otp: str, expires_at: datetime):
-    record = PasswordReset(mobile=phone, code=otp, expires_at=expires_at)
+    record = PasswordReset(
+        mobile=phone, code=hash_reset_otp(phone, otp), expires_at=expires_at
+    )
     db.add(record)
     db.commit()
     return record
@@ -1766,7 +1779,7 @@ def verify_otp(db: Session, phone: str, otp: str) -> bool:
         db.query(PasswordReset)
         .filter(
             PasswordReset.mobile == phone,
-            PasswordReset.code == otp,
+            PasswordReset.code == hash_reset_otp(phone, otp),
             PasswordReset.used == False,
             PasswordReset.expires_at > datetime.now(timezone.utc),
         )
