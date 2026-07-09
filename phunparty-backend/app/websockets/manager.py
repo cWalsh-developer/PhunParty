@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Set, Union
 
 from app.security.loggingUtils import safe_player_ref
 from app.security.roster_identity import make_roster_player_id
+from app.websockets.redis_bus import websocket_bus
 from fastapi import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
@@ -890,7 +891,7 @@ class ConnectionManager:
 
         return sent
 
-    async def broadcast_to_session(
+    async def _broadcast_local_to_session(
         self,
         session_code: str,
         message: dict,
@@ -900,19 +901,8 @@ class ConnectionManager:
         critical: bool = False,
         require_ack: bool = False,
     ):
-        """Broadcast message to all clients in a session with filtering options and reliability"""
+        """Broadcast message to local clients in a session."""
         if session_code not in self.active_connections:
-            message_type = message.get("type", "event")
-            warning_key = f"{session_code}:{message_type}"
-            now = time.time()
-            last_warning_at = self._missing_connection_warning_at.get(warning_key, 0)
-            log = logger.warning if now - last_warning_at >= 30 else logger.debug
-            log(
-                "Cannot broadcast %s to session %s - no active connections",
-                message_type,
-                session_code,
-            )
-            self._missing_connection_warning_at[warning_key] = now
             return
 
         exclude_websockets = exclude_websockets or []
@@ -1034,6 +1024,56 @@ class ConnectionManager:
 
         if should_require_ack and success_count > 0:
             self._schedule_ack_retry(message_with_timestamp["event_id"])
+
+    async def broadcast_to_session(
+        self,
+        session_code: str,
+        message: dict,
+        exclude_websockets: Optional[List[WebSocket]] = None,
+        only_client_types: Optional[List[str]] = None,
+        exclude_client_types: Optional[List[str]] = None,
+        critical: bool = False,
+        require_ack: bool = False,
+    ):
+        """Broadcast to local sockets and publish for other workers."""
+        await asyncio.gather(
+            self._broadcast_local_to_session(
+                session_code=session_code,
+                message=message,
+                exclude_websockets=exclude_websockets,
+                only_client_types=only_client_types,
+                exclude_client_types=exclude_client_types,
+                critical=critical,
+                require_ack=require_ack,
+            ),
+            websocket_bus.publish(
+                {
+                    "kind": "session_broadcast",
+                    "session_code": session_code,
+                    "message": message,
+                    "only_client_types": only_client_types,
+                    "exclude_client_types": exclude_client_types,
+                    "critical": critical,
+                    "require_ack": require_ack,
+                }
+            ),
+        )
+
+    async def dispatch_bus_event(self, event: dict[str, Any]) -> None:
+        kind = event.get("kind")
+
+        if kind == "session_broadcast":
+            await self._broadcast_local_to_session(
+                session_code=event["session_code"],
+                message=event["message"],
+                only_client_types=event.get("only_client_types"),
+                exclude_client_types=event.get("exclude_client_types"),
+                critical=bool(event.get("critical")),
+                require_ack=bool(event.get("require_ack")),
+            )
+            return
+
+        logger.warning("Unknown Redis WebSocket event kind: %s", kind)
 
     async def broadcast_to_mobile_players(self, session_code: str, message: dict):
         """Broadcast message only to mobile clients"""

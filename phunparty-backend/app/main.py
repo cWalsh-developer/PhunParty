@@ -54,6 +54,8 @@ from app.security.request_guard import (
     validate_path_and_query,
 )
 from app.security.rate_limit import enforce_rate_limit, get_client_ip, rate_limiter
+from app.websockets.manager import manager
+from app.websockets.redis_bus import websocket_bus
 from app.websockets import routes as websocket_routes
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -172,10 +174,12 @@ async def lifespan(app: FastAPI):
         logger.exception("Could not complete optional database maintenance")
 
     await rate_limiter.connect()
+    await websocket_bus.connect(manager.dispatch_bus_event)
     warn_about_websocket_process_state()
     try:
         yield
     finally:
+        await websocket_bus.close()
         await rate_limiter.close()
 
 
