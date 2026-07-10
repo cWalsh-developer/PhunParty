@@ -1666,6 +1666,50 @@ def test_scheduled_roster_update_debounces_burst_requests():
     asyncio.run(run_test())
 
 
+def test_trivia_answer_submission_runs_db_work_in_thread():
+    handler = game_handlers.TriviaGameHandler("SESSION123")
+    result = {
+        "game_state": {
+            "waiting_for_players": True,
+            "playersAnswered": 1,
+        }
+    }
+
+    async def run_test():
+        with patch.object(game_handlers, "manager") as mock_manager:
+            mock_manager.broadcast_to_session = AsyncMock()
+            mock_manager.send_personal_message = AsyncMock()
+            mock_manager.get_answered_count.return_value = 1
+            mock_manager.get_session_connections.return_value = {}
+            with patch.object(
+                game_handlers.asyncio,
+                "to_thread",
+                new_callable=AsyncMock,
+                return_value=(result, "Alice"),
+            ) as to_thread:
+                await handler.handle_player_answer(
+                    "P1",
+                    "A",
+                    "Q1",
+                    MagicMock(),
+                )
+
+        to_thread.assert_awaited_once_with(
+            handler._submit_answer_in_thread_session,
+            "P1",
+            "Q1",
+            "A",
+        )
+        mock_manager.set_player_answered.assert_called_once_with(
+            "SESSION123",
+            "P1",
+            True,
+        )
+        assert mock_manager.broadcast_to_session.await_count == 2
+
+    asyncio.run(run_test())
+
+
 def test_mobile_current_question_payload_rebuilds_missing_queue_from_db():
     question = {
         "question_id": "Q1",
