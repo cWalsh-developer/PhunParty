@@ -517,7 +517,10 @@ def serialize_game_state(
 
 
 def build_sync_state(
-    session_code: str, db: Session, game_type: Optional[str] = None
+    session_code: str,
+    db: Session,
+    game_type: Optional[str] = None,
+    player_id: Optional[str] = None,
 ) -> dict:
     """Build authoritative state for initial load and reconnect recovery."""
     game_state_obj = get_game_session_state(db, session_code)
@@ -568,7 +571,7 @@ def build_sync_state(
     sync_state["game_state"] = game_state
     sync_state["game_type"] = game_type
     sync_state["connected_players"] = manager.get_mobile_players(session_code)
-    if game_type == BEAT_THE_CLOCK_GAME_TYPE:
+    if game_type == BEAT_THE_CLOCK_GAME_TYPE and player_id:
         beat_clock_state = manager.get_beat_clock_state_for_player(
             session_code,
             player_id,
