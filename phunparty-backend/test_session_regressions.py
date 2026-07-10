@@ -149,6 +149,7 @@ class _FakeAsyncRedis:
         self.values = {}
         self.get_calls = []
         self.eval_calls = []
+        self.expire_calls = []
 
     async def get(self, key):
         self.get_calls.append(key)
@@ -156,9 +157,14 @@ class _FakeAsyncRedis:
 
     async def eval(self, script, numkeys, key, *args):
         self.eval_calls.append((script, numkeys, key, args))
-        if "redis.call('GET', KEYS[1]) == ARGV[1]" in script:
+        if "redis.call('DEL', KEYS[1])" in script:
             if self.values.get(key) == args[0]:
                 self.values.pop(key, None)
+                return 1
+            return 0
+        if "redis.call('EXPIRE', KEYS[1], ARGV[2])" in script:
+            if self.values.get(key) == args[0]:
+                self.expire_calls.append((key, args[1]))
                 return 1
             return 0
 
@@ -2575,6 +2581,47 @@ def test_async_connection_generation_rejects_stale_mobile_socket():
     assert fake_redis.get_calls == [generation_key]
 
 
+def test_async_connection_generation_rejects_missing_redis_lease():
+    fake_redis = _FakeAsyncRedis()
+    websocket = MagicMock()
+    session_code = "SESSION123"
+    player_id = "P1"
+    ws_id = "ws_missing_lease"
+    generation_key = manager._player_generation_key(session_code, player_id)
+
+    manager.active_connections[session_code] = {
+        ws_id: {
+            "websocket": websocket,
+            "client_type": "mobile",
+            "player_id": player_id,
+            "connection_generation": "worker-a:ws_missing_lease",
+        }
+    }
+    manager.websocket_registry[ws_id] = {
+        "session_code": session_code,
+        "websocket": websocket,
+    }
+
+    try:
+        with patch.object(redis_bus.websocket_bus, "_redis", fake_redis):
+            assert (
+                asyncio.run(
+                    manager.connection_is_current_async(
+                        websocket,
+                        session_code,
+                        player_id,
+                    )
+                )
+                is False
+            )
+    finally:
+        manager.active_connections.pop(session_code, None)
+        manager.websocket_registry.pop(ws_id, None)
+        manager.websocket_to_ws_id.pop(id(websocket), None)
+
+    assert fake_redis.get_calls == [generation_key]
+
+
 def test_async_connection_generation_claim_uses_async_redis_eval():
     fake_redis = _FakeAsyncRedis()
     session_code = "SESSION123"
@@ -2594,6 +2641,30 @@ def test_async_connection_generation_claim_uses_async_redis_eval():
     assert old_generation == "old-worker:ws1"
     assert fake_redis.values[generation_key] == "new-worker:ws2"
     assert len(fake_redis.eval_calls) == 1
+
+
+def test_async_connection_generation_renew_extends_owned_lease():
+    fake_redis = _FakeAsyncRedis()
+    session_code = "SESSION123"
+    player_id = "P1"
+    generation = "worker-a:ws1"
+    generation_key = manager._player_generation_key(session_code, player_id)
+    fake_redis.values[generation_key] = generation
+
+    with patch.object(redis_bus.websocket_bus, "_redis", fake_redis):
+        renewed = asyncio.run(
+            manager._renew_player_connection_generation_async(
+                session_code,
+                player_id,
+                generation,
+            )
+        )
+
+    assert renewed is True
+    assert fake_redis.values[generation_key] == generation
+    assert fake_redis.expire_calls == [
+        (generation_key, str(manager.PRESENCE_KEY_TTL_SECONDS))
+    ]
 
 
 def test_connection_indexes_track_websocket_and_player_connections():

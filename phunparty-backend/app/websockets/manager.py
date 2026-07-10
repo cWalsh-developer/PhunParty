@@ -80,6 +80,7 @@ class ConnectionManager:
     ACK_RETRY_DELAY_SECONDS = 1.5
     ACK_MAX_RESENDS = 2
     ROSTER_UPDATE_DEBOUNCE_SECONDS = 0.05
+    GENERATION_RENEW_INTERVAL_SECONDS = 60
     ACK_EVENT_TYPES = {
         "game_started",
         "countdown_started",
@@ -663,6 +664,61 @@ return 0
                 session_code,
                 safe_player_ref(player_id),
             )
+
+    async def _renew_player_connection_generation_async(
+        self, session_code: str, player_id: str, generation: Optional[str]
+    ) -> bool:
+        client = websocket_bus.async_client
+        if not client:
+            return True
+        if not generation:
+            return False
+
+        key = self._player_generation_key(session_code, player_id)
+        script = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"""
+        try:
+            renewed = await client.eval(
+                script,
+                1,
+                key,
+                generation,
+                str(self.PRESENCE_KEY_TTL_SECONDS),
+            )
+            return bool(renewed)
+        except Exception:
+            logger.exception(
+                "Failed to renew player connection generation for %s/%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+            return False
+
+    async def _renew_or_disconnect_generation(
+        self,
+        session_code: str,
+        player_id: str,
+        generation: Optional[str],
+    ) -> None:
+        renewed = await self._renew_player_connection_generation_async(
+            session_code,
+            player_id,
+            generation,
+        )
+        if renewed:
+            return
+
+        await self._disconnect_local_generation(
+            session_code,
+            player_id,
+            generation or "",
+            close_code=4000,
+            reason="Connection lease expired",
+        )
 
     def _update_shared_presence_metadata(
         self,
@@ -1794,6 +1850,8 @@ return 0
             session_code,
             player_id,
         )
+        if current_generation is None and websocket_bus.sync_client:
+            return False
         return current_generation is None or current_generation == generation
 
     async def connection_is_current_async(
@@ -1814,6 +1872,10 @@ return 0
             session_code,
             player_id,
         )
+        if current_generation is None and (
+            websocket_bus.async_client or websocket_bus.sync_client
+        ):
+            return False
         return current_generation is None or current_generation == generation
 
     async def disconnect_player_everywhere(
@@ -3085,6 +3147,25 @@ return 0
         connection_info["last_heartbeat"] = datetime.now()
         connection_info["connection_state"] = "connected"
         self._upsert_presence(session_code, ws_id, connection_info)
+        if (
+            connection_info.get("client_type") == "mobile"
+            and connection_info.get("player_id")
+            and connection_info.get("connection_generation")
+        ):
+            now = time.time()
+            last_renewed_at = float(connection_info.get("generation_renewed_at") or 0)
+            if now - last_renewed_at >= self.GENERATION_RENEW_INTERVAL_SECONDS:
+                connection_info["generation_renewed_at"] = now
+                try:
+                    asyncio.create_task(
+                        self._renew_or_disconnect_generation(
+                            session_code,
+                            connection_info["player_id"],
+                            connection_info.get("connection_generation"),
+                        )
+                    )
+                except RuntimeError:
+                    logger.debug("Could not schedule generation renewal; no event loop")
 
     def mark_client_ready(self, websocket: WebSocket):
         """Mark a client as ready after they acknowledge connection"""
