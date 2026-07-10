@@ -1642,6 +1642,39 @@ def test_roster_update_broadcasts_to_non_mobile_clients_only():
     mobile_socket.send_text.assert_not_awaited()
 
 
+def test_roster_update_uses_one_shared_presence_snapshot():
+    session_code = "ROSTERSHARED"
+    shared_presence = [
+        {
+            "client_type": "web",
+            "connection_confirmed": True,
+            "connected_at": "2026-06-01T12:00:00",
+        },
+        {
+            "client_type": "mobile",
+            "connection_confirmed": True,
+            "player_id": "P1",
+            "player_name": "Alice",
+            "player_photo": None,
+            "connected_at": "2026-06-01T12:00:01",
+        },
+    ]
+
+    with patch.object(
+        manager,
+        "_shared_presence_metadata",
+        return_value=shared_presence,
+    ) as shared_snapshot:
+        with patch.object(manager, "broadcast_to_session", AsyncMock()) as broadcast:
+            asyncio.run(manager.broadcast_player_roster_update(session_code))
+
+    shared_snapshot.assert_called_once_with(session_code)
+    roster_message = broadcast.await_args.args[1]
+    assert roster_message["data"]["connected_players"][0]["player_name"] == "Alice"
+    assert roster_message["data"]["connection_stats"]["web_clients"] == 1
+    assert roster_message["data"]["connection_stats"]["mobile_clients"] == 1
+
+
 def test_scheduled_roster_update_debounces_burst_requests():
     session_code = "ROSTERDEBOUNCE"
 

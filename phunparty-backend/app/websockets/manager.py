@@ -2105,6 +2105,224 @@ return 0
         """Get all connections for a session"""
         return self.active_connections.get(session_code, {})
 
+    def _mobile_players_from_shared_presence(
+        self, session_code: str, shared_presence: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        latest_by_player: Dict[str, Dict[str, Any]] = {}
+        unnamed_mobile_players: List[Dict[str, Any]] = []
+
+        for metadata in shared_presence:
+            if metadata.get("client_type") != "mobile":
+                continue
+            if not metadata.get("connection_confirmed"):
+                continue
+
+            player_id = metadata.get("player_id")
+            player_data = {
+                "player_id": player_id,
+                "roster_player_id": metadata.get("roster_player_id")
+                or make_roster_player_id(session_code, player_id),
+                "player_name": metadata.get("player_name")
+                or player_id
+                or "Unknown player",
+                "player_photo": metadata.get("player_photo"),
+                "connected_at": metadata.get("connected_at"),
+                "player_answered": metadata.get("player_answered", None),
+                "connection_state": metadata.get("connection_state", "connected"),
+                "is_ready": metadata.get("is_ready", False),
+            }
+            for key in (
+                "strike_count",
+                "max_strikes",
+                "is_frozen",
+                "frozen_question_id",
+                "is_kicked",
+                "answer_status",
+                "fair_play_reason",
+            ):
+                if key in metadata:
+                    player_data[key] = metadata[key]
+
+            if player_id:
+                existing = latest_by_player.get(player_id)
+                existing_connected_at = existing.get("connected_at") if existing else ""
+                candidate_connected_at = player_data.get("connected_at") or ""
+                if not existing or candidate_connected_at >= existing_connected_at:
+                    latest_by_player[player_id] = player_data
+            else:
+                unnamed_mobile_players.append(player_data)
+
+        deduped_players = list(latest_by_player.values()) + unnamed_mobile_players
+        deduped_players.sort(
+            key=lambda p: (p.get("player_name") or "", p.get("connected_at") or "")
+        )
+        return deduped_players
+
+    def _mobile_players_from_connections(
+        self, session_code: str, connections: Dict[str, Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        latest_by_player: Dict[str, Dict[str, Any]] = {}
+        unnamed_mobile_players: List[Dict[str, Any]] = []
+
+        for connection_info in connections.values():
+            if connection_info.get("client_type") != "mobile":
+                continue
+
+            player_id = connection_info.get("player_id")
+            player_name = (
+                connection_info.get("player_name") or player_id or "Unknown player"
+            )
+
+            player_data = {
+                "player_id": player_id,
+                "roster_player_id": make_roster_player_id(session_code, player_id),
+                "player_name": player_name,
+                "player_photo": connection_info.get("player_photo"),
+                "connected_at": connection_info.get("connected_at"),
+                "player_answered": connection_info.get("player_answered", None),
+                "connection_state": connection_info.get(
+                    "connection_state", "connected"
+                ),
+            }
+            if player_id:
+                player_data.update(
+                    self.fair_play_player_status.get(session_code, {}).get(
+                        player_id, {}
+                    )
+                )
+
+            if player_id:
+                existing = latest_by_player.get(player_id)
+                existing_connected_at = existing.get("connected_at") if existing else ""
+                candidate_connected_at = player_data.get("connected_at") or ""
+                if not existing or candidate_connected_at >= existing_connected_at:
+                    latest_by_player[player_id] = player_data
+            else:
+                unnamed_mobile_players.append(player_data)
+
+        deduped_players = list(latest_by_player.values()) + unnamed_mobile_players
+        deduped_players.sort(
+            key=lambda p: (p.get("player_name") or "", p.get("connected_at") or "")
+        )
+        return deduped_players
+
+    def build_roster_snapshot(
+        self, session_code: str
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Build roster players and stats from one shared/local presence snapshot."""
+        shared_presence = self._shared_presence_metadata(session_code)
+        if shared_presence:
+            mobile_players = self._mobile_players_from_shared_presence(
+                session_code,
+                shared_presence,
+            )
+            web_clients = sum(
+                1
+                for metadata in shared_presence
+                if metadata.get("client_type") == "web"
+                and metadata.get("connection_confirmed")
+            )
+            mobile_clients = sum(
+                1
+                for metadata in shared_presence
+                if metadata.get("client_type") == "mobile"
+                and metadata.get("connection_confirmed")
+            )
+            player_breakdown: Dict[str, Dict[str, Any]] = {}
+            for metadata in shared_presence:
+                player_id = metadata.get("player_id")
+                if not player_id or metadata.get("client_type") != "mobile":
+                    continue
+                player_breakdown.setdefault(
+                    player_id,
+                    {
+                        "connection_count": 0,
+                        "player_name": metadata.get("player_name", "Unknown"),
+                    },
+                )
+                player_breakdown[player_id]["connection_count"] += 1
+
+            return mobile_players, {
+                "exists": True,
+                "total_connections": web_clients + mobile_clients,
+                "web_clients": web_clients,
+                "mobile_clients": mobile_clients,
+                "mobile_players": mobile_players,
+                "phase": self.get_session_phase_state(session_code).get("phase"),
+                "pending_acks": self.get_pending_ack_summary(session_code),
+                "players": len(player_breakdown),
+                "hosts": 0,
+                "observers": 0,
+                "player_breakdown": player_breakdown,
+                "duplicate_connections": [
+                    {
+                        "player_id": pid,
+                        "player_name": info["player_name"],
+                        "connection_count": info["connection_count"],
+                    }
+                    for pid, info in player_breakdown.items()
+                    if info["connection_count"] > 1
+                ],
+            }
+
+        connections = self.get_session_connections(session_code)
+        mobile_players = self._mobile_players_from_connections(
+            session_code,
+            connections,
+        )
+        web_clients = 0
+        mobile_clients = 0
+        hosts = 0
+        observers = 0
+        player_breakdown: Dict[str, Dict[str, Any]] = {}
+
+        for connection_info in connections.values():
+            client_type = connection_info.get("client_type", "unknown")
+            player_id = connection_info.get("player_id")
+
+            if client_type == "host":
+                hosts += 1
+            elif client_type == "observer":
+                observers += 1
+            elif client_type == "web":
+                web_clients += 1
+            elif client_type == "mobile":
+                mobile_clients += 1
+                if player_id:
+                    player_breakdown.setdefault(
+                        player_id,
+                        {
+                            "connection_count": 0,
+                            "player_name": connection_info.get(
+                                "player_name", "Unknown"
+                            ),
+                        },
+                    )
+                    player_breakdown[player_id]["connection_count"] += 1
+
+        return mobile_players, {
+            "exists": bool(connections),
+            "total_connections": len(connections),
+            "web_clients": web_clients,
+            "mobile_clients": mobile_clients,
+            "mobile_players": mobile_players,
+            "phase": self.get_session_phase_state(session_code).get("phase"),
+            "pending_acks": self.get_pending_ack_summary(session_code),
+            "players": len(player_breakdown),
+            "hosts": hosts,
+            "observers": observers,
+            "player_breakdown": player_breakdown,
+            "duplicate_connections": [
+                {
+                    "player_id": pid,
+                    "player_name": info["player_name"],
+                    "connection_count": info["connection_count"],
+                }
+                for pid, info in player_breakdown.items()
+                if info["connection_count"] > 1
+            ],
+        }
+
     def get_mobile_players(self, session_code: str) -> List[Dict[str, Any]]:
         """Get list of mobile players in session"""
         shared_presence = self._shared_presence_metadata(session_code)
@@ -2885,8 +3103,7 @@ return 0
 
     async def broadcast_player_roster_update(self, session_code: str):
         """Broadcast the authoritative mobile player roster to host clients."""
-        mobile_players = self.get_mobile_players(session_code)
-        stats = self.get_session_stats(session_code)
+        mobile_players, stats = self.build_roster_snapshot(session_code)
 
         roster_message = {
             "type": "roster_update",
