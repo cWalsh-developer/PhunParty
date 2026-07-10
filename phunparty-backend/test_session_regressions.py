@@ -2781,6 +2781,74 @@ def test_redis_bus_dispatches_different_sessions_independently():
     asyncio.run(run_test())
 
 
+def test_redis_bus_does_not_drop_control_events_when_session_queue_is_full():
+    async def run_test():
+        bus = redis_bus.RedisWebSocketBus()
+        bus.dispatch_queue_maxsize = 1
+        bus.dispatch_queue_idle_seconds = 60
+        started_first = asyncio.Event()
+        release_first = asyncio.Event()
+        handled = []
+
+        async def dispatcher(event):
+            handled.append(event["kind"])
+            if event["kind"] == "session_broadcast" and not started_first.is_set():
+                started_first.set()
+                await release_first.wait()
+
+        bus._dispatcher = dispatcher
+
+        try:
+            await bus._enqueue_event(
+                {
+                    "version": 1,
+                    "kind": "session_broadcast",
+                    "session_code": "FULL01",
+                    "message": {"type": "roster_update"},
+                }
+            )
+            await asyncio.wait_for(started_first.wait(), timeout=1)
+
+            await bus._enqueue_event(
+                {
+                    "version": 1,
+                    "kind": "session_broadcast",
+                    "session_code": "FULL01",
+                    "message": {"type": "beat_clock_state"},
+                }
+            )
+
+            control_enqueue = asyncio.create_task(
+                bus._enqueue_event(
+                    {
+                        "version": 1,
+                        "kind": "disconnect_player",
+                        "session_code": "FULL01",
+                        "player_id": "P1",
+                        "messages": [{"type": "kicked_from_session"}],
+                    }
+                )
+            )
+            await asyncio.sleep(0)
+            assert not control_enqueue.done()
+            assert bus.control_backpressure_count == 1
+            assert bus.dropped_event_count == 0
+
+            release_first.set()
+            await asyncio.wait_for(control_enqueue, timeout=1)
+            await asyncio.wait_for(bus._dispatch_queues["FULL01"].join(), timeout=1)
+        finally:
+            await bus.close()
+
+        assert handled == [
+            "session_broadcast",
+            "session_broadcast",
+            "disconnect_player",
+        ]
+
+    asyncio.run(run_test())
+
+
 def test_fair_play_status_uses_per_player_redis_hash_fields():
     fake_redis = _FakeRedis()
 

@@ -24,6 +24,10 @@ ALLOWED_EVENT_KINDS = {
     "disconnect_player",
     "revoke_connection_generation",
 }
+CONTROL_EVENT_KINDS = {
+    "disconnect_player",
+    "revoke_connection_generation",
+}
 ALLOWED_WS_MESSAGE_TYPES = {
     "answer_rejected",
     "answer_submitted",
@@ -130,6 +134,8 @@ class RedisWebSocketBus:
         self._dispatcher: EventDispatcher | None = None
         self._dispatch_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self._dispatch_tasks: dict[str, asyncio.Task] = {}
+        self.dropped_event_count = 0
+        self.control_backpressure_count = 0
 
     @property
     def connected(self) -> bool:
@@ -303,6 +309,17 @@ class RedisWebSocketBus:
         try:
             queue.put_nowait(event)
         except asyncio.QueueFull:
+            if self._is_control_event(event):
+                self.control_backpressure_count += 1
+                logger.warning(
+                    "Redis WebSocket control event waiting for full dispatch queue: session=%s kind=%s size=%s",
+                    session_code,
+                    event.get("kind"),
+                    queue.qsize(),
+                )
+                await queue.put(event)
+                return
+
             logger.warning(
                 "Redis WebSocket dispatch queue full for session=%s size=%s",
                 session_code,
@@ -314,11 +331,17 @@ class RedisWebSocketBus:
                     timeout=self.dispatch_queue_put_timeout,
                 )
             except asyncio.TimeoutError:
+                self.dropped_event_count += 1
                 logger.error(
                     "Dropped Redis WebSocket event after dispatch queue timeout: session=%s kind=%s",
                     session_code,
                     event.get("kind"),
                 )
+
+    def _is_control_event(self, event: dict[str, Any]) -> bool:
+        if event.get("kind") in CONTROL_EVENT_KINDS:
+            return True
+        return bool(event.get("critical") or event.get("require_ack"))
 
     async def _dispatch_session_events(self, session_code: str) -> None:
         queue = self._dispatch_queues[session_code]
