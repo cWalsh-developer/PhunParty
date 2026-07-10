@@ -2921,6 +2921,120 @@ def test_beat_clock_leaderboard_uses_single_score_query_projection():
     )
 
 
+def test_beat_clock_answer_updates_redis_projection_after_db_commit():
+    events = []
+    handler = game_handlers.BeatTheClockGameHandler("SESSION123")
+    db = MagicMock()
+    db.commit.side_effect = lambda: events.append("commit")
+    state = {
+        "active": True,
+        "duration_seconds": 60,
+        "ends_at": "2026-07-10T12:00:00",
+        "ends_at_dt": datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=1),
+        "players": {
+            "P1": {
+                "current_question_id": "Q1",
+                "answered_count": 0,
+                "correct_count": 0,
+            }
+        },
+    }
+    question = SimpleNamespace(answer="A", accepted_answers=[], difficulty="easy")
+
+    def update_player_state(session_code, player_id, player_state):
+        events.append("redis_update")
+        assert player_state["answered_count"] == 1
+        assert player_state["correct_count"] == 1
+
+    async def run_test():
+        with patch.object(
+            manager,
+            "get_beat_clock_state_for_player",
+            return_value=state,
+        ):
+            with patch.object(game_handlers, "is_player_kicked", return_value=False):
+                with patch.object(
+                    manager,
+                    "is_player_frozen_for_question",
+                    return_value=False,
+                ):
+                    with patch.object(
+                        game_handlers,
+                        "is_player_frozen_for_question",
+                        return_value=False,
+                    ):
+                        with patch.object(
+                            game_handlers,
+                            "get_question_by_id",
+                            return_value=question,
+                        ):
+                            with patch.object(
+                                game_handlers,
+                                "validate_answer_against_question",
+                                return_value=SimpleNamespace(
+                                    is_correct=True,
+                                    method="exact",
+                                    score=1.0,
+                                ),
+                            ):
+                                with patch.object(
+                                    game_handlers,
+                                    "create_player_response",
+                                    side_effect=lambda *args, **kwargs: events.append(
+                                        "response"
+                                    ),
+                                ):
+                                    with patch.object(
+                                        game_handlers,
+                                        "update_scores",
+                                        side_effect=lambda *args, **kwargs: events.append(
+                                            "score"
+                                        ),
+                                    ):
+                                        with patch.object(
+                                            manager,
+                                            "update_beat_clock_player_state",
+                                            side_effect=update_player_state,
+                                        ):
+                                            with patch.object(
+                                                game_handlers,
+                                                "get_scores_by_session_and_player",
+                                                return_value=SimpleNamespace(score=1),
+                                            ):
+                                                with patch.object(
+                                                    game_handlers,
+                                                    "get_session_by_code",
+                                                    return_value=None,
+                                                ):
+                                                    with patch.object(
+                                                        manager,
+                                                        "send_message_to_player",
+                                                        AsyncMock(),
+                                                    ):
+                                                        with patch.object(
+                                                            handler,
+                                                            "_send_question_to_player",
+                                                            AsyncMock(
+                                                                return_value=True
+                                                            ),
+                                                        ):
+                                                            with patch.object(
+                                                                handler,
+                                                                "_broadcast_state",
+                                                                AsyncMock(),
+                                                            ):
+                                                                await handler.handle_player_answer(
+                                                                    "P1",
+                                                                    "A",
+                                                                    "Q1",
+                                                                    db,
+                                                                )
+
+    asyncio.run(run_test())
+
+    assert events == ["response", "score", "commit", "redis_update"]
+
+
 def test_connection_generation_rejects_stale_mobile_socket():
     fake_redis = _FakeRedis()
     websocket = MagicMock()

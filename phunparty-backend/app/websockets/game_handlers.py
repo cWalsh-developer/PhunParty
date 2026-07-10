@@ -1000,18 +1000,26 @@ class BeatTheClockGameHandler(GameEventHandler):
             answer,
             is_correct,
         )
+        updated_player_state = dict(player_state)
+
         if is_correct:
             update_scores(db, self.session_code, player_id)
-            player_state["correct_count"] = player_state.get("correct_count", 0) + 1
+            updated_player_state["correct_count"] = (
+                updated_player_state.get("correct_count", 0) + 1
+            )
 
-        player_state["answered_count"] = player_state.get("answered_count", 0) + 1
+        updated_player_state["answered_count"] = (
+            updated_player_state.get("answered_count", 0) + 1
+        )
+        db.commit()
+
+        state.setdefault("players", {})[player_id] = updated_player_state
         manager.update_beat_clock_player_state(
             self.session_code,
             player_id,
-            player_state,
+            updated_player_state,
         )
         score_row = get_scores_by_session_and_player(db, self.session_code, player_id)
-        db.commit()
 
         session = get_session_by_code(db, self.session_code)
         if session and session.owner_player_id:
@@ -1022,8 +1030,8 @@ class BeatTheClockGameHandler(GameEventHandler):
             "question_id": question_id,
             "is_correct": is_correct,
             "score": score_row.score if score_row else 0,
-            "answered_count": player_state["answered_count"],
-            "correct_count": player_state["correct_count"],
+            "answered_count": updated_player_state["answered_count"],
+            "correct_count": updated_player_state["correct_count"],
             "duration_seconds": state.get("duration_seconds"),
             "ends_at": state.get("ends_at"),
             "server_time_ms": manager._utc_now_ms(),
