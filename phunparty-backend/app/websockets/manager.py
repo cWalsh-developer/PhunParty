@@ -79,6 +79,8 @@ class ConnectionManager:
     TERMINAL_SESSION_TTL_SECONDS = 900
     ACK_RETRY_DELAY_SECONDS = 1.5
     ACK_MAX_RESENDS = 2
+    ROSTER_UPDATE_DEBOUNCE_SECONDS = 0.05
+    GENERATION_RENEW_INTERVAL_SECONDS = 60
     ACK_EVENT_TYPES = {
         "game_started",
         "countdown_started",
@@ -102,6 +104,10 @@ class ConnectionManager:
         self.active_connections: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # websocket_id -> {session_code, websocket}
         self.websocket_registry: Dict[str, Dict[str, Any]] = {}
+        # id(websocket) -> websocket_id. Keeps hot heartbeat/ACK lookups O(1).
+        self.websocket_to_ws_id: Dict[int, str] = {}
+        # (session_code, player_id) -> websocket_ids for targeted player sends.
+        self.player_connection_index: Dict[tuple[str, str], Set[str]] = {}
         # Question queue: session_code -> {question_id: question_data}
         # Stores questions that have been broadcast so mobile clients can retrieve them
         self.question_queue: Dict[str, Dict[str, Any]] = {}
@@ -131,25 +137,84 @@ class ConnectionManager:
         # player leave tasks: "session_code:player_id" -> asyncio.Task
         # Used to avoid flapping presence when mobile networks briefly disconnect.
         self.pending_player_leave_tasks: Dict[str, asyncio.Task] = {}
+        self.roster_update_tasks: Dict[str, asyncio.Task] = {}
         # Start heartbeat checker and automatic ping broadcaster
         self._heartbeat_task = None
         self._ping_task = None
         self._start_heartbeat_checker()
         self._start_automatic_ping()
 
+    def _websocket_lookup_key(self, websocket: WebSocket) -> int:
+        return id(websocket)
+
+    def _register_connection_indexes(
+        self,
+        session_code: str,
+        ws_id: str,
+        connection_info: Dict[str, Any],
+    ) -> None:
+        websocket = connection_info.get("websocket")
+        if websocket:
+            self.websocket_to_ws_id[self._websocket_lookup_key(websocket)] = ws_id
+
+        if connection_info.get("client_type") == "mobile" and connection_info.get(
+            "player_id"
+        ):
+            player_key = (session_code, connection_info["player_id"])
+            self.player_connection_index.setdefault(player_key, set()).add(ws_id)
+
+    def _remove_connection_indexes(
+        self,
+        session_code: Optional[str],
+        ws_id: Optional[str],
+        connection_info: Optional[Dict[str, Any]],
+    ) -> None:
+        if not ws_id:
+            return
+
+        websocket = (connection_info or {}).get("websocket")
+        if not websocket and ws_id in self.websocket_registry:
+            websocket = self.websocket_registry[ws_id].get("websocket")
+        if websocket:
+            self.websocket_to_ws_id.pop(self._websocket_lookup_key(websocket), None)
+
+        if (
+            session_code
+            and connection_info
+            and connection_info.get("client_type") == "mobile"
+            and connection_info.get("player_id")
+        ):
+            player_key = (session_code, connection_info["player_id"])
+            ws_ids = self.player_connection_index.get(player_key)
+            if ws_ids:
+                ws_ids.discard(ws_id)
+                if not ws_ids:
+                    self.player_connection_index.pop(player_key, None)
+
+    def _ws_id_for_websocket(self, websocket: WebSocket) -> Optional[str]:
+        ws_id = self.websocket_to_ws_id.get(self._websocket_lookup_key(websocket))
+        if ws_id and ws_id in self.websocket_registry:
+            return ws_id
+
+        for registry_ws_id, info in self.websocket_registry.items():
+            if info.get("websocket") == websocket:
+                self.websocket_to_ws_id[self._websocket_lookup_key(websocket)] = (
+                    registry_ws_id
+                )
+                return registry_ws_id
+
+        return None
+
     def _connection_info_for_websocket(
         self, websocket: WebSocket
     ) -> Optional[Dict[str, Any]]:
-        for registry_info in self.websocket_registry.values():
-            if registry_info.get("websocket") != websocket:
-                continue
-
-            session_code = registry_info.get("session_code")
-            for connection_info in self.active_connections.get(
-                session_code, {}
-            ).values():
-                if connection_info.get("websocket") == websocket:
-                    return connection_info
+        ws_id = self._ws_id_for_websocket(websocket)
+        if ws_id:
+            registry_info = self.websocket_registry.get(ws_id)
+            session_code = (registry_info or {}).get("session_code")
+            connection_info = self.active_connections.get(session_code, {}).get(ws_id)
+            if connection_info:
+                return connection_info
 
         return None
 
@@ -248,7 +313,7 @@ class ConnectionManager:
                 )
 
                 # Keep all clients in sync after confirmed leave.
-                await self.broadcast_player_roster_update(session_code)
+                await self.schedule_player_roster_update(session_code)
 
             except asyncio.CancelledError:
                 logger.debug(
@@ -394,6 +459,27 @@ class ConnectionManager:
         except Exception:
             logger.exception("Failed to remove shared presence for %s", session_code)
 
+    def _cleanup_expired_shared_presence(
+        self, presence_key: str, meta_key: str, now: int
+    ) -> int:
+        client = websocket_bus.sync_client
+        if not client:
+            return 0
+
+        script = """
+local expired = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+for _, member in ipairs(expired) do
+    redis.call('ZREM', KEYS[1], member)
+    redis.call('HDEL', KEYS[2], member)
+end
+return #expired
+"""
+        try:
+            return int(client.eval(script, 2, presence_key, meta_key, str(now)) or 0)
+        except Exception:
+            logger.exception("Failed to cleanup expired shared presence metadata")
+            return 0
+
     def _shared_presence_metadata(self, session_code: str) -> List[Dict[str, Any]]:
         client = websocket_bus.sync_client
         if not client:
@@ -402,7 +488,7 @@ class ConnectionManager:
         presence_key, meta_key = self._presence_keys(session_code)
         now = int(time.time())
         try:
-            client.zremrangebyscore(presence_key, "-inf", now)
+            self._cleanup_expired_shared_presence(presence_key, meta_key, now)
             members = client.zrangebyscore(presence_key, now + 1, "+inf")
         except Exception:
             logger.exception("Failed to read shared presence for %s", session_code)
@@ -475,6 +561,42 @@ return old
                 raise
             return None
 
+    async def _claim_player_connection_generation_async(
+        self, session_code: str, player_id: str, generation: str
+    ) -> Optional[str]:
+        client = websocket_bus.async_client
+        if not client:
+            return self._claim_player_connection_generation(
+                session_code,
+                player_id,
+                generation,
+            )
+
+        key = self._player_generation_key(session_code, player_id)
+        script = """
+local old = redis.call('GET', KEYS[1])
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+return old
+"""
+        try:
+            old_generation = await client.eval(
+                script,
+                1,
+                key,
+                generation,
+                str(self.PRESENCE_KEY_TTL_SECONDS),
+            )
+            return str(old_generation) if old_generation else None
+        except Exception:
+            logger.exception(
+                "Failed to claim player connection generation for %s/%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+            if websocket_bus.connected:
+                raise
+            return None
+
     def _get_player_connection_generation(
         self, session_code: str, player_id: str
     ) -> Optional[str]:
@@ -483,6 +605,25 @@ return old
             return None
         try:
             value = client.get(self._player_generation_key(session_code, player_id))
+            return str(value) if value else None
+        except Exception:
+            logger.exception(
+                "Failed to read player connection generation for %s/%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+            return None
+
+    async def _get_player_connection_generation_async(
+        self, session_code: str, player_id: str
+    ) -> Optional[str]:
+        client = websocket_bus.async_client
+        if not client:
+            return self._get_player_connection_generation(session_code, player_id)
+        try:
+            value = await client.get(
+                self._player_generation_key(session_code, player_id)
+            )
             return str(value) if value else None
         except Exception:
             logger.exception(
@@ -515,6 +656,91 @@ return 0
                 safe_player_ref(player_id),
             )
 
+    async def _clear_player_connection_generation_async(
+        self, session_code: str, player_id: str, generation: Optional[str]
+    ) -> None:
+        client = websocket_bus.async_client
+        if not client:
+            self._clear_player_connection_generation(
+                session_code,
+                player_id,
+                generation,
+            )
+            return
+        if not generation:
+            return
+
+        key = self._player_generation_key(session_code, player_id)
+        script = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+        try:
+            await client.eval(script, 1, key, generation)
+        except Exception:
+            logger.exception(
+                "Failed to clear player connection generation for %s/%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+
+    async def _renew_player_connection_generation_async(
+        self, session_code: str, player_id: str, generation: Optional[str]
+    ) -> bool:
+        client = websocket_bus.async_client
+        if not client:
+            return True
+        if not generation:
+            return False
+
+        key = self._player_generation_key(session_code, player_id)
+        script = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"""
+        try:
+            renewed = await client.eval(
+                script,
+                1,
+                key,
+                generation,
+                str(self.PRESENCE_KEY_TTL_SECONDS),
+            )
+            return bool(renewed)
+        except Exception:
+            logger.exception(
+                "Failed to renew player connection generation for %s/%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+            return False
+
+    async def _renew_or_disconnect_generation(
+        self,
+        session_code: str,
+        player_id: str,
+        generation: Optional[str],
+    ) -> None:
+        renewed = await self._renew_player_connection_generation_async(
+            session_code,
+            player_id,
+            generation,
+        )
+        if renewed:
+            return
+
+        await self._disconnect_local_generation(
+            session_code,
+            player_id,
+            generation or "",
+            close_code=4000,
+            reason="Connection lease expired",
+        )
+
     def _update_shared_presence_metadata(
         self,
         session_code: str,
@@ -528,7 +754,7 @@ return 0
         presence_key, meta_key = self._presence_keys(session_code)
         now = int(time.time())
         try:
-            client.zremrangebyscore(presence_key, "-inf", now)
+            self._cleanup_expired_shared_presence(presence_key, meta_key, now)
             members = client.zrangebyscore(presence_key, now + 1, "+inf")
             if not members:
                 return 0
@@ -603,6 +829,18 @@ return 0
             client.delete(*keys)
         except Exception:
             logger.exception("Failed to delete shared state keys %s", keys)
+
+    def _redis_expire(self, *keys: str, ttl_seconds: int) -> None:
+        client = websocket_bus.sync_client
+        if not client or not keys:
+            return
+        try:
+            pipe = client.pipeline()
+            for key in keys:
+                pipe.expire(key, ttl_seconds)
+            pipe.execute()
+        except Exception:
+            logger.exception("Failed to expire shared state keys %s", keys)
 
     def _redis_hash_json_get(self, key: str, field: str) -> Optional[Dict[str, Any]]:
         client = websocket_bus.sync_client
@@ -856,11 +1094,7 @@ return 0
 
     def acknowledge_event(self, websocket: WebSocket, event_id: str) -> bool:
         """Mark a critical event as acknowledged by this websocket."""
-        ws_id = None
-        for registry_ws_id, info in self.websocket_registry.items():
-            if info["websocket"] == websocket:
-                ws_id = registry_ws_id
-                break
+        ws_id = self._ws_id_for_websocket(websocket)
 
         if not ws_id:
             logger.warning(f"ACK received for {event_id} from unknown websocket")
@@ -1044,6 +1278,7 @@ return 0
             "session_code": session_code,
             "websocket": websocket,
         }
+        self._register_connection_indexes(session_code, ws_id, connection_info)
         self._upsert_presence(session_code, ws_id, connection_info)
 
         logger.info(
@@ -1087,7 +1322,7 @@ return 0
             connection_info["connection_confirmed"] = True
             old_generation = None
             if client_type == "mobile" and player_id:
-                old_generation = self._claim_player_connection_generation(
+                old_generation = await self._claim_player_connection_generation_async(
                     session_code,
                     player_id,
                     connection_generation,
@@ -1169,9 +1404,8 @@ return 0
                     f"🔁 Player {player_name} reconnected within grace window; skipping duplicate player_joined"
                 )
 
-            # CRITICAL: Send roster update to ALL clients (web + mobile)
-            # This ensures everyone has the latest player list
-            await self.broadcast_player_roster_update(session_code)
+            # Coalesce roster rebuilds during join/reconnect bursts.
+            await self.schedule_player_roster_update(session_code)
 
             logger.info(
                 f"✅ Sent roster_update to all clients in session {session_code}"
@@ -1189,12 +1423,11 @@ return 0
         session_code = None
         client_info = None
 
-        # Find the websocket in registry
-        for ws_id, info in self.websocket_registry.items():
-            if info["websocket"] == websocket:
-                session_code = info["session_code"]
-                client_info = self.active_connections[session_code][ws_id]
-                break
+        ws_id = self._ws_id_for_websocket(websocket)
+        if ws_id:
+            registry_info = self.websocket_registry.get(ws_id, {})
+            session_code = registry_info.get("session_code")
+            client_info = self.active_connections.get(session_code, {}).get(ws_id)
 
         if ws_id and session_code:
             if (
@@ -1230,8 +1463,8 @@ return 0
                     del self.active_connections[session_code]
 
             # Remove from registry
-            if ws_id in self.websocket_registry:
-                del self.websocket_registry[ws_id]
+            self._remove_connection_indexes(session_code, ws_id, client_info)
+            self.websocket_registry.pop(ws_id, None)
             self._remove_presence(session_code, ws_id)
             if (
                 client_info
@@ -1381,7 +1614,13 @@ return 0
         self.fair_play_frozen_players.pop(session_code, None)
         self.fair_play_player_status.pop(session_code, None)
         self.pending_focus_losses.pop(session_code, None)
-        self._redis_delete(
+        for player_key in list(self.player_connection_index):
+            if player_key[0] == session_code:
+                self.player_connection_index.pop(player_key, None)
+        roster_task = self.roster_update_tasks.pop(session_code, None)
+        if roster_task and not roster_task.done():
+            roster_task.cancel()
+        self._redis_expire(
             self._shared_state_key(session_code, "phase"),
             self._shared_state_key(session_code, "current-question"),
             self._shared_state_key(session_code, "game-type"),
@@ -1393,6 +1632,7 @@ return 0
             self._fair_play_status_key(session_code),
             self._fair_play_frozen_key(session_code),
             self._pending_focus_key(session_code),
+            ttl_seconds=self.TERMINAL_SESSION_TTL_SECONDS,
         )
 
         session_key_prefix = f"{session_code}:"
@@ -1480,23 +1720,19 @@ return 0
         if not sent:
             return False
 
-        for ws_id, registry_info in self.websocket_registry.items():
-            if registry_info["websocket"] != websocket:
-                continue
+        ws_id = self._ws_id_for_websocket(websocket)
+        connection_info = self.active_connections.get(session_code, {}).get(ws_id)
+        if not connection_info:
+            return sent
 
-            connection_info = self.active_connections.get(session_code, {}).get(ws_id)
-            if not connection_info:
-                return sent
-
-            self._track_ack_target(
-                message_with_metadata["event_id"],
-                session_code,
-                message_with_metadata,
-                ws_id,
-                connection_info,
-            )
-            self._schedule_ack_retry(message_with_metadata["event_id"])
-            break
+        self._track_ack_target(
+            message_with_metadata["event_id"],
+            session_code,
+            message_with_metadata,
+            ws_id,
+            connection_info,
+        )
+        self._schedule_ack_retry(message_with_metadata["event_id"])
 
         return sent
 
@@ -1575,9 +1811,10 @@ return 0
 
             if ws_id in self.active_connections.get(session_code, {}):
                 del self.active_connections[session_code][ws_id]
+            self._remove_connection_indexes(session_code, ws_id, connection_info)
             self.websocket_registry.pop(ws_id, None)
             self._remove_presence(session_code, ws_id)
-            self._clear_player_connection_generation(
+            await self._clear_player_connection_generation_async(
                 session_code,
                 player_id,
                 connection_info.get("connection_generation"),
@@ -1617,6 +1854,7 @@ return 0
 
             if ws_id in self.active_connections.get(session_code, {}):
                 del self.active_connections[session_code][ws_id]
+            self._remove_connection_indexes(session_code, ws_id, connection_info)
             self.websocket_registry.pop(ws_id, None)
             self._remove_presence(session_code, ws_id)
             disconnected_count += 1
@@ -1646,6 +1884,32 @@ return 0
             session_code,
             player_id,
         )
+        if current_generation is None and websocket_bus.sync_client:
+            return False
+        return current_generation is None or current_generation == generation
+
+    async def connection_is_current_async(
+        self, websocket: WebSocket, session_code: str, player_id: Optional[str]
+    ) -> bool:
+        if not player_id:
+            return True
+
+        connection_info = self._connection_info_for_websocket(websocket)
+        if not connection_info:
+            return False
+
+        generation = connection_info.get("connection_generation")
+        if not generation:
+            return True
+
+        current_generation = await self._get_player_connection_generation_async(
+            session_code,
+            player_id,
+        )
+        if current_generation is None and (
+            websocket_bus.async_client or websocket_bus.sync_client
+        ):
+            return False
         return current_generation is None or current_generation == generation
 
     async def disconnect_player_everywhere(
@@ -1937,6 +2201,224 @@ return 0
         """Get all connections for a session"""
         return self.active_connections.get(session_code, {})
 
+    def _mobile_players_from_shared_presence(
+        self, session_code: str, shared_presence: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        latest_by_player: Dict[str, Dict[str, Any]] = {}
+        unnamed_mobile_players: List[Dict[str, Any]] = []
+
+        for metadata in shared_presence:
+            if metadata.get("client_type") != "mobile":
+                continue
+            if not metadata.get("connection_confirmed"):
+                continue
+
+            player_id = metadata.get("player_id")
+            player_data = {
+                "player_id": player_id,
+                "roster_player_id": metadata.get("roster_player_id")
+                or make_roster_player_id(session_code, player_id),
+                "player_name": metadata.get("player_name")
+                or player_id
+                or "Unknown player",
+                "player_photo": metadata.get("player_photo"),
+                "connected_at": metadata.get("connected_at"),
+                "player_answered": metadata.get("player_answered", None),
+                "connection_state": metadata.get("connection_state", "connected"),
+                "is_ready": metadata.get("is_ready", False),
+            }
+            for key in (
+                "strike_count",
+                "max_strikes",
+                "is_frozen",
+                "frozen_question_id",
+                "is_kicked",
+                "answer_status",
+                "fair_play_reason",
+            ):
+                if key in metadata:
+                    player_data[key] = metadata[key]
+
+            if player_id:
+                existing = latest_by_player.get(player_id)
+                existing_connected_at = existing.get("connected_at") if existing else ""
+                candidate_connected_at = player_data.get("connected_at") or ""
+                if not existing or candidate_connected_at >= existing_connected_at:
+                    latest_by_player[player_id] = player_data
+            else:
+                unnamed_mobile_players.append(player_data)
+
+        deduped_players = list(latest_by_player.values()) + unnamed_mobile_players
+        deduped_players.sort(
+            key=lambda p: (p.get("player_name") or "", p.get("connected_at") or "")
+        )
+        return deduped_players
+
+    def _mobile_players_from_connections(
+        self, session_code: str, connections: Dict[str, Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        latest_by_player: Dict[str, Dict[str, Any]] = {}
+        unnamed_mobile_players: List[Dict[str, Any]] = []
+
+        for connection_info in connections.values():
+            if connection_info.get("client_type") != "mobile":
+                continue
+
+            player_id = connection_info.get("player_id")
+            player_name = (
+                connection_info.get("player_name") or player_id or "Unknown player"
+            )
+
+            player_data = {
+                "player_id": player_id,
+                "roster_player_id": make_roster_player_id(session_code, player_id),
+                "player_name": player_name,
+                "player_photo": connection_info.get("player_photo"),
+                "connected_at": connection_info.get("connected_at"),
+                "player_answered": connection_info.get("player_answered", None),
+                "connection_state": connection_info.get(
+                    "connection_state", "connected"
+                ),
+            }
+            if player_id:
+                player_data.update(
+                    self.fair_play_player_status.get(session_code, {}).get(
+                        player_id, {}
+                    )
+                )
+
+            if player_id:
+                existing = latest_by_player.get(player_id)
+                existing_connected_at = existing.get("connected_at") if existing else ""
+                candidate_connected_at = player_data.get("connected_at") or ""
+                if not existing or candidate_connected_at >= existing_connected_at:
+                    latest_by_player[player_id] = player_data
+            else:
+                unnamed_mobile_players.append(player_data)
+
+        deduped_players = list(latest_by_player.values()) + unnamed_mobile_players
+        deduped_players.sort(
+            key=lambda p: (p.get("player_name") or "", p.get("connected_at") or "")
+        )
+        return deduped_players
+
+    def build_roster_snapshot(
+        self, session_code: str
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Build roster players and stats from one shared/local presence snapshot."""
+        shared_presence = self._shared_presence_metadata(session_code)
+        if shared_presence:
+            mobile_players = self._mobile_players_from_shared_presence(
+                session_code,
+                shared_presence,
+            )
+            web_clients = sum(
+                1
+                for metadata in shared_presence
+                if metadata.get("client_type") == "web"
+                and metadata.get("connection_confirmed")
+            )
+            mobile_clients = sum(
+                1
+                for metadata in shared_presence
+                if metadata.get("client_type") == "mobile"
+                and metadata.get("connection_confirmed")
+            )
+            player_breakdown: Dict[str, Dict[str, Any]] = {}
+            for metadata in shared_presence:
+                player_id = metadata.get("player_id")
+                if not player_id or metadata.get("client_type") != "mobile":
+                    continue
+                player_breakdown.setdefault(
+                    player_id,
+                    {
+                        "connection_count": 0,
+                        "player_name": metadata.get("player_name", "Unknown"),
+                    },
+                )
+                player_breakdown[player_id]["connection_count"] += 1
+
+            return mobile_players, {
+                "exists": True,
+                "total_connections": web_clients + mobile_clients,
+                "web_clients": web_clients,
+                "mobile_clients": mobile_clients,
+                "mobile_players": mobile_players,
+                "phase": self.get_session_phase_state(session_code).get("phase"),
+                "pending_acks": self.get_pending_ack_summary(session_code),
+                "players": len(player_breakdown),
+                "hosts": 0,
+                "observers": 0,
+                "player_breakdown": player_breakdown,
+                "duplicate_connections": [
+                    {
+                        "player_id": pid,
+                        "player_name": info["player_name"],
+                        "connection_count": info["connection_count"],
+                    }
+                    for pid, info in player_breakdown.items()
+                    if info["connection_count"] > 1
+                ],
+            }
+
+        connections = self.get_session_connections(session_code)
+        mobile_players = self._mobile_players_from_connections(
+            session_code,
+            connections,
+        )
+        web_clients = 0
+        mobile_clients = 0
+        hosts = 0
+        observers = 0
+        player_breakdown: Dict[str, Dict[str, Any]] = {}
+
+        for connection_info in connections.values():
+            client_type = connection_info.get("client_type", "unknown")
+            player_id = connection_info.get("player_id")
+
+            if client_type == "host":
+                hosts += 1
+            elif client_type == "observer":
+                observers += 1
+            elif client_type == "web":
+                web_clients += 1
+            elif client_type == "mobile":
+                mobile_clients += 1
+                if player_id:
+                    player_breakdown.setdefault(
+                        player_id,
+                        {
+                            "connection_count": 0,
+                            "player_name": connection_info.get(
+                                "player_name", "Unknown"
+                            ),
+                        },
+                    )
+                    player_breakdown[player_id]["connection_count"] += 1
+
+        return mobile_players, {
+            "exists": bool(connections),
+            "total_connections": len(connections),
+            "web_clients": web_clients,
+            "mobile_clients": mobile_clients,
+            "mobile_players": mobile_players,
+            "phase": self.get_session_phase_state(session_code).get("phase"),
+            "pending_acks": self.get_pending_ack_summary(session_code),
+            "players": len(player_breakdown),
+            "hosts": hosts,
+            "observers": observers,
+            "player_breakdown": player_breakdown,
+            "duplicate_connections": [
+                {
+                    "player_id": pid,
+                    "player_name": info["player_name"],
+                    "connection_count": info["connection_count"],
+                }
+                for pid, info in player_breakdown.items()
+                if info["connection_count"] > 1
+            ],
+        }
+
     def get_mobile_players(self, session_code: str) -> List[Dict[str, Any]]:
         """Get list of mobile players in session"""
         shared_presence = self._shared_presence_metadata(session_code)
@@ -2111,15 +2593,9 @@ return 0
 
     def get_player_name_from_websocket(self, websocket: WebSocket) -> str:
         """Get player name from websocket for logging purposes"""
-        for ws_id, info in self.websocket_registry.items():
-            if info["websocket"] == websocket:
-                session_code = info["session_code"]
-                if (
-                    session_code in self.active_connections
-                    and ws_id in self.active_connections[session_code]
-                ):
-                    conn_info = self.active_connections[session_code][ws_id]
-                    return conn_info.get("player_name") or "Unknown"
+        connection_info = self._connection_info_for_websocket(websocket)
+        if connection_info:
+            return connection_info.get("player_name") or "Unknown"
         return "Unknown"
 
     def get_player_connections(
@@ -2129,6 +2605,23 @@ return 0
         Get all active connections for a specific player in a session.
         Returns dict of {ws_id: connection_info}
         """
+        player_key = (session_code, player_id)
+        indexed_ws_ids = self.player_connection_index.get(player_key)
+        if indexed_ws_ids:
+            player_connections = {}
+            stale_ws_ids = []
+            for ws_id in indexed_ws_ids:
+                conn_info = self.active_connections.get(session_code, {}).get(ws_id)
+                if conn_info:
+                    player_connections[ws_id] = conn_info
+                else:
+                    stale_ws_ids.append(ws_id)
+            for ws_id in stale_ws_ids:
+                indexed_ws_ids.discard(ws_id)
+            if not indexed_ws_ids:
+                self.player_connection_index.pop(player_key, None)
+            return player_connections
+
         if session_code not in self.active_connections:
             return {}
 
@@ -2139,6 +2632,7 @@ return 0
                 and conn_info.get("player_id") == player_id
             ):
                 player_connections[ws_id] = conn_info
+                self.player_connection_index.setdefault(player_key, set()).add(ws_id)
 
         return player_connections
 
@@ -2147,30 +2641,24 @@ return 0
         Disconnect all connections for a specific player.
         Returns number of connections disconnected.
         """
-        if session_code not in self.active_connections:
+        connections_to_remove = list(
+            self.get_player_connections(session_code, player_id).items()
+        )
+        if not connections_to_remove:
             return 0
 
         disconnected_count = 0
-        connections_to_remove = []
-
-        # Find all connections for this player
-        for ws_id, conn_info in self.active_connections[session_code].items():
-            if (
-                conn_info.get("client_type") == "mobile"
-                and conn_info.get("player_id") == player_id
-            ):
-                connections_to_remove.append((ws_id, conn_info))
 
         # Remove them
         for ws_id, conn_info in connections_to_remove:
             # Remove from session connections
-            if ws_id in self.active_connections[session_code]:
+            if ws_id in self.active_connections.get(session_code, {}):
                 del self.active_connections[session_code][ws_id]
                 disconnected_count += 1
 
             # Remove from registry
-            if ws_id in self.websocket_registry:
-                del self.websocket_registry[ws_id]
+            self._remove_connection_indexes(session_code, ws_id, conn_info)
+            self.websocket_registry.pop(ws_id, None)
             self._remove_presence(session_code, ws_id)
             self._clear_player_connection_generation(
                 session_code,
@@ -2567,6 +3055,43 @@ return 0
             self.fair_play_player_status.get(session_code, {}).get(player_id, {})
         )
 
+    def get_fair_play_statuses(self, session_code: str) -> Dict[str, Dict[str, Any]]:
+        statuses: Dict[str, Dict[str, Any]] = {
+            player_id: dict(status)
+            for player_id, status in self.fair_play_player_status.get(
+                session_code, {}
+            ).items()
+            if isinstance(status, dict)
+        }
+
+        legacy_status = self._redis_json_get(
+            self._shared_state_key(session_code, "fair-play-status")
+        )
+        if isinstance(legacy_status, dict):
+            for player_id, status in legacy_status.items():
+                if isinstance(status, dict):
+                    statuses[str(player_id)] = dict(status)
+
+        shared_statuses = self._redis_hash_all(self._fair_play_status_key(session_code))
+        for player_id, raw_status in shared_statuses.items():
+            try:
+                status = json.loads(raw_status)
+            except (TypeError, json.JSONDecodeError):
+                logger.debug(
+                    "Ignoring invalid Fair Play status snapshot for %s/%s",
+                    session_code,
+                    safe_player_ref(str(player_id)),
+                )
+                continue
+            if isinstance(status, dict):
+                statuses[str(player_id)] = status
+
+        if statuses:
+            self.fair_play_player_status[session_code] = {
+                player_id: dict(status) for player_id, status in statuses.items()
+            }
+        return statuses
+
     def reset_fair_play_freezes_for_question(
         self, session_code: str, question_id: str
     ) -> None:
@@ -2681,48 +3206,56 @@ return 0
 
     def update_heartbeat(self, websocket: WebSocket):
         """Update the last heartbeat time for a websocket"""
-        for ws_id, info in self.websocket_registry.items():
-            if info["websocket"] == websocket:
-                session_code = info["session_code"]
-                if (
-                    session_code in self.active_connections
-                    and ws_id in self.active_connections[session_code]
-                ):
-                    self.active_connections[session_code][ws_id][
-                        "last_heartbeat"
-                    ] = datetime.now()
-                    self.active_connections[session_code][ws_id][
-                        "connection_state"
-                    ] = "connected"
-                    self._upsert_presence(
-                        session_code,
-                        ws_id,
-                        self.active_connections[session_code][ws_id],
+        ws_id = self._ws_id_for_websocket(websocket)
+        if not ws_id:
+            return
+
+        session_code = self.websocket_registry.get(ws_id, {}).get("session_code")
+        connection_info = self.active_connections.get(session_code, {}).get(ws_id)
+        if not connection_info:
+            return
+
+        connection_info["last_heartbeat"] = datetime.now()
+        connection_info["connection_state"] = "connected"
+        self._upsert_presence(session_code, ws_id, connection_info)
+        if (
+            connection_info.get("client_type") == "mobile"
+            and connection_info.get("player_id")
+            and connection_info.get("connection_generation")
+        ):
+            now = time.time()
+            last_renewed_at = float(connection_info.get("generation_renewed_at") or 0)
+            if now - last_renewed_at >= self.GENERATION_RENEW_INTERVAL_SECONDS:
+                connection_info["generation_renewed_at"] = now
+                try:
+                    asyncio.create_task(
+                        self._renew_or_disconnect_generation(
+                            session_code,
+                            connection_info["player_id"],
+                            connection_info.get("connection_generation"),
+                        )
                     )
-                break
+                except RuntimeError:
+                    logger.debug("Could not schedule generation renewal; no event loop")
 
     def mark_client_ready(self, websocket: WebSocket):
         """Mark a client as ready after they acknowledge connection"""
-        for ws_id, info in self.websocket_registry.items():
-            if info["websocket"] == websocket:
-                session_code = info["session_code"]
-                if (
-                    session_code in self.active_connections
-                    and ws_id in self.active_connections[session_code]
-                ):
-                    self.active_connections[session_code][ws_id]["is_ready"] = True
-                    self._upsert_presence(
-                        session_code,
-                        ws_id,
-                        self.active_connections[session_code][ws_id],
-                    )
-                    logger.info(f"Client {ws_id} marked as ready")
-                break
+        ws_id = self._ws_id_for_websocket(websocket)
+        if not ws_id:
+            return
+
+        session_code = self.websocket_registry.get(ws_id, {}).get("session_code")
+        connection_info = self.active_connections.get(session_code, {}).get(ws_id)
+        if not connection_info:
+            return
+
+        connection_info["is_ready"] = True
+        self._upsert_presence(session_code, ws_id, connection_info)
+        logger.info(f"Client {ws_id} marked as ready")
 
     async def broadcast_player_roster_update(self, session_code: str):
         """Broadcast the authoritative mobile player roster to host clients."""
-        mobile_players = self.get_mobile_players(session_code)
-        stats = self.get_session_stats(session_code)
+        mobile_players, stats = self.build_roster_snapshot(session_code)
 
         roster_message = {
             "type": "roster_update",
@@ -2746,6 +3279,40 @@ return 0
 
         logger.debug(
             f"📋 Broadcasted roster update to session {session_code}: {len(mobile_players)} players - {[p['player_name'] for p in mobile_players]}"
+        )
+
+    async def schedule_player_roster_update(
+        self, session_code: str, delay_seconds: Optional[float] = None
+    ) -> None:
+        """Debounce roster rebuild/broadcast work for join and reconnect bursts."""
+        existing_task = self.roster_update_tasks.get(session_code)
+        if existing_task and not existing_task.done():
+            return
+
+        delay = (
+            self.ROSTER_UPDATE_DEBOUNCE_SECONDS
+            if delay_seconds is None
+            else delay_seconds
+        )
+
+        async def delayed_roster_update() -> None:
+            try:
+                await asyncio.sleep(delay)
+                await self.broadcast_player_roster_update(session_code)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to broadcast debounced roster update for %s",
+                    session_code,
+                )
+            finally:
+                current_task = asyncio.current_task()
+                if self.roster_update_tasks.get(session_code) is current_task:
+                    self.roster_update_tasks.pop(session_code, None)
+
+        self.roster_update_tasks[session_code] = asyncio.create_task(
+            delayed_roster_update()
         )
 
     async def wait_for_ready_connections(self, session_code: str, timeout: float = 2.0):
@@ -3166,6 +3733,90 @@ return 0
                     )
                 except ValueError:
                     pass
+            merged_state["players"] = players
+            self.beat_clock_states[session_code] = merged_state
+            return merged_state
+
+        state = self.beat_clock_states.setdefault(
+            session_code,
+            {
+                "active": False,
+                "players": {},
+                "questions": [],
+                "leaderboard": [],
+            },
+        )
+        self.set_beat_clock_state(session_code, state)
+        return state
+
+    def get_beat_clock_state_for_player(
+        self, session_code: str, player_id: str
+    ) -> Dict[str, Any]:
+        """Return Beat the Clock meta plus one player's state without HGETALL."""
+        meta_key, players_key = self._beat_clock_keys(session_code)
+        shared_state = self._redis_json_get(meta_key)
+        client = websocket_bus.sync_client
+        player_state = None
+
+        if shared_state is None:
+            legacy_state = self._redis_json_get(
+                self._shared_state_key(session_code, "beat-clock")
+            )
+            if legacy_state is not None:
+                shared_state = {
+                    key: value
+                    for key, value in legacy_state.items()
+                    if key != "players"
+                }
+                self._redis_json_set(meta_key, self._json_safe_state(shared_state))
+                player_state = (legacy_state.get("players") or {}).get(player_id)
+                if client and player_state is not None:
+                    try:
+                        pipe = client.pipeline()
+                        pipe.hset(
+                            players_key,
+                            player_id,
+                            json.dumps(
+                                self._json_safe_state(player_state),
+                                separators=(",", ":"),
+                            ),
+                        )
+                        pipe.expire(players_key, self.SHARED_STATE_TTL_SECONDS)
+                        pipe.execute()
+                    except Exception:
+                        logger.exception(
+                            "Failed to migrate Beat the Clock player state for %s/%s",
+                            session_code,
+                            safe_player_ref(player_id),
+                        )
+
+        if shared_state is not None:
+            if client and player_state is None:
+                try:
+                    raw_value = client.hget(players_key, player_id)
+                    if raw_value:
+                        player_state = json.loads(raw_value)
+                except Exception:
+                    logger.exception(
+                        "Failed to read Beat the Clock player state for %s/%s",
+                        session_code,
+                        safe_player_ref(player_id),
+                    )
+
+            local_state = self.beat_clock_states.get(session_code, {})
+            merged_state = {**local_state, **shared_state}
+            ends_at_raw = merged_state.get("ends_at")
+            if ends_at_raw and not merged_state.get("ends_at_dt"):
+                try:
+                    merged_state["ends_at_dt"] = datetime.fromisoformat(
+                        str(ends_at_raw).replace("Z", "")
+                    )
+                except ValueError:
+                    pass
+
+            players = dict(local_state.get("players") or {})
+            if player_state is not None:
+                players[player_id] = player_state
             merged_state["players"] = players
             self.beat_clock_states[session_code] = merged_state
             return merged_state

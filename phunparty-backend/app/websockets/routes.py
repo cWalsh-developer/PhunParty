@@ -85,7 +85,8 @@ WEBSOCKET_MESSAGE_LIMITS = {
     "fair_play_focus_returned": (10, 60),
     "request_current_question": (20, 60),
 }
-WEBSOCKET_CONNECTION_LIMIT = (20, 300)
+WEBSOCKET_CONNECTION_IP_LIMIT = (120, 300)
+WEBSOCKET_AUTH_CONNECTION_LIMIT = (30, 300)
 WEBSOCKET_GLOBAL_MESSAGE_LIMIT = (120, 60)
 WEBSOCKET_BUZZER_LIMIT = (5, 3600)
 
@@ -478,7 +479,7 @@ def get_active_fair_play_question_id(
     if game_type != BEAT_THE_CLOCK_GAME_TYPE:
         return current_question_id
 
-    beat_state = manager.get_beat_clock_state(session_code)
+    beat_state = manager.get_beat_clock_state_for_player(session_code, player_id)
     player_state = beat_state.get("players", {}).get(player_id, {})
     return player_state.get("current_question_id") or current_question_id
 
@@ -516,7 +517,10 @@ def serialize_game_state(
 
 
 def build_sync_state(
-    session_code: str, db: Session, game_type: Optional[str] = None
+    session_code: str,
+    db: Session,
+    game_type: Optional[str] = None,
+    player_id: Optional[str] = None,
 ) -> dict:
     """Build authoritative state for initial load and reconnect recovery."""
     game_state_obj = get_game_session_state(db, session_code)
@@ -567,8 +571,11 @@ def build_sync_state(
     sync_state["game_state"] = game_state
     sync_state["game_type"] = game_type
     sync_state["connected_players"] = manager.get_mobile_players(session_code)
-    if game_type == BEAT_THE_CLOCK_GAME_TYPE:
-        beat_clock_state = manager.get_beat_clock_state(session_code)
+    if game_type == BEAT_THE_CLOCK_GAME_TYPE and player_id:
+        beat_clock_state = manager.get_beat_clock_state_for_player(
+            session_code,
+            player_id,
+        )
         sync_state["beat_clock"] = {
             "active": beat_clock_state.get("active", False),
             "duration_seconds": beat_clock_state.get("duration_seconds"),
@@ -680,7 +687,7 @@ async def websocket_endpoint(
 
     try:
         client_ip = get_websocket_client_ip(websocket)
-        limit, window_seconds = WEBSOCKET_CONNECTION_LIMIT
+        limit, window_seconds = WEBSOCKET_CONNECTION_IP_LIMIT
         allowed, retry_after = await hit_websocket_limit(
             scope="connection-ip",
             identifier=client_ip,
@@ -715,6 +722,23 @@ async def websocket_endpoint(
                 return
 
             authenticated_player_id = current_player.player_id
+            auth_limit, auth_window_seconds = WEBSOCKET_AUTH_CONNECTION_LIMIT
+            allowed, retry_after = await hit_websocket_limit(
+                scope="connection-player",
+                identifier=(f"{session_code}:{current_player.player_id}:{client_type}"),
+                limit=auth_limit,
+                window_seconds=auth_window_seconds,
+            )
+            if not allowed:
+                logger.warning(
+                    "Authenticated WebSocket connection rate limit exceeded: session=%s player=%s client_type=%s retry_after=%s",
+                    session_code,
+                    safe_player_ref(current_player.player_id),
+                    client_type,
+                    retry_after,
+                )
+                await websocket.close(code=4008, reason="Too many connection attempts")
+                return
 
             if client_type == "mobile":
                 player_id = current_player.player_id
@@ -854,10 +878,13 @@ async def websocket_endpoint(
                 message_type = message.get("type")
                 message_data = message.get("data", {}) or {}
 
-                if client_type == "mobile" and not manager.connection_is_current(
-                    websocket,
-                    session_code,
-                    player_id,
+                if (
+                    client_type == "mobile"
+                    and not await manager.connection_is_current_async(
+                        websocket,
+                        session_code,
+                        player_id,
+                    )
                 ):
                     await websocket.close(
                         code=4000,

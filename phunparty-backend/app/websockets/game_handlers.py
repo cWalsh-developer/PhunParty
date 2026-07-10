@@ -28,6 +28,7 @@ from app.logic.game_logic import (
     submit_player_answer,
 )
 from app.security.rls import set_rls_current_player
+from app.security.rls import clear_rls_context
 from app.database.fair_play_crud import is_player_frozen_for_question, is_player_kicked
 from app.logic.answer_validation import validate_answer_against_question
 from app.security.loggingUtils import safe_player_ref
@@ -147,14 +148,36 @@ class TriviaGameHandler(GameEventHandler):
     def __init__(self, session_code: str):
         super().__init__(session_code, "trivia")
 
+    def _submit_answer_in_thread_session(
+        self,
+        player_id: str,
+        question_id: str,
+        answer: str,
+    ) -> tuple[dict, str]:
+        db = SessionLocal()
+        try:
+            set_rls_current_player(db, player_id)
+            result = submit_player_answer(
+                db,
+                self.session_code,
+                player_id,
+                question_id,
+                answer,
+            )
+            player = get_player_by_ID(db, player_id)
+            player_name = player.player_name if player else "Unknown Player"
+            return result, player_name
+        finally:
+            clear_rls_context(db)
+            db.close()
+
     async def handle_player_answer(
         self, player_id: str, answer: str, question_id: str, db: Session
     ):
         """Handle trivia answer submission."""
         try:
-            result = submit_player_answer(
-                db,
-                self.session_code,
+            result, player_name = await asyncio.to_thread(
+                self._submit_answer_in_thread_session,
                 player_id,
                 question_id,
                 answer,
@@ -179,9 +202,6 @@ class TriviaGameHandler(GameEventHandler):
             )
 
             manager.set_player_answered(self.session_code, player_id, True)
-
-            player = get_player_by_ID(db, player_id)
-            player_name = player.player_name if player else "Unknown Player"
 
             await manager.broadcast_to_session(
                 self.session_code,
@@ -506,7 +526,10 @@ class BeatTheClockGameHandler(GameEventHandler):
         player_id: str,
         state: Optional[dict] = None,
     ) -> bool:
-        state = state or manager.get_beat_clock_state(self.session_code)
+        state = state or manager.get_beat_clock_state_for_player(
+            self.session_code,
+            player_id,
+        )
         if not state.get("active"):
             return False
         ends_at_dt = state.get("ends_at_dt")
@@ -801,7 +824,10 @@ class BeatTheClockGameHandler(GameEventHandler):
     ) -> None:
         if not player_id:
             return
-        state = manager.get_beat_clock_state(self.session_code)
+        state = manager.get_beat_clock_state_for_player(
+            self.session_code,
+            player_id,
+        )
         if not state.get("active"):
             return
         ends_at_dt = state.get("ends_at_dt")
@@ -877,7 +903,10 @@ class BeatTheClockGameHandler(GameEventHandler):
     async def handle_player_answer(
         self, player_id: str, answer: str, question_id: str, db: Session
     ):
-        state = manager.get_beat_clock_state(self.session_code)
+        state = manager.get_beat_clock_state_for_player(
+            self.session_code,
+            player_id,
+        )
         if not state.get("active"):
             await self._send_beat_clock_rejection(
                 player_id,

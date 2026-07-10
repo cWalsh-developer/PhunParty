@@ -142,9 +142,17 @@ def submit_player_answer(
 
     set_rls_current_player(db, progression_actor_id)
 
-    game_progression = check_and_advance_game(
-        db, session_code, authoritative_question_id
+    game_progression = check_progression_readiness_without_lock(
+        db,
+        session_code,
+        authoritative_question_id,
+        game_state,
     )
+
+    if game_progression.get("ready_for_progression"):
+        game_progression = check_and_advance_game(
+            db, session_code, authoritative_question_id
+        )
 
     if "error" in game_progression:
         db.rollback()
@@ -174,6 +182,69 @@ def submit_player_answer(
         },
         "game_state": game_progression,
     }
+
+
+def check_progression_readiness_without_lock(
+    db: Session, session_code: str, current_question_id: str, game_state
+) -> dict:
+    """
+    Build the normal answer-progress snapshot without taking the progression row lock.
+
+    This is an early-exit optimization for the common case where a question is still
+    waiting for more players. The locked progression path still performs the
+    authoritative re-check before mutating session state.
+    """
+    total_players = get_number_of_players_in_session(db, session_code)
+    kicked_players = count_kicked_players(db, session_code)
+    players_in_session = max(0, total_players - kicked_players)
+    responses_to_question = count_responses_for_question(
+        db, session_code, current_question_id
+    )
+    fair_play_resolved_players = count_fair_play_resolved_players_for_question(
+        db, session_code, current_question_id
+    )
+    resolved_players = min(
+        players_in_session, responses_to_question + fair_play_resolved_players
+    )
+    ready_for_progression = total_players > 0 and resolved_players >= players_in_session
+    frontend_game_state = "active" if game_state.isstarted else "waiting"
+    current_question_index = getattr(game_state, "current_question_index", 0)
+    total_questions = getattr(game_state, "total_questions", 0)
+
+    result = {
+        "players_total": players_in_session,
+        "total_joined_players": total_players,
+        "kicked_players": kicked_players,
+        "eligible_players": players_in_session,
+        "players_answered": resolved_players,
+        "submitted_answers": responses_to_question,
+        "fair_play_resolved": fair_play_resolved_players,
+        "waiting_for_players": not ready_for_progression,
+        "current_question_index": current_question_index,
+        "total_questions": total_questions,
+        "game_state": frontend_game_state,
+        "currentQuestion": current_question_index + 1,
+        "totalQuestions": total_questions,
+        "playersCount": players_in_session,
+        "playersAnswered": resolved_players,
+        "isstarted": game_state.isstarted,
+        "is_active": game_state.is_active,
+        "ready_for_progression": ready_for_progression,
+        "progression_lock_skipped": not ready_for_progression,
+    }
+    logger.info(
+        "PROGRESSION PRECHECK session=%s question=%s total=%s kicked=%s eligible=%s responses=%s fair_play_resolved=%s resolved=%s ready=%s",
+        session_code,
+        current_question_id,
+        total_players,
+        kicked_players,
+        players_in_session,
+        responses_to_question,
+        fair_play_resolved_players,
+        resolved_players,
+        ready_for_progression,
+    )
+    return result
 
 
 def updateGameStartStatus(db: Session, session_code: str, is_started: bool) -> None:

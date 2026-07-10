@@ -24,6 +24,47 @@ ALLOWED_EVENT_KINDS = {
     "disconnect_player",
     "revoke_connection_generation",
 }
+ALLOWED_WS_MESSAGE_TYPES = {
+    "answer_rejected",
+    "answer_submitted",
+    "beat_clock_answer_result",
+    "beat_clock_question",
+    "beat_clock_started",
+    "beat_clock_state",
+    "buzzer_rejected",
+    "buzzer_state_update",
+    "buzzer_winner",
+    "connection_established",
+    "correct_answer",
+    "countdown_started",
+    "error",
+    "fair_play_focus_grace_started",
+    "fair_play_question_reset",
+    "fair_play_settings_updated",
+    "fair_play_status_update",
+    "game_ended",
+    "game_started",
+    "game_status_update",
+    "incorrect_answer",
+    "initial_state",
+    "intro_skipped",
+    "intro_started",
+    "kicked_from_session",
+    "ping",
+    "player_answered",
+    "player_flagged",
+    "player_joined",
+    "player_kicked",
+    "player_left",
+    "pong",
+    "preload_question",
+    "question_failed",
+    "question_started",
+    "roster_update",
+    "session_stats",
+    "sync_state",
+    "ui_update",
+}
 
 
 def redis_namespace() -> str:
@@ -74,12 +115,21 @@ class RedisWebSocketBus:
             os.getenv("WS_REDIS_CONNECT_TIMEOUT", "0.5")
         )
         self.socket_timeout = float(os.getenv("WS_REDIS_SOCKET_TIMEOUT", "0.5"))
+        self.dispatch_queue_maxsize = int(os.getenv("WS_BUS_QUEUE_MAXSIZE", "1000"))
+        self.dispatch_queue_put_timeout = float(
+            os.getenv("WS_BUS_QUEUE_PUT_TIMEOUT", "0.05")
+        )
+        self.dispatch_queue_idle_seconds = float(
+            os.getenv("WS_BUS_QUEUE_IDLE_SECONDS", "60")
+        )
 
         self._redis: redis.Redis | None = None
         self._sync_redis: sync_redis.Redis | None = None
         self._pubsub = None
         self._reader_task: asyncio.Task | None = None
         self._dispatcher: EventDispatcher | None = None
+        self._dispatch_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        self._dispatch_tasks: dict[str, asyncio.Task] = {}
 
     @property
     def connected(self) -> bool:
@@ -88,6 +138,10 @@ class RedisWebSocketBus:
     @property
     def sync_client(self) -> sync_redis.Redis | None:
         return self._sync_redis
+
+    @property
+    def async_client(self) -> redis.Redis | None:
+        return self._redis
 
     def key(self, *parts: str) -> str:
         cleaned = [str(part).strip(":") for part in parts if str(part)]
@@ -128,9 +182,7 @@ class RedisWebSocketBus:
 
         if kind in {"session_broadcast", "player_message"}:
             message = event.get("message")
-            if not isinstance(message, dict) or not isinstance(
-                message.get("type"), str
-            ):
+            if not self._validate_websocket_message(message):
                 logger.warning("Rejected Redis WebSocket event with invalid message")
                 return False
 
@@ -140,8 +192,7 @@ class RedisWebSocketBus:
                 logger.warning("Rejected Redis WebSocket disconnect with bad messages")
                 return False
             if not all(
-                isinstance(message, dict) and isinstance(message.get("type"), str)
-                for message in messages
+                self._validate_websocket_message(message) for message in messages
             ):
                 logger.warning("Rejected Redis WebSocket disconnect message shape")
                 return False
@@ -151,6 +202,24 @@ class RedisWebSocketBus:
             if not isinstance(generation, str) or len(generation) > 256:
                 logger.warning("Rejected Redis WebSocket revoke with bad generation")
                 return False
+
+        return True
+
+    def _validate_websocket_message(self, message: Any) -> bool:
+        if not isinstance(message, dict):
+            return False
+
+        message_type = message.get("type")
+        if not isinstance(message_type, str):
+            return False
+        if len(message_type) > 80:
+            return False
+        if message_type not in ALLOWED_WS_MESSAGE_TYPES:
+            logger.warning(
+                "Rejected Redis WebSocket message with disallowed type: %s",
+                message_type,
+            )
+            return False
 
         return True
 
@@ -217,6 +286,70 @@ class RedisWebSocketBus:
             encoded,
         )
 
+    async def _enqueue_event(self, event: dict[str, Any]) -> None:
+        if not self._dispatcher:
+            return
+
+        session_code = event["session_code"]
+        queue = self._dispatch_queues.get(session_code)
+        if queue is None:
+            queue = asyncio.Queue(maxsize=self.dispatch_queue_maxsize)
+            self._dispatch_queues[session_code] = queue
+            self._dispatch_tasks[session_code] = asyncio.create_task(
+                self._dispatch_session_events(session_code),
+                name=f"ws-redis-dispatch-{session_code}",
+            )
+
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            logger.warning(
+                "Redis WebSocket dispatch queue full for session=%s size=%s",
+                session_code,
+                queue.qsize(),
+            )
+            try:
+                await asyncio.wait_for(
+                    queue.put(event),
+                    timeout=self.dispatch_queue_put_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Dropped Redis WebSocket event after dispatch queue timeout: session=%s kind=%s",
+                    session_code,
+                    event.get("kind"),
+                )
+
+    async def _dispatch_session_events(self, session_code: str) -> None:
+        queue = self._dispatch_queues[session_code]
+
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    queue.get(),
+                    timeout=self.dispatch_queue_idle_seconds,
+                )
+            except asyncio.TimeoutError:
+                if queue.empty():
+                    self._dispatch_queues.pop(session_code, None)
+                    self._dispatch_tasks.pop(session_code, None)
+                    return
+                continue
+
+            try:
+                if self._dispatcher:
+                    await self._dispatcher(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Redis WebSocket event dispatch failed session=%s kind=%s",
+                    session_code,
+                    event.get("kind"),
+                )
+            finally:
+                queue.task_done()
+
     async def _reader(self) -> None:
         if not self._pubsub:
             return
@@ -243,8 +376,7 @@ class RedisWebSocketBus:
                 if not self._validate_event(event):
                     continue
 
-                if self._dispatcher:
-                    await self._dispatcher(event)
+                await self._enqueue_event(event)
 
             except asyncio.CancelledError:
                 raise
@@ -261,6 +393,12 @@ class RedisWebSocketBus:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._reader_task
 
+        for task in list(self._dispatch_tasks.values()):
+            task.cancel()
+        for task in list(self._dispatch_tasks.values()):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
         if self._pubsub:
             await self._pubsub.unsubscribe(self.channel)
             await self._pubsub.aclose()
@@ -271,6 +409,8 @@ class RedisWebSocketBus:
             self._sync_redis.close()
 
         self._reader_task = None
+        self._dispatch_queues.clear()
+        self._dispatch_tasks.clear()
         self._pubsub = None
         self._redis = None
         self._sync_redis = None

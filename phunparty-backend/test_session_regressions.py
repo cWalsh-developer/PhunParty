@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import sqlalchemy
+from sqlalchemy.dialects import postgresql
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
@@ -46,9 +48,10 @@ sys.modules.setdefault("passlib.context", passlib_context_module)
 from app.database import dbCRUD
 from app.database import performance_migrations
 from app.logic import answer_validation, game_logic
+from app.routes import game as game_routes
 from app.routes import players as player_routes
 from app.schemas.game_state_models import GameSessionState
-from app.security import game_phase
+from app.security import game_phase, rate_limit
 from app.websockets import (
     game_handlers,
     game_lifecycle,
@@ -71,8 +74,16 @@ class _FakeRedisPipeline:
         self.operations.append(("hset", key, field, value))
         return self
 
-    def hdel(self, key, field):
-        self.operations.append(("hdel", key, field))
+    def hdel(self, key, *fields):
+        self.operations.append(("hdel", key, fields))
+        return self
+
+    def zadd(self, key, values):
+        self.operations.append(("zadd", key, values))
+        return self
+
+    def zrem(self, key, *members):
+        self.operations.append(("zrem", key, members))
         return self
 
     def expire(self, key, ttl):
@@ -85,8 +96,17 @@ class _FakeRedisPipeline:
                 _, key, field, value = operation
                 self.redis_client.hset(key, field, value)
             elif operation[0] == "hdel":
-                _, key, field = operation
-                self.redis_client.hdel(key, field)
+                _, key, fields = operation
+                self.redis_client.hdel(key, *fields)
+            elif operation[0] == "zadd":
+                _, key, values = operation
+                self.redis_client.zadd(key, values)
+            elif operation[0] == "zrem":
+                _, key, members = operation
+                self.redis_client.zrem(key, *members)
+            elif operation[0] == "expire":
+                _, key, ttl = operation
+                self.redis_client.expire(key, ttl)
         self.operations.clear()
 
 
@@ -94,7 +114,12 @@ class _FakeRedis:
     def __init__(self):
         self.values = {}
         self.hashes = {}
+        self.zsets = {}
         self.eval_calls = []
+        self.hget_calls = []
+        self.hgetall_calls = []
+        self.expire_calls = []
+        self.delete_calls = []
 
     def pipeline(self):
         return _FakeRedisPipeline(self)
@@ -103,16 +128,55 @@ class _FakeRedis:
         self.hashes.setdefault(key, {})[field] = value
 
     def hget(self, key, field):
+        self.hget_calls.append((key, field))
         return self.hashes.get(key, {}).get(field)
 
     def hgetall(self, key):
+        self.hgetall_calls.append(key)
         return dict(self.hashes.get(key, {}))
 
-    def hdel(self, key, field):
-        self.hashes.get(key, {}).pop(field, None)
+    def hdel(self, key, *fields):
+        hash_value = self.hashes.get(key, {})
+        if len(fields) == 1 and isinstance(fields[0], (list, tuple)):
+            fields = tuple(fields[0])
+        for item in fields:
+            hash_value.pop(item, None)
 
     def expire(self, key, ttl):
+        self.expire_calls.append((key, ttl))
         return True
+
+    def hmget(self, key, members):
+        return [self.hashes.get(key, {}).get(member) for member in members]
+
+    def zadd(self, key, values):
+        self.zsets.setdefault(key, {}).update(values)
+
+    def zrem(self, key, *members):
+        zset = self.zsets.get(key, {})
+        for member in members:
+            zset.pop(member, None)
+
+    def zrangebyscore(self, key, min_score, max_score):
+        def score_value(value):
+            if value == "-inf":
+                return float("-inf")
+            if value == "+inf":
+                return float("inf")
+            return float(value)
+
+        low = score_value(min_score)
+        high = score_value(max_score)
+        return [
+            member
+            for member, score in self.zsets.get(key, {}).items()
+            if low <= float(score) <= high
+        ]
+
+    def zremrangebyscore(self, key, min_score, max_score):
+        members = self.zrangebyscore(key, min_score, max_score)
+        self.zrem(key, *members)
+        return len(members)
 
     def get(self, key):
         return self.values.get(key)
@@ -121,12 +185,21 @@ class _FakeRedis:
         self.values[key] = value
 
     def delete(self, *keys):
+        self.delete_calls.append(keys)
         for key in keys:
             self.values.pop(key, None)
             self.hashes.pop(key, None)
 
     def eval(self, script, numkeys, key, *args):
         self.eval_calls.append((script, numkeys, key, args))
+        if "redis.call('ZRANGEBYSCORE'" in script and "redis.call('HDEL'" in script:
+            meta_key = args[0]
+            now = args[1]
+            expired_members = self.zrangebyscore(key, "-inf", now)
+            self.zrem(key, *expired_members)
+            for member in expired_members:
+                self.hdel(meta_key, member)
+            return len(expired_members)
         if "redis.call('GET', KEYS[1]) == ARGV[1]" in script:
             if self.values.get(key) == args[0]:
                 self.values.pop(key, None)
@@ -138,9 +211,67 @@ class _FakeRedis:
         return old
 
 
+class _FakeAsyncRedis:
+    def __init__(self):
+        self.values = {}
+        self.get_calls = []
+        self.eval_calls = []
+        self.expire_calls = []
+
+    async def get(self, key):
+        self.get_calls.append(key)
+        return self.values.get(key)
+
+    async def eval(self, script, numkeys, key, *args):
+        self.eval_calls.append((script, numkeys, key, args))
+        if "redis.call('DEL', KEYS[1])" in script:
+            if self.values.get(key) == args[0]:
+                self.values.pop(key, None)
+                return 1
+            return 0
+        if "redis.call('EXPIRE', KEYS[1], ARGV[2])" in script:
+            if self.values.get(key) == args[0]:
+                self.expire_calls.append((key, args[1]))
+                return 1
+            return 0
+
+        old = self.values.get(key)
+        self.values[key] = args[0]
+        return old
+
+
+class _FakeAsyncRateLimitRedis:
+    def __init__(self, count: int, ttl: int):
+        self.count = count
+        self.ttl = ttl
+        self.eval_calls = []
+
+    async def eval(self, script, numkeys, key, window_seconds):
+        self.eval_calls.append((script, numkeys, key, window_seconds))
+        return [self.count, self.ttl]
+
+
 def test_game_session_state_model_restores_timestamp_columns():
     assert hasattr(GameSessionState, "started_at")
     assert hasattr(GameSessionState, "ended_at")
+
+
+def test_rate_limiter_uses_single_redis_lua_hit():
+    limiter = rate_limit.RateLimiter()
+    fake_redis = _FakeAsyncRateLimitRedis(count=3, ttl=42)
+    limiter._redis = fake_redis
+
+    allowed, retry_after = asyncio.run(limiter._hit_redis("rl:test", 5, 60))
+
+    assert allowed is True
+    assert retry_after == 42
+    assert len(fake_redis.eval_calls) == 1
+    script, numkeys, key, window_seconds = fake_redis.eval_calls[0]
+    assert "INCR" in script
+    assert "TTL" in script
+    assert numkeys == 1
+    assert key == "rl:test"
+    assert window_seconds == 60
 
 
 def test_create_game_session_cleans_up_partial_setup_failures():
@@ -318,16 +449,21 @@ def test_submit_player_answer_returns_answer_match_metadata():
                     with patch.object(game_logic, "update_scores"):
                         with patch.object(
                             game_logic,
-                            "check_and_advance_game",
-                            return_value={"players_answered": 1},
+                            "check_progression_readiness_without_lock",
+                            return_value={"ready_for_progression": True},
                         ):
-                            result = game_logic.submit_player_answer(
-                                mock_db,
-                                "SESSION123",
-                                "P1",
-                                "Q1",
-                                "Camron",
-                            )
+                            with patch.object(
+                                game_logic,
+                                "check_and_advance_game",
+                                return_value={"players_answered": 1},
+                            ):
+                                result = game_logic.submit_player_answer(
+                                    mock_db,
+                                    "SESSION123",
+                                    "P1",
+                                    "Q1",
+                                    "Camron",
+                                )
 
     assert result["is_correct"] is True
     assert "matched_answer" not in result["answer_match"]
@@ -355,16 +491,21 @@ def test_submit_player_answer_uses_exact_validation_for_multiple_choice():
                     with patch.object(game_logic, "update_scores"):
                         with patch.object(
                             game_logic,
-                            "check_and_advance_game",
-                            return_value={"players_answered": 1},
+                            "check_progression_readiness_without_lock",
+                            return_value={"ready_for_progression": True},
                         ):
-                            result = game_logic.submit_player_answer(
-                                mock_db,
-                                "SESSION123",
-                                "P1",
-                                "Q1",
-                                "8",
-                            )
+                            with patch.object(
+                                game_logic,
+                                "check_and_advance_game",
+                                return_value={"players_answered": 1},
+                            ):
+                                result = game_logic.submit_player_answer(
+                                    mock_db,
+                                    "SESSION123",
+                                    "P1",
+                                    "Q1",
+                                    "8",
+                                )
 
     assert result["is_correct"] is False
 
@@ -391,16 +532,21 @@ def test_submit_player_answer_uses_fuzzy_validation_for_hard_text_input():
                     with patch.object(game_logic, "update_scores"):
                         with patch.object(
                             game_logic,
-                            "check_and_advance_game",
-                            return_value={"players_answered": 1},
+                            "check_progression_readiness_without_lock",
+                            return_value={"ready_for_progression": True},
                         ):
-                            result = game_logic.submit_player_answer(
-                                mock_db,
-                                "SESSION123",
-                                "P1",
-                                "Q1",
-                                "James Camaron",
-                            )
+                            with patch.object(
+                                game_logic,
+                                "check_and_advance_game",
+                                return_value={"players_answered": 1},
+                            ):
+                                result = game_logic.submit_player_answer(
+                                    mock_db,
+                                    "SESSION123",
+                                    "P1",
+                                    "Q1",
+                                    "James Camaron",
+                                )
 
     assert result["is_correct"] is True
 
@@ -424,6 +570,65 @@ def test_submit_player_answer_rejects_non_current_question():
         )
 
     assert result == {"error": "Question is no longer active"}
+
+
+def test_submit_player_answer_skips_locked_progression_when_still_waiting():
+    question = SimpleNamespace(
+        answer="A",
+        accepted_answers=[],
+        difficulty="easy",
+        question_options=["A", "B", "C"],
+    )
+    game_state = SimpleNamespace(
+        is_active=True,
+        isstarted=True,
+        current_question_id="Q1",
+        current_question_index=0,
+        total_questions=5,
+        fair_play_enabled=False,
+    )
+    mock_db = MagicMock()
+    waiting_progression = {
+        "players_total": 3,
+        "players_answered": 1,
+        "waiting_for_players": True,
+        "ready_for_progression": False,
+        "progression_lock_skipped": True,
+    }
+
+    with patch.object(game_logic, "get_game_session_state", return_value=game_state):
+        with patch.object(game_logic, "get_player_response", return_value=None):
+            with patch.object(game_logic, "get_question_by_id", return_value=question):
+                with patch.object(game_logic, "create_player_response"):
+                    with patch.object(game_logic, "update_scores"):
+                        with patch.object(
+                            game_logic,
+                            "get_session_by_code",
+                            return_value=SimpleNamespace(owner_player_id="HOST1"),
+                        ):
+                            with patch.object(game_logic, "set_rls_current_player"):
+                                with patch.object(
+                                    game_logic,
+                                    "check_progression_readiness_without_lock",
+                                    return_value=waiting_progression,
+                                ) as precheck:
+                                    with patch.object(
+                                        game_logic,
+                                        "check_and_advance_game",
+                                    ) as locked_progression:
+                                        result = game_logic.submit_player_answer(
+                                            mock_db,
+                                            "SESSION123",
+                                            "P1",
+                                            "Q1",
+                                            "A",
+                                        )
+
+    precheck.assert_called_once_with(mock_db, "SESSION123", "Q1", game_state)
+    locked_progression.assert_not_called()
+    mock_db.commit.assert_called_once()
+    assert result["game_state"]["progression_lock_skipped"] is True
+    assert result["game_state"]["waiting_for_players"] is True
 
 
 def test_buzzer_hard_answer_payload_uses_text_input_without_options():
@@ -652,6 +857,41 @@ def test_join_game_rejects_inactive_sessions_before_membership_changes():
     mock_db.commit.assert_not_called()
 
 
+def test_join_queue_defaults_to_direct_idempotent_join():
+    request = SimpleNamespace(session_code="SESSION123", websocket_id=None)
+    http_request = MagicMock()
+    current_player = SimpleNamespace(player_id="P1")
+    db = MagicMock()
+
+    with patch.object(game_routes, "USE_PROCESS_LOCAL_JOIN_QUEUE", False):
+        with patch.object(game_routes, "enforce_rate_limit", AsyncMock()):
+            with patch.object(game_routes, "get_client_ip", return_value="127.0.0.1"):
+                with patch.object(game_routes, "assert_public_or_member_or_owner"):
+                    with patch.object(
+                        game_routes, "is_session_member", return_value=False
+                    ):
+                        with patch.object(game_routes, "join_game") as join_game:
+                            with patch.object(
+                                game_routes.join_queue_manager,
+                                "add_to_queue",
+                                AsyncMock(),
+                            ) as add_to_queue:
+                                response = asyncio.run(
+                                    game_routes.join_game_queue(
+                                        request,
+                                        http_request,
+                                        current_player,
+                                        db,
+                                    )
+                                )
+
+    join_game.assert_called_once_with(db, "SESSION123", "P1")
+    add_to_queue.assert_not_called()
+    assert response.success is True
+    assert response.queue_id is None
+    assert response.estimated_wait_time == 0
+
+
 def test_score_and_session_assignment_models_prevent_duplicate_membership_rows():
     score_constraints = {
         constraint.name: tuple(column.name for column in constraint.columns)
@@ -672,6 +912,61 @@ def test_score_and_session_assignment_models_prevent_duplicate_membership_rows()
         "session_code",
         "player_id",
     )
+
+
+def test_postgres_session_assignment_uses_on_conflict_do_nothing():
+    mock_db = MagicMock()
+    assignment = SimpleNamespace(
+        assignment_id="A1",
+        session_code="SESSION123",
+        player_id="P1",
+    )
+    query = MagicMock()
+    query.filter.return_value = query
+    query.first.return_value = assignment
+    mock_db.query.return_value = query
+    mock_db.execute.return_value.scalar_one_or_none.return_value = "A1"
+
+    with patch.object(dbCRUD, "_is_postgresql_session", return_value=True):
+        result = dbCRUD.ensure_session_assignment(mock_db, "SESSION123", "P1")
+
+    statement = mock_db.execute.call_args.args[0]
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+    assert result is assignment
+    assert "ON CONFLICT" in compiled
+    assert "DO NOTHING" in compiled
+    assert "session_code" in compiled
+    assert "player_id" in compiled
+
+
+def test_postgres_score_creation_uses_on_conflict_do_nothing():
+    mock_db = MagicMock()
+    score = SimpleNamespace(score_id="S1", score=14)
+    query = MagicMock()
+    query.filter.return_value = query
+    query.first.return_value = score
+    mock_db.query.return_value = query
+    mock_db.execute.return_value.scalar_one_or_none.return_value = None
+
+    with patch.object(dbCRUD, "_is_postgresql_session", return_value=True):
+        with patch.object(dbCRUD, "ensure_session_assignment") as ensure_assignment:
+            with patch.object(
+                dbCRUD,
+                "get_player_by_ID",
+                return_value=SimpleNamespace(
+                    player_name="Alice",
+                    profile_photo_url="photo.jpg",
+                ),
+            ):
+                result = dbCRUD.create_score(mock_db, "SESSION123", "P1")
+
+    statement = mock_db.execute.call_args.args[0]
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+    assert result is score
+    ensure_assignment.assert_called_once_with(mock_db, "SESSION123", "P1")
+    assert "ON CONFLICT" in compiled
+    assert "DO NOTHING" in compiled
+    assert "score = " not in compiled
 
 
 def test_security_constraint_migration_deduplicates_scores_and_assignments():
@@ -1089,6 +1384,108 @@ def test_game_lifecycle_broadcasts_final_scores_for_already_ended_session():
     message = mock_manager.broadcast_to_session.await_args.args[1]
     assert message["type"] == "game_ended"
     assert message["data"]["final_scores"] == final_scores
+
+
+def test_game_lifecycle_terminal_snapshot_uses_shared_fair_play_statuses():
+    ended_at = datetime(2026, 6, 1, 12, 0, 0)
+    game_state = SimpleNamespace(ended_at=ended_at)
+    query_result = MagicMock()
+    query_result.filter.return_value = query_result
+    query_result.first.return_value = game_state
+    query_result.all.return_value = []
+    mock_db = MagicMock()
+    mock_db.query.return_value = query_result
+    fair_play_statuses = {
+        "P1": {"strike_count": 1, "is_kicked": False},
+        "P2": {"strike_count": 3, "is_kicked": True},
+    }
+    captured_snapshot = {}
+
+    def remember_terminal_session(session_code, snapshot, ttl_seconds):
+        captured_snapshot.update(snapshot)
+        return snapshot
+
+    with patch.object(game_lifecycle, "update_game_session_ended", return_value=True):
+        with patch.object(game_lifecycle, "get_final_scores", return_value=[]):
+            with patch.object(
+                game_lifecycle,
+                "get_session_by_code",
+                return_value=SimpleNamespace(owner_player_id="OWNER"),
+            ):
+                with patch.object(game_lifecycle, "set_rls_current_player"):
+                    with patch.object(
+                        game_lifecycle.manager,
+                        "get_fair_play_statuses",
+                        return_value=fair_play_statuses,
+                    ) as get_statuses:
+                        with patch.object(
+                            game_lifecycle.manager,
+                            "remember_terminal_session",
+                            side_effect=remember_terminal_session,
+                        ):
+                            with patch.object(
+                                game_lifecycle.manager,
+                                "set_session_phase",
+                                return_value={
+                                    "phase": "ended",
+                                    "phase_started_at": "2026-06-01T12:00:00",
+                                    "server_time_ms": 123,
+                                },
+                            ):
+                                with patch.object(
+                                    game_lifecycle.manager,
+                                    "broadcast_to_session",
+                                    AsyncMock(),
+                                ):
+                                    with patch.object(
+                                        game_lifecycle.manager,
+                                        "cleanup_session_later",
+                                        return_value=None,
+                                    ):
+                                        with patch.object(
+                                            game_lifecycle.manager,
+                                            "cleanup_terminal_session_later",
+                                            return_value=None,
+                                        ):
+                                            result = asyncio.run(
+                                                game_lifecycle.handle_game_end(
+                                                    "SESSION123", mock_db
+                                                )
+                                            )
+
+    assert result is True
+    get_statuses.assert_called_once_with("SESSION123")
+    assert captured_snapshot["fair_play_player_status"]["P2"]["is_kicked"] is True
+    assert captured_snapshot["removed_players"] == [
+        {
+            "player_id": "P2",
+            "strike_count": 3,
+            "is_kicked": True,
+        }
+    ]
+
+
+def test_cleanup_session_expires_shared_state_instead_of_deleting_it():
+    fake_redis = _FakeRedis()
+    session_code = "SESSION123"
+    phase_key = manager._shared_state_key(session_code, "phase")
+    fair_play_key = manager._fair_play_status_key(session_code)
+    fake_redis.values[phase_key] = json.dumps({"phase": "ended"})
+    fake_redis.hashes[fair_play_key] = {
+        "P1": json.dumps({"strike_count": 1}),
+    }
+
+    with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+        manager.cleanup_session(session_code)
+
+    assert fake_redis.values[phase_key] == json.dumps({"phase": "ended"})
+    assert fake_redis.hashes[fair_play_key]["P1"] == json.dumps({"strike_count": 1})
+    assert fake_redis.delete_calls == []
+    assert (phase_key, manager.TERMINAL_SESSION_TTL_SECONDS) in fake_redis.expire_calls
+    assert (
+        fair_play_key,
+        manager.TERMINAL_SESSION_TTL_SECONDS,
+    ) in fake_redis.expire_calls
 
 
 def test_buzzer_state_is_shared_per_session():
@@ -1509,6 +1906,154 @@ def test_roster_update_broadcasts_to_non_mobile_clients_only():
     web_socket.send_text.assert_awaited_once()
     host_socket.send_text.assert_awaited_once()
     mobile_socket.send_text.assert_not_awaited()
+
+
+def test_roster_update_uses_one_shared_presence_snapshot():
+    session_code = "ROSTERSHARED"
+    shared_presence = [
+        {
+            "client_type": "web",
+            "connection_confirmed": True,
+            "connected_at": "2026-06-01T12:00:00",
+        },
+        {
+            "client_type": "mobile",
+            "connection_confirmed": True,
+            "player_id": "P1",
+            "player_name": "Alice",
+            "player_photo": None,
+            "connected_at": "2026-06-01T12:00:01",
+        },
+    ]
+
+    with patch.object(
+        manager,
+        "_shared_presence_metadata",
+        return_value=shared_presence,
+    ) as shared_snapshot:
+        with patch.object(manager, "broadcast_to_session", AsyncMock()) as broadcast:
+            asyncio.run(manager.broadcast_player_roster_update(session_code))
+
+    shared_snapshot.assert_called_once_with(session_code)
+    roster_message = broadcast.await_args.args[1]
+    assert roster_message["data"]["connected_players"][0]["player_name"] == "Alice"
+    assert roster_message["data"]["connection_stats"]["web_clients"] == 1
+    assert roster_message["data"]["connection_stats"]["mobile_clients"] == 1
+
+
+def test_shared_presence_cleanup_removes_expired_metadata():
+    fake_redis = _FakeRedis()
+    session_code = "SESSION123"
+    presence_key, meta_key = manager._presence_keys(session_code)
+    expired_member = manager._presence_member("ws_expired")
+    active_member = manager._presence_member("ws_active")
+    fake_redis.zsets[presence_key] = {
+        expired_member: 100,
+        active_member: 250,
+    }
+    fake_redis.hashes[meta_key] = {
+        expired_member: json.dumps(
+            {
+                "session_code": session_code,
+                "ws_id": "ws_expired",
+                "client_type": "mobile",
+                "player_id": "P1",
+            }
+        ),
+        active_member: json.dumps(
+            {
+                "session_code": session_code,
+                "ws_id": "ws_active",
+                "client_type": "mobile",
+                "player_id": "P2",
+            }
+        ),
+    }
+
+    with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+        with patch("app.websockets.manager.time.time", return_value=150):
+            metadata = manager._shared_presence_metadata(session_code)
+
+    assert metadata == [
+        {
+            "session_code": session_code,
+            "ws_id": "ws_active",
+            "client_type": "mobile",
+            "player_id": "P2",
+        }
+    ]
+    assert expired_member not in fake_redis.zsets[presence_key]
+    assert expired_member not in fake_redis.hashes[meta_key]
+    assert active_member in fake_redis.zsets[presence_key]
+    assert active_member in fake_redis.hashes[meta_key]
+
+
+def test_scheduled_roster_update_debounces_burst_requests():
+    session_code = "ROSTERDEBOUNCE"
+
+    async def run_test():
+        with patch.object(manager, "broadcast_player_roster_update", AsyncMock()):
+            try:
+                await manager.schedule_player_roster_update(session_code, 0.01)
+                await manager.schedule_player_roster_update(session_code, 0.01)
+                await manager.schedule_player_roster_update(session_code, 0.01)
+                task = manager.roster_update_tasks[session_code]
+                await asyncio.wait_for(task, timeout=1)
+                manager.broadcast_player_roster_update.assert_awaited_once_with(
+                    session_code
+                )
+            finally:
+                task = manager.roster_update_tasks.pop(session_code, None)
+                if task and not task.done():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+
+    asyncio.run(run_test())
+
+
+def test_trivia_answer_submission_runs_db_work_in_thread():
+    handler = game_handlers.TriviaGameHandler("SESSION123")
+    result = {
+        "game_state": {
+            "waiting_for_players": True,
+            "playersAnswered": 1,
+        }
+    }
+
+    async def run_test():
+        with patch.object(game_handlers, "manager") as mock_manager:
+            mock_manager.broadcast_to_session = AsyncMock()
+            mock_manager.send_personal_message = AsyncMock()
+            mock_manager.get_answered_count.return_value = 1
+            mock_manager.get_session_connections.return_value = {}
+            with patch.object(
+                game_handlers.asyncio,
+                "to_thread",
+                new_callable=AsyncMock,
+                return_value=(result, "Alice"),
+            ) as to_thread:
+                await handler.handle_player_answer(
+                    "P1",
+                    "A",
+                    "Q1",
+                    MagicMock(),
+                )
+
+        to_thread.assert_awaited_once_with(
+            handler._submit_answer_in_thread_session,
+            "P1",
+            "Q1",
+            "A",
+        )
+        mock_manager.set_player_answered.assert_called_once_with(
+            "SESSION123",
+            "P1",
+            True,
+        )
+        assert mock_manager.broadcast_to_session.await_count == 2
+
+    asyncio.run(run_test())
 
 
 def test_mobile_current_question_payload_rebuilds_missing_queue_from_db():
@@ -2091,6 +2636,83 @@ def test_redis_bus_rejects_malformed_events():
             "session_code": "SESSION123",
         }
     )
+    assert not bus._validate_event(
+        {
+            "version": 1,
+            "kind": "session_broadcast",
+            "session_code": "SESSION123",
+            "message": {"type": "debug_shell"},
+        }
+    )
+    assert bus._validate_event(
+        {
+            "version": 1,
+            "kind": "disconnect_player",
+            "session_code": "SESSION123",
+            "player_id": "P1",
+            "messages": [{"type": "kicked_from_session"}],
+        }
+    )
+
+
+def test_redis_bus_dispatches_different_sessions_independently():
+    async def run_test():
+        bus = redis_bus.RedisWebSocketBus()
+        bus.dispatch_queue_idle_seconds = 60
+        started_slow = asyncio.Event()
+        release_slow = asyncio.Event()
+        handled = []
+
+        async def dispatcher(event):
+            handled.append((event["session_code"], event["message"]["type"]))
+            if event["session_code"] == "SLOW01":
+                started_slow.set()
+                await release_slow.wait()
+
+        bus._dispatcher = dispatcher
+
+        await bus._enqueue_event(
+            {
+                "version": 1,
+                "kind": "session_broadcast",
+                "session_code": "SLOW01",
+                "message": {"type": "first"},
+            }
+        )
+        await asyncio.wait_for(started_slow.wait(), timeout=1)
+
+        await bus._enqueue_event(
+            {
+                "version": 1,
+                "kind": "session_broadcast",
+                "session_code": "FAST01",
+                "message": {"type": "second"},
+            }
+        )
+        await asyncio.wait_for(bus._dispatch_queues["FAST01"].join(), timeout=1)
+        assert ("FAST01", "second") in handled
+
+        await bus._enqueue_event(
+            {
+                "version": 1,
+                "kind": "session_broadcast",
+                "session_code": "SLOW01",
+                "message": {"type": "third"},
+            }
+        )
+        await asyncio.sleep(0)
+        assert handled == [("SLOW01", "first"), ("FAST01", "second")]
+
+        release_slow.set()
+        await asyncio.wait_for(bus._dispatch_queues["SLOW01"].join(), timeout=1)
+        assert handled == [
+            ("SLOW01", "first"),
+            ("FAST01", "second"),
+            ("SLOW01", "third"),
+        ]
+        await bus.close()
+
+    asyncio.run(run_test())
 
 
 def test_fair_play_status_uses_per_player_redis_hash_fields():
@@ -2111,6 +2733,28 @@ def test_fair_play_status_uses_per_player_redis_hash_fields():
     assert p2_status["strike_count"] == 2
 
 
+def test_fair_play_statuses_read_shared_redis_hash_snapshot():
+    fake_redis = _FakeRedis()
+    session_code = "SESSION123"
+    status_key = manager._fair_play_status_key(session_code)
+    fake_redis.hashes[status_key] = {
+        "P1": json.dumps({"strike_count": 1, "is_kicked": False}),
+        "P2": json.dumps({"strike_count": 3, "is_kicked": True}),
+    }
+    manager.fair_play_player_status[session_code] = {"LOCAL_ONLY": {"strike_count": 2}}
+
+    try:
+        with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+            statuses = manager.get_fair_play_statuses(session_code)
+    finally:
+        manager.fair_play_player_status.pop(session_code, None)
+
+    assert statuses["P1"]["strike_count"] == 1
+    assert statuses["P2"]["is_kicked"] is True
+    assert statuses["LOCAL_ONLY"]["strike_count"] == 2
+    assert fake_redis.hgetall_calls == [status_key]
+
+
 def test_fair_play_freeze_reset_reads_per_player_redis_hash_fields():
     fake_redis = _FakeRedis()
     session_code = "SESSION123"
@@ -2128,6 +2772,45 @@ def test_fair_play_freeze_reset_reads_per_player_redis_hash_fields():
         assert fake_redis.hashes[frozen_key] == {"P2": "Q2"}
         assert manager.get_fair_play_status(session_code, "P1")["is_frozen"] is False
         assert manager.get_fair_play_status(session_code, "P2")["is_frozen"] is True
+
+
+def test_beat_clock_player_state_read_avoids_full_player_hash_scan():
+    fake_redis = _FakeRedis()
+    session_code = "SESSION123"
+
+    with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+        manager.beat_clock_states.pop(session_code, None)
+        manager.set_beat_clock_state(
+            session_code,
+            {
+                "active": True,
+                "duration_seconds": 60,
+                "ends_at": "2026-07-10T12:00:00",
+                "questions": ["Q1"],
+                "players": {},
+                "leaderboard": [],
+            },
+        )
+        manager.update_beat_clock_player_state(
+            session_code,
+            "P1",
+            {"current_question_id": "Q1", "answered_count": 0},
+        )
+        manager.update_beat_clock_player_state(
+            session_code,
+            "P2",
+            {"current_question_id": "Q2", "answered_count": 1},
+        )
+        manager.beat_clock_states.pop(session_code, None)
+
+        state = manager.get_beat_clock_state_for_player(session_code, "P1")
+
+    assert state["active"] is True
+    assert state["players"] == {
+        "P1": {"current_question_id": "Q1", "answered_count": 0}
+    }
+    assert fake_redis.hget_calls == [(manager._beat_clock_keys(session_code)[1], "P1")]
+    assert fake_redis.hgetall_calls == []
 
 
 def test_connection_generation_rejects_stale_mobile_socket():
@@ -2163,6 +2846,172 @@ def test_connection_generation_rejects_stale_mobile_socket():
     finally:
         manager.active_connections.pop(session_code, None)
         manager.websocket_registry.pop(ws_id, None)
+
+
+def test_async_connection_generation_rejects_stale_mobile_socket():
+    fake_redis = _FakeAsyncRedis()
+    websocket = MagicMock()
+    session_code = "SESSION123"
+    player_id = "P1"
+    ws_id = "ws_old"
+    old_generation = "worker-a:ws_old"
+    generation_key = manager._player_generation_key(session_code, player_id)
+    fake_redis.values[generation_key] = "worker-b:ws_new"
+
+    manager.active_connections[session_code] = {
+        ws_id: {
+            "websocket": websocket,
+            "client_type": "mobile",
+            "player_id": player_id,
+            "connection_generation": old_generation,
+        }
+    }
+    manager.websocket_registry[ws_id] = {
+        "session_code": session_code,
+        "websocket": websocket,
+    }
+
+    try:
+        with patch.object(redis_bus.websocket_bus, "_redis", fake_redis):
+            assert (
+                asyncio.run(
+                    manager.connection_is_current_async(
+                        websocket,
+                        session_code,
+                        player_id,
+                    )
+                )
+                is False
+            )
+    finally:
+        manager.active_connections.pop(session_code, None)
+        manager.websocket_registry.pop(ws_id, None)
+        manager.websocket_to_ws_id.pop(id(websocket), None)
+
+    assert fake_redis.get_calls == [generation_key]
+
+
+def test_async_connection_generation_rejects_missing_redis_lease():
+    fake_redis = _FakeAsyncRedis()
+    websocket = MagicMock()
+    session_code = "SESSION123"
+    player_id = "P1"
+    ws_id = "ws_missing_lease"
+    generation_key = manager._player_generation_key(session_code, player_id)
+
+    manager.active_connections[session_code] = {
+        ws_id: {
+            "websocket": websocket,
+            "client_type": "mobile",
+            "player_id": player_id,
+            "connection_generation": "worker-a:ws_missing_lease",
+        }
+    }
+    manager.websocket_registry[ws_id] = {
+        "session_code": session_code,
+        "websocket": websocket,
+    }
+
+    try:
+        with patch.object(redis_bus.websocket_bus, "_redis", fake_redis):
+            assert (
+                asyncio.run(
+                    manager.connection_is_current_async(
+                        websocket,
+                        session_code,
+                        player_id,
+                    )
+                )
+                is False
+            )
+    finally:
+        manager.active_connections.pop(session_code, None)
+        manager.websocket_registry.pop(ws_id, None)
+        manager.websocket_to_ws_id.pop(id(websocket), None)
+
+    assert fake_redis.get_calls == [generation_key]
+
+
+def test_async_connection_generation_claim_uses_async_redis_eval():
+    fake_redis = _FakeAsyncRedis()
+    session_code = "SESSION123"
+    player_id = "P1"
+    generation_key = manager._player_generation_key(session_code, player_id)
+    fake_redis.values[generation_key] = "old-worker:ws1"
+
+    with patch.object(redis_bus.websocket_bus, "_redis", fake_redis):
+        old_generation = asyncio.run(
+            manager._claim_player_connection_generation_async(
+                session_code,
+                player_id,
+                "new-worker:ws2",
+            )
+        )
+
+    assert old_generation == "old-worker:ws1"
+    assert fake_redis.values[generation_key] == "new-worker:ws2"
+    assert len(fake_redis.eval_calls) == 1
+
+
+def test_async_connection_generation_renew_extends_owned_lease():
+    fake_redis = _FakeAsyncRedis()
+    session_code = "SESSION123"
+    player_id = "P1"
+    generation = "worker-a:ws1"
+    generation_key = manager._player_generation_key(session_code, player_id)
+    fake_redis.values[generation_key] = generation
+
+    with patch.object(redis_bus.websocket_bus, "_redis", fake_redis):
+        renewed = asyncio.run(
+            manager._renew_player_connection_generation_async(
+                session_code,
+                player_id,
+                generation,
+            )
+        )
+
+    assert renewed is True
+    assert fake_redis.values[generation_key] == generation
+    assert fake_redis.expire_calls == [
+        (generation_key, str(manager.PRESENCE_KEY_TTL_SECONDS))
+    ]
+
+
+def test_connection_indexes_track_websocket_and_player_connections():
+    websocket = MagicMock()
+    session_code = "SESSION789"
+    player_id = "P1"
+    ws_id = "ws_indexed"
+    connection_info = {
+        "websocket": websocket,
+        "client_type": "mobile",
+        "player_id": player_id,
+        "player_name": "Alice",
+    }
+
+    manager.active_connections[session_code] = {ws_id: connection_info}
+    manager.websocket_registry[ws_id] = {
+        "session_code": session_code,
+        "websocket": websocket,
+    }
+
+    try:
+        manager._register_connection_indexes(session_code, ws_id, connection_info)
+
+        assert manager._connection_info_for_websocket(websocket) is connection_info
+        assert manager.get_player_connections(session_code, player_id) == {
+            ws_id: connection_info
+        }
+
+        manager._remove_connection_indexes(session_code, ws_id, connection_info)
+
+        assert id(websocket) not in manager.websocket_to_ws_id
+        assert (session_code, player_id) not in manager.player_connection_index
+    finally:
+        manager.active_connections.pop(session_code, None)
+        manager.websocket_registry.pop(ws_id, None)
+        manager.websocket_to_ws_id.pop(id(websocket), None)
+        manager.player_connection_index.pop((session_code, player_id), None)
 
 
 def test_revoke_connection_generation_closes_only_matching_socket():
