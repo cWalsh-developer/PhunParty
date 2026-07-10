@@ -17,6 +17,7 @@ from app.websockets.redis_bus import websocket_bus
 from fastapi import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
+_REDIS_UNAVAILABLE = object()
 
 BUZZER_CLAIM_SCRIPT = """
 local raw = redis.call('GET', KEYS[1])
@@ -602,7 +603,7 @@ return old
 
     def _get_player_connection_generation(
         self, session_code: str, player_id: str
-    ) -> Optional[str]:
+    ) -> Optional[str] | object:
         client = websocket_bus.sync_client
         if not client:
             return None
@@ -615,11 +616,11 @@ return old
                 session_code,
                 safe_player_ref(player_id),
             )
-            return None
+            return _REDIS_UNAVAILABLE
 
     async def _get_player_connection_generation_async(
         self, session_code: str, player_id: str
-    ) -> Optional[str]:
+    ) -> Optional[str] | object:
         client = websocket_bus.async_client
         if not client:
             return self._get_player_connection_generation(session_code, player_id)
@@ -634,7 +635,7 @@ return old
                 session_code,
                 safe_player_ref(player_id),
             )
-            return None
+            return _REDIS_UNAVAILABLE
 
     def _clear_player_connection_generation(
         self, session_code: str, player_id: str, generation: Optional[str]
@@ -691,7 +692,7 @@ return 0
 
     async def _renew_player_connection_generation_async(
         self, session_code: str, player_id: str, generation: Optional[str]
-    ) -> bool:
+    ) -> Optional[bool]:
         client = websocket_bus.async_client
         if not client:
             return True
@@ -720,7 +721,7 @@ return 0
                 session_code,
                 safe_player_ref(player_id),
             )
-            return False
+            return None
 
     async def _renew_or_disconnect_generation(
         self,
@@ -734,6 +735,8 @@ return 0
             generation,
         )
         if renewed:
+            return
+        if renewed is None:
             return
 
         await self._disconnect_local_generation(
@@ -1887,6 +1890,8 @@ return 0
             session_code,
             player_id,
         )
+        if current_generation is _REDIS_UNAVAILABLE:
+            return True
         if current_generation is None and websocket_bus.sync_client:
             return False
         return current_generation is None or current_generation == generation
@@ -1909,6 +1914,8 @@ return 0
             session_code,
             player_id,
         )
+        if current_generation is _REDIS_UNAVAILABLE:
+            return True
         if current_generation is None and (
             websocket_bus.async_client or websocket_bus.sync_client
         ):
@@ -3752,6 +3759,56 @@ return 0
         self.set_beat_clock_state(session_code, state)
         return state
 
+    def get_beat_clock_meta_state(self, session_code: str) -> Dict[str, Any]:
+        """Return Beat the Clock metadata without loading every player hash entry."""
+        meta_key, _players_key = self._beat_clock_keys(session_code)
+        shared_state = self._redis_json_get(meta_key)
+
+        if shared_state is None:
+            legacy_state = self._redis_json_get(
+                self._shared_state_key(session_code, "beat-clock")
+            )
+            if legacy_state is not None:
+                shared_state = {
+                    key: value
+                    for key, value in legacy_state.items()
+                    if key != "players"
+                }
+                self._redis_json_set(meta_key, self._json_safe_state(shared_state))
+
+        if shared_state is not None:
+            local_state = self.beat_clock_states.get(session_code, {})
+            merged_state = {**local_state, **shared_state}
+            for key, value in local_state.items():
+                if key in {"ends_at_dt", "started_at_dt"} and key not in merged_state:
+                    merged_state[key] = value
+            ends_at_raw = merged_state.get("ends_at")
+            if ends_at_raw and not merged_state.get("ends_at_dt"):
+                try:
+                    merged_state["ends_at_dt"] = datetime.fromisoformat(
+                        str(ends_at_raw).replace("Z", "")
+                    )
+                except ValueError:
+                    pass
+            merged_state.setdefault(
+                "players",
+                self.beat_clock_states.get(session_code, {}).get("players", {}),
+            )
+            self.beat_clock_states[session_code] = merged_state
+            return merged_state
+
+        state = self.beat_clock_states.setdefault(
+            session_code,
+            {
+                "active": False,
+                "players": {},
+                "questions": [],
+                "leaderboard": [],
+            },
+        )
+        self.set_beat_clock_state(session_code, state)
+        return state
+
     def get_beat_clock_state_for_player(
         self, session_code: str, player_id: str
     ) -> Dict[str, Any]:
@@ -3896,7 +3953,6 @@ return 0
             self._shared_state_key(session_code, "beat-clock"),
             meta_key,
             players_key,
-            self._beat_clock_finish_key(session_code),
         )
 
 

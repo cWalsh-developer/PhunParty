@@ -2902,17 +2902,32 @@ def test_redis_bus_does_not_drop_control_events_when_session_queue_is_full():
                 )
             )
             await asyncio.sleep(0)
-            assert not control_enqueue.done()
+            assert control_enqueue.done()
             assert bus.control_backpressure_count == 1
             assert bus.dropped_event_count == 0
 
+            await bus._enqueue_event(
+                {
+                    "version": 1,
+                    "kind": "session_broadcast",
+                    "session_code": "FAST01",
+                    "message": {"type": "roster_update"},
+                }
+            )
+            await asyncio.wait_for(bus._dispatch_queues["FAST01"].join(), timeout=1)
+            assert handled[-1] == "session_broadcast"
+
             release_first.set()
-            await asyncio.wait_for(control_enqueue, timeout=1)
+            await asyncio.wait_for(
+                asyncio.gather(*bus._control_put_tasks),
+                timeout=1,
+            )
             await asyncio.wait_for(bus._dispatch_queues["FULL01"].join(), timeout=1)
         finally:
             await bus.close()
 
         assert handled == [
+            "session_broadcast",
             "session_broadcast",
             "session_broadcast",
             "disconnect_player",
@@ -3019,6 +3034,38 @@ def test_beat_clock_player_state_read_avoids_full_player_hash_scan():
     assert fake_redis.hgetall_calls == []
 
 
+def test_beat_clock_meta_state_read_avoids_full_player_hash_scan():
+    fake_redis = _FakeRedis()
+    session_code = "SESSION123"
+
+    with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+        manager.beat_clock_states.pop(session_code, None)
+        manager.set_beat_clock_state(
+            session_code,
+            {
+                "active": True,
+                "duration_seconds": 60,
+                "ends_at": "2026-07-10T12:00:00",
+                "questions": ["Q1"],
+                "players": {},
+                "leaderboard": [],
+            },
+        )
+        manager.update_beat_clock_player_state(
+            session_code,
+            "P1",
+            {"current_question_id": "Q1", "answered_count": 0},
+        )
+        manager.beat_clock_states.pop(session_code, None)
+
+        state = manager.get_beat_clock_meta_state(session_code)
+
+    assert state["active"] is True
+    assert state["duration_seconds"] == 60
+    assert fake_redis.hget_calls == []
+    assert fake_redis.hgetall_calls == []
+
+
 def test_beat_clock_leaderboard_uses_single_score_query_projection():
     handler = game_handlers.BeatTheClockGameHandler("SESSION123")
     db = MagicMock()
@@ -3065,7 +3112,6 @@ def test_beat_clock_answer_updates_redis_projection_after_db_commit():
     events = []
     handler = game_handlers.BeatTheClockGameHandler("SESSION123")
     db = MagicMock()
-    db.commit.side_effect = lambda: events.append("commit")
     state = {
         "active": True,
         "duration_seconds": 60,
@@ -3079,12 +3125,34 @@ def test_beat_clock_answer_updates_redis_projection_after_db_commit():
             }
         },
     }
-    question = SimpleNamespace(answer="A", accepted_answers=[], difficulty="easy")
 
     def update_player_state(session_code, player_id, player_state):
         events.append("redis_update")
         assert player_state["answered_count"] == 1
         assert player_state["correct_count"] == 1
+
+    def process_answer(player_id, answer, question_id, player_state, state_context):
+        events.extend(["response", "score", "commit"])
+        return {
+            "status": "accepted",
+            "updated_player_state": {
+                **player_state,
+                "answered_count": 1,
+                "correct_count": 1,
+            },
+            "payload": {
+                "game_type": game_handlers.BEAT_THE_CLOCK_GAME_TYPE,
+                "question_id": question_id,
+                "is_correct": True,
+                "score": 1,
+                "answered_count": 1,
+                "correct_count": 1,
+                "duration_seconds": state_context["duration_seconds"],
+                "ends_at": state_context["ends_at"],
+                "server_time_ms": 1,
+                "answer_match": {"method": "exact", "score": 1.0},
+            },
+        }
 
     async def run_test():
         with patch.object(
@@ -3092,82 +3160,36 @@ def test_beat_clock_answer_updates_redis_projection_after_db_commit():
             "get_beat_clock_state_for_player",
             return_value=state,
         ):
-            with patch.object(game_handlers, "is_player_kicked", return_value=False):
+            with patch.object(
+                handler,
+                "_process_beat_clock_answer_in_thread",
+                side_effect=process_answer,
+            ):
                 with patch.object(
                     manager,
-                    "is_player_frozen_for_question",
-                    return_value=False,
+                    "update_beat_clock_player_state",
+                    side_effect=update_player_state,
                 ):
                     with patch.object(
-                        game_handlers,
-                        "is_player_frozen_for_question",
-                        return_value=False,
+                        manager,
+                        "send_message_to_player",
+                        AsyncMock(),
                     ):
                         with patch.object(
-                            game_handlers,
-                            "get_question_by_id",
-                            return_value=question,
+                            handler,
+                            "_send_question_to_player",
+                            AsyncMock(return_value=True),
                         ):
                             with patch.object(
-                                game_handlers,
-                                "validate_answer_against_question",
-                                return_value=SimpleNamespace(
-                                    is_correct=True,
-                                    method="exact",
-                                    score=1.0,
-                                ),
+                                handler,
+                                "schedule_state_broadcast",
                             ):
-                                with patch.object(
-                                    game_handlers,
-                                    "create_player_response",
-                                    side_effect=lambda *args, **kwargs: events.append(
-                                        "response"
-                                    ),
-                                ):
-                                    with patch.object(
-                                        game_handlers,
-                                        "update_scores",
-                                        side_effect=lambda *args, **kwargs: events.append(
-                                            "score"
-                                        ),
-                                    ):
-                                        with patch.object(
-                                            manager,
-                                            "update_beat_clock_player_state",
-                                            side_effect=update_player_state,
-                                        ):
-                                            with patch.object(
-                                                game_handlers,
-                                                "get_scores_by_session_and_player",
-                                                return_value=SimpleNamespace(score=1),
-                                            ):
-                                                with patch.object(
-                                                    game_handlers,
-                                                    "get_session_by_code",
-                                                    return_value=None,
-                                                ):
-                                                    with patch.object(
-                                                        manager,
-                                                        "send_message_to_player",
-                                                        AsyncMock(),
-                                                    ):
-                                                        with patch.object(
-                                                            handler,
-                                                            "_send_question_to_player",
-                                                            AsyncMock(
-                                                                return_value=True
-                                                            ),
-                                                        ):
-                                                            with patch.object(
-                                                                handler,
-                                                                "schedule_state_broadcast",
-                                                            ):
-                                                                await handler.handle_player_answer(
-                                                                    "P1",
-                                                                    "A",
-                                                                    "Q1",
-                                                                    db,
-                                                                )
+                                await handler.handle_player_answer(
+                                    "P1",
+                                    "A",
+                                    "Q1",
+                                    db,
+                                )
 
     asyncio.run(run_test())
 
@@ -3176,39 +3198,19 @@ def test_beat_clock_answer_updates_redis_projection_after_db_commit():
 
 def test_beat_clock_state_broadcast_is_debounced_per_session():
     handler = game_handlers.BeatTheClockGameHandler("SESSION123")
-    db = MagicMock()
-    session_factory = MagicMock()
-    session_factory.return_value.__enter__.return_value = db
-    session_factory.return_value.__exit__.return_value = False
 
     async def run_test():
         with patch.object(
-            game_handlers,
-            "SessionLocal",
-            session_factory,
-        ):
-            with patch.object(
-                game_handlers,
-                "get_session_by_code",
-                return_value=SimpleNamespace(owner_player_id="HOST1"),
-            ):
-                with patch.object(game_handlers, "set_rls_current_player"):
-                    with patch.object(
-                        handler,
-                        "_broadcast_state",
-                        AsyncMock(),
-                    ) as broadcast:
-                        first_task = handler.schedule_state_broadcast(
-                            delay_seconds=0.01
-                        )
-                        second_task = handler.schedule_state_broadcast(
-                            delay_seconds=0.01
-                        )
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await first_task
-                        await asyncio.wait_for(second_task, timeout=1)
+            handler,
+            "_broadcast_state_from_thread",
+            AsyncMock(return_value={}),
+        ) as broadcast:
+            first_task = handler.schedule_state_broadcast(delay_seconds=0.01)
+            second_task = handler.schedule_state_broadcast(delay_seconds=0.01)
+            assert first_task is second_task
+            await asyncio.wait_for(second_task, timeout=1)
 
-        broadcast.assert_awaited_once_with(db)
+        broadcast.assert_awaited_once()
 
     try:
         asyncio.run(run_test())
@@ -3232,6 +3234,20 @@ def test_beat_clock_finish_claim_is_single_winner_in_redis():
     assert first_claim is True
     assert second_claim is False
     assert manager._beat_clock_finish_key(session_code) in fake_redis.values
+
+
+def test_clear_beat_clock_state_preserves_finish_marker_until_ttl():
+    fake_redis = _FakeRedis()
+    session_code = "SESSION123"
+
+    with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+        manager.claim_beat_clock_finish(session_code)
+        finish_key = manager._beat_clock_finish_key(session_code)
+
+        manager.clear_beat_clock_state(session_code)
+
+    assert finish_key in fake_redis.values
+    assert all(finish_key not in keys for keys in fake_redis.delete_calls)
 
 
 def test_beat_clock_finish_now_skips_duplicate_finish_claim():
@@ -3378,6 +3394,52 @@ def test_async_connection_generation_rejects_missing_redis_lease():
                     )
                 )
                 is False
+            )
+    finally:
+        manager.active_connections.pop(session_code, None)
+        manager.websocket_registry.pop(ws_id, None)
+        manager.websocket_to_ws_id.pop(id(websocket), None)
+
+    assert fake_redis.get_calls == [generation_key]
+
+
+def test_async_connection_generation_treats_redis_read_failure_as_available():
+    class FailingAsyncRedis(_FakeAsyncRedis):
+        async def get(self, key):
+            self.get_calls.append(key)
+            raise RuntimeError("redis unavailable")
+
+    fake_redis = FailingAsyncRedis()
+    websocket = MagicMock()
+    session_code = "SESSION123"
+    player_id = "P1"
+    ws_id = "ws_current"
+    generation_key = manager._player_generation_key(session_code, player_id)
+
+    manager.active_connections[session_code] = {
+        ws_id: {
+            "websocket": websocket,
+            "client_type": "mobile",
+            "player_id": player_id,
+            "connection_generation": "worker-a:ws_current",
+        }
+    }
+    manager.websocket_registry[ws_id] = {
+        "session_code": session_code,
+        "websocket": websocket,
+    }
+
+    try:
+        with patch.object(redis_bus.websocket_bus, "_redis", fake_redis):
+            assert (
+                asyncio.run(
+                    manager.connection_is_current_async(
+                        websocket,
+                        session_code,
+                        player_id,
+                    )
+                )
+                is True
             )
     finally:
         manager.active_connections.pop(session_code, None)

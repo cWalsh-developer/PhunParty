@@ -91,6 +91,28 @@ WEBSOCKET_GLOBAL_MESSAGE_LIMIT = (120, 60)
 WEBSOCKET_BUZZER_LIMIT = (5, 3600)
 
 
+def websocket_message_needs_route_db(
+    message: dict,
+    client_type: str,
+    game_handler,
+) -> bool:
+    """Return whether the socket route must own a DB session for this message."""
+    message_type = message.get("type")
+    if message_type in {"ping", "pong", "ack", "connection_ack"}:
+        return False
+
+    if message_type == "submit_answer" and client_type == "mobile":
+        data = message.get("data") or {}
+        question_id = data.get("question_id")
+        game_type = getattr(game_handler, "game_type", "trivia")
+        return (
+            game_type != "trivia"
+            or str(question_id or "").upper().startswith("BTC")
+        )
+
+    return True
+
+
 def get_websocket_client_ip(websocket: WebSocket) -> str:
     trust_proxy = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
     if trust_proxy:
@@ -901,9 +923,16 @@ async def websocket_endpoint(
                 ):
                     continue
 
-                message_db, message_db_generator = open_db_session(
-                    authenticated_player_id
-                )
+                message_db = None
+                message_db_generator = None
+                if websocket_message_needs_route_db(
+                    message,
+                    client_type,
+                    game_handler,
+                ):
+                    message_db, message_db_generator = open_db_session(
+                        authenticated_player_id
+                    )
                 try:
                     await handle_websocket_message(
                         message,
@@ -916,7 +945,8 @@ async def websocket_endpoint(
                         message_db,
                     )
                 finally:
-                    close_db_session(message_db_generator)
+                    if message_db_generator is not None:
+                        close_db_session(message_db_generator)
 
             except WebSocketDisconnect:
                 break
@@ -1105,7 +1135,7 @@ async def handle_websocket_message(
     player_id: Optional[str],
     authenticated_player_id: str,
     game_handler,
-    db: Session,
+    db: Optional[Session],
 ):
     """Handle incoming WebSocket messages"""
     message_type = message.get("type")
@@ -1305,12 +1335,28 @@ async def handle_websocket_message(
         phase_state = manager.get_session_phase_state(session_code)
         current_phase = phase_state.get("phase")
         current_question_id = phase_state.get("current_question_id")
-        resolved_submit_game_type = resolve_session_game_type(db, session_code)
-        beat_clock_state = manager.get_beat_clock_state(session_code)
+        if db is not None:
+            resolved_submit_game_type = resolve_session_game_type(db, session_code)
+        else:
+            resolved_submit_game_type = getattr(game_handler, "game_type", "trivia")
+
+        question_looks_like_beat_clock = str(question_id or "").upper().startswith(
+            "BTC"
+        )
+        if (
+            resolved_submit_game_type == BEAT_THE_CLOCK_GAME_TYPE
+            or question_looks_like_beat_clock
+        ):
+            beat_clock_state = manager.get_beat_clock_state_for_player(
+                session_code,
+                player_id or "",
+            )
+        else:
+            beat_clock_state = {}
         is_beat_clock_submission = (
             resolved_submit_game_type == BEAT_THE_CLOCK_GAME_TYPE
             or bool(beat_clock_state.get("active"))
-            or str(question_id or "").upper().startswith("BTC")
+            or question_looks_like_beat_clock
         )
         if (
             is_beat_clock_submission
@@ -1512,7 +1558,7 @@ async def handle_websocket_message(
 
         if manager.is_player_frozen_for_question(
             session_code, player_id, question_id
-        ) or is_player_kicked(db, session_code, player_id):
+        ) or (db is not None and is_player_kicked(db, session_code, player_id)):
             await manager.send_personal_message(
                 {
                     "type": "answer_rejected",
@@ -1522,7 +1568,11 @@ async def handle_websocket_message(
                         "is_frozen": manager.is_player_frozen_for_question(
                             session_code, player_id, question_id
                         ),
-                        "is_kicked": is_player_kicked(db, session_code, player_id),
+                        "is_kicked": (
+                            is_player_kicked(db, session_code, player_id)
+                            if db is not None
+                            else False
+                        ),
                     },
                 },
                 websocket,

@@ -41,6 +41,13 @@ class PlayerCredential:
     token: str
 
 
+@dataclass
+class AnswerConnection:
+    player_id: str
+    ws: aiohttp.ClientWebSocketResponse
+    handshake_ms: float
+
+
 def percentile(values: list[float], percent: float) -> float:
     if not values:
         return 0.0
@@ -182,84 +189,105 @@ async def run_connect(args) -> None:
     print_summary("connection capacity", samples)
 
 
-async def answer_one(
+async def connect_answer_socket(
     session: aiohttp.ClientSession,
     url: str,
+    player_id: str,
+) -> tuple[AnswerConnection | None, Sample]:
+    started = time.perf_counter()
+    try:
+        ws = await session.ws_connect(url, heartbeat=20)
+        message = await ws.receive(timeout=10)
+        latency_ms = (time.perf_counter() - started) * 1000
+        if message.type != aiohttp.WSMsgType.TEXT:
+            await ws.close()
+            return None, Sample(
+                ok=False,
+                latency_ms=latency_ms,
+                status="handshake_failed",
+                error=f"unexpected websocket message type {message.type}",
+            )
+        payload = json.loads(message.data)
+        if payload.get("type") != "connection_established":
+            await ws.close()
+            return None, Sample(
+                ok=False,
+                latency_ms=latency_ms,
+                status="handshake_failed",
+                error=f"expected connection_established, got {payload.get('type')}",
+            )
+        return (
+            AnswerConnection(
+                player_id=player_id,
+                ws=ws,
+                handshake_ms=latency_ms,
+            ),
+            Sample(ok=True, latency_ms=latency_ms, status="connected"),
+        )
+    except Exception as exc:
+        return None, Sample(
+            ok=False,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            status="connection_error",
+            error=repr(exc),
+        )
+
+
+async def answer_connected_socket(
+    connection: AnswerConnection,
     question_id: str,
     answer: str,
-    ready_queue: asyncio.Queue[str],
-    release_event: asyncio.Event,
-    player_id: str,
 ) -> Sample:
     started = time.perf_counter()
     try:
-        async with session.ws_connect(url, heartbeat=20) as ws:
-            message = await ws.receive(timeout=10)
-            if message.type != aiohttp.WSMsgType.TEXT:
-                return Sample(
-                    ok=False,
-                    latency_ms=(time.perf_counter() - started) * 1000,
-                    status="handshake_failed",
-                    error=f"unexpected websocket message type {message.type}",
-                )
-            payload = json.loads(message.data)
-            if payload.get("type") != "connection_established":
-                return Sample(
-                    ok=False,
-                    latency_ms=(time.perf_counter() - started) * 1000,
-                    status="handshake_failed",
-                    error=f"expected connection_established, got {payload.get('type')}",
-                )
-            ready_queue.put_nowait(player_id)
-            await release_event.wait()
-            answer_started = time.perf_counter()
-            await ws.send_str(
-                json.dumps(
-                    {
-                        "type": "submit_answer",
-                        "data": {
-                            "question_id": question_id,
-                            "answer": answer,
-                        },
-                    }
-                )
+        answer_started = time.perf_counter()
+        await connection.ws.send_str(
+            json.dumps(
+                {
+                    "type": "submit_answer",
+                    "data": {
+                        "question_id": question_id,
+                        "answer": answer,
+                    },
+                }
             )
+        )
 
-            deadline = time.perf_counter() + 10
-            while time.perf_counter() < deadline:
-                message = await ws.receive(timeout=10)
-                if message.type == aiohttp.WSMsgType.TEXT:
-                    payload = json.loads(message.data)
-                    message_type = payload.get("type")
-                    if message_type == "answer_submitted":
-                        latency_ms = (time.perf_counter() - answer_started) * 1000
-                        await ws.close()
-                        return Sample(
-                            ok=True,
-                            latency_ms=latency_ms,
-                            status="answer_submitted",
-                        )
-                    if message_type in {"answer_rejected", "error"}:
-                        latency_ms = (time.perf_counter() - answer_started) * 1000
-                        await ws.close()
-                        return Sample(
-                            ok=False,
-                            latency_ms=latency_ms,
-                            status=message_type,
-                            error=json.dumps(payload.get("data") or payload),
-                        )
-                if message.type in {
-                    aiohttp.WSMsgType.CLOSED,
-                    aiohttp.WSMsgType.ERROR,
-                }:
-                    break
+        deadline = time.perf_counter() + 10
+        while time.perf_counter() < deadline:
+            message = await connection.ws.receive(timeout=10)
+            if message.type == aiohttp.WSMsgType.TEXT:
+                payload = json.loads(message.data)
+                message_type = payload.get("type")
+                if message_type == "answer_submitted":
+                    latency_ms = (time.perf_counter() - answer_started) * 1000
+                    await connection.ws.close()
+                    return Sample(
+                        ok=True,
+                        latency_ms=latency_ms,
+                        status="answer_submitted",
+                    )
+                if message_type in {"answer_rejected", "error"}:
+                    latency_ms = (time.perf_counter() - answer_started) * 1000
+                    await connection.ws.close()
+                    return Sample(
+                        ok=False,
+                        latency_ms=latency_ms,
+                        status=message_type,
+                        error=json.dumps(payload.get("data") or payload),
+                    )
+            if message.type in {
+                aiohttp.WSMsgType.CLOSED,
+                aiohttp.WSMsgType.ERROR,
+            }:
+                break
 
-            return Sample(
-                ok=False,
-                latency_ms=(time.perf_counter() - started) * 1000,
-                status="answer_timeout",
-                error="timed out waiting for answer response",
-            )
+        return Sample(
+            ok=False,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            status="answer_timeout",
+            error="timed out waiting for answer response",
+        )
     except Exception as exc:
         return Sample(
             ok=False,
@@ -267,6 +295,9 @@ async def answer_one(
             status="answer_error",
             error=repr(exc),
         )
+    finally:
+        if not connection.ws.closed:
+            await connection.ws.close()
 
 
 async def run_answer_burst(args) -> None:
@@ -288,53 +319,71 @@ async def run_answer_burst(args) -> None:
             "distinct authenticated players; prefer --players-file"
         )
 
-    connector = aiohttp.TCPConnector(limit=args.concurrency)
+    connector = aiohttp.TCPConnector(limit=max(args.concurrency, len(credentials)))
     timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_read=30)
 
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        semaphore = asyncio.Semaphore(args.concurrency)
-        ready_queue: asyncio.Queue[str] = asyncio.Queue()
-        release_event = asyncio.Event()
+        connect_semaphore = asyncio.Semaphore(args.concurrency)
 
-        async def guarded_answer(credential: PlayerCredential) -> Sample:
-            async with semaphore:
+        async def guarded_connect(
+            credential: PlayerCredential,
+        ) -> tuple[AnswerConnection | None, Sample]:
+            async with connect_semaphore:
                 url = websocket_url(
                     args.ws_url,
                     credential.token,
                     "mobile",
                     credential.player_id,
                 )
-                return await answer_one(
+                return await connect_answer_socket(
                     session,
                     url,
-                    args.question_id,
-                    args.answer,
-                    ready_queue,
-                    release_event,
                     credential.player_id,
                 )
 
-        tasks = [asyncio.create_task(guarded_answer(item)) for item in credentials]
-        ready_players = set()
-        ready_deadline = time.perf_counter() + args.ready_timeout
-        while (
-            len(ready_players) < len(credentials)
-            and time.perf_counter() < ready_deadline
-        ):
-            try:
-                player_id = await asyncio.wait_for(
-                    ready_queue.get(),
-                    timeout=max(0.1, ready_deadline - time.perf_counter()),
-                )
-                ready_players.add(player_id)
-            except asyncio.TimeoutError:
-                break
-            if any(task.done() and task.exception() for task in tasks):
-                break
+        connect_tasks = [
+            asyncio.create_task(guarded_connect(item)) for item in credentials
+        ]
+        done, pending = await asyncio.wait(
+            connect_tasks,
+            timeout=args.ready_timeout,
+        )
+        for task in pending:
+            task.cancel()
 
-        print(f"connected and ready: {len(ready_players)}/{len(credentials)}")
-        release_event.set()
-        samples = await asyncio.gather(*tasks)
+        results = []
+        for task in done:
+            results.append(task.result())
+        for task in pending:
+            try:
+                results.append(await task)
+            except asyncio.CancelledError:
+                results.append(
+                    (
+                        None,
+                        Sample(
+                            ok=False,
+                            latency_ms=args.ready_timeout * 1000,
+                            status="connection_timeout",
+                            error="timed out waiting for websocket connection",
+                        ),
+                    )
+                )
+
+        connections = [connection for connection, sample in results if connection]
+        connect_samples = [sample for connection, sample in results]
+        print(f"connected and ready: {len(connections)}/{len(credentials)}")
+        print_summary("answer-burst connection setup", connect_samples)
+        samples = await asyncio.gather(
+            *(
+                answer_connected_socket(
+                    connection,
+                    args.question_id,
+                    args.answer,
+                )
+                for connection in connections
+            )
+        )
     print_summary("trivia answer burst", samples)
 
 

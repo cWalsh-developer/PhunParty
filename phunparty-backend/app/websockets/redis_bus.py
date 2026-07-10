@@ -134,6 +134,7 @@ class RedisWebSocketBus:
         self._dispatcher: EventDispatcher | None = None
         self._dispatch_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self._dispatch_tasks: dict[str, asyncio.Task] = {}
+        self._control_put_tasks: set[asyncio.Task] = set()
         self.dropped_event_count = 0
         self.control_backpressure_count = 0
 
@@ -312,12 +313,17 @@ class RedisWebSocketBus:
             if self._is_control_event(event):
                 self.control_backpressure_count += 1
                 logger.warning(
-                    "Redis WebSocket control event waiting for full dispatch queue: session=%s kind=%s size=%s",
+                    "Redis WebSocket control event queued behind full dispatch queue: session=%s kind=%s size=%s",
                     session_code,
                     event.get("kind"),
                     queue.qsize(),
                 )
-                await queue.put(event)
+                task = asyncio.create_task(
+                    self._put_control_event_when_ready(session_code, queue, event),
+                    name=f"ws-redis-control-put-{session_code}",
+                )
+                self._control_put_tasks.add(task)
+                task.add_done_callback(self._control_put_tasks.discard)
                 return
 
             logger.warning(
@@ -337,6 +343,23 @@ class RedisWebSocketBus:
                     session_code,
                     event.get("kind"),
                 )
+
+    async def _put_control_event_when_ready(
+        self,
+        session_code: str,
+        queue: asyncio.Queue[dict[str, Any]],
+        event: dict[str, Any],
+    ) -> None:
+        try:
+            await queue.put(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to enqueue Redis WebSocket control event: session=%s kind=%s",
+                session_code,
+                event.get("kind"),
+            )
 
     def _is_control_event(self, event: dict[str, Any]) -> bool:
         if event.get("kind") in CONTROL_EVENT_KINDS:
@@ -422,6 +445,12 @@ class RedisWebSocketBus:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
+        for task in list(self._control_put_tasks):
+            task.cancel()
+        for task in list(self._control_put_tasks):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
         if self._pubsub:
             await self._pubsub.unsubscribe(self.channel)
             await self._pubsub.aclose()
@@ -434,6 +463,7 @@ class RedisWebSocketBus:
         self._reader_task = None
         self._dispatch_queues.clear()
         self._dispatch_tasks.clear()
+        self._control_put_tasks.clear()
         self._pubsub = None
         self._redis = None
         self._sync_redis = None
