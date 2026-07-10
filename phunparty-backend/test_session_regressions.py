@@ -351,16 +351,21 @@ def test_submit_player_answer_returns_answer_match_metadata():
                     with patch.object(game_logic, "update_scores"):
                         with patch.object(
                             game_logic,
-                            "check_and_advance_game",
-                            return_value={"players_answered": 1},
+                            "check_progression_readiness_without_lock",
+                            return_value={"ready_for_progression": True},
                         ):
-                            result = game_logic.submit_player_answer(
-                                mock_db,
-                                "SESSION123",
-                                "P1",
-                                "Q1",
-                                "Camron",
-                            )
+                            with patch.object(
+                                game_logic,
+                                "check_and_advance_game",
+                                return_value={"players_answered": 1},
+                            ):
+                                result = game_logic.submit_player_answer(
+                                    mock_db,
+                                    "SESSION123",
+                                    "P1",
+                                    "Q1",
+                                    "Camron",
+                                )
 
     assert result["is_correct"] is True
     assert "matched_answer" not in result["answer_match"]
@@ -388,16 +393,21 @@ def test_submit_player_answer_uses_exact_validation_for_multiple_choice():
                     with patch.object(game_logic, "update_scores"):
                         with patch.object(
                             game_logic,
-                            "check_and_advance_game",
-                            return_value={"players_answered": 1},
+                            "check_progression_readiness_without_lock",
+                            return_value={"ready_for_progression": True},
                         ):
-                            result = game_logic.submit_player_answer(
-                                mock_db,
-                                "SESSION123",
-                                "P1",
-                                "Q1",
-                                "8",
-                            )
+                            with patch.object(
+                                game_logic,
+                                "check_and_advance_game",
+                                return_value={"players_answered": 1},
+                            ):
+                                result = game_logic.submit_player_answer(
+                                    mock_db,
+                                    "SESSION123",
+                                    "P1",
+                                    "Q1",
+                                    "8",
+                                )
 
     assert result["is_correct"] is False
 
@@ -424,16 +434,21 @@ def test_submit_player_answer_uses_fuzzy_validation_for_hard_text_input():
                     with patch.object(game_logic, "update_scores"):
                         with patch.object(
                             game_logic,
-                            "check_and_advance_game",
-                            return_value={"players_answered": 1},
+                            "check_progression_readiness_without_lock",
+                            return_value={"ready_for_progression": True},
                         ):
-                            result = game_logic.submit_player_answer(
-                                mock_db,
-                                "SESSION123",
-                                "P1",
-                                "Q1",
-                                "James Camaron",
-                            )
+                            with patch.object(
+                                game_logic,
+                                "check_and_advance_game",
+                                return_value={"players_answered": 1},
+                            ):
+                                result = game_logic.submit_player_answer(
+                                    mock_db,
+                                    "SESSION123",
+                                    "P1",
+                                    "Q1",
+                                    "James Camaron",
+                                )
 
     assert result["is_correct"] is True
 
@@ -457,6 +472,65 @@ def test_submit_player_answer_rejects_non_current_question():
         )
 
     assert result == {"error": "Question is no longer active"}
+
+
+def test_submit_player_answer_skips_locked_progression_when_still_waiting():
+    question = SimpleNamespace(
+        answer="A",
+        accepted_answers=[],
+        difficulty="easy",
+        question_options=["A", "B", "C"],
+    )
+    game_state = SimpleNamespace(
+        is_active=True,
+        isstarted=True,
+        current_question_id="Q1",
+        current_question_index=0,
+        total_questions=5,
+        fair_play_enabled=False,
+    )
+    mock_db = MagicMock()
+    waiting_progression = {
+        "players_total": 3,
+        "players_answered": 1,
+        "waiting_for_players": True,
+        "ready_for_progression": False,
+        "progression_lock_skipped": True,
+    }
+
+    with patch.object(game_logic, "get_game_session_state", return_value=game_state):
+        with patch.object(game_logic, "get_player_response", return_value=None):
+            with patch.object(game_logic, "get_question_by_id", return_value=question):
+                with patch.object(game_logic, "create_player_response"):
+                    with patch.object(game_logic, "update_scores"):
+                        with patch.object(
+                            game_logic,
+                            "get_session_by_code",
+                            return_value=SimpleNamespace(owner_player_id="HOST1"),
+                        ):
+                            with patch.object(game_logic, "set_rls_current_player"):
+                                with patch.object(
+                                    game_logic,
+                                    "check_progression_readiness_without_lock",
+                                    return_value=waiting_progression,
+                                ) as precheck:
+                                    with patch.object(
+                                        game_logic,
+                                        "check_and_advance_game",
+                                    ) as locked_progression:
+                                        result = game_logic.submit_player_answer(
+                                            mock_db,
+                                            "SESSION123",
+                                            "P1",
+                                            "Q1",
+                                            "A",
+                                        )
+
+    precheck.assert_called_once_with(mock_db, "SESSION123", "Q1", game_state)
+    locked_progression.assert_not_called()
+    mock_db.commit.assert_called_once()
+    assert result["game_state"]["progression_lock_skipped"] is True
+    assert result["game_state"]["waiting_for_players"] is True
 
 
 def test_buzzer_hard_answer_payload_uses_text_input_without_options():
