@@ -529,6 +529,13 @@ class BeatTheClockGameHandler(GameEventHandler):
             player_id=player_id,
             message={"type": "beat_clock_question", "data": payload},
         )
+        player_state = state.get("players", {}).get(player_id)
+        if player_state:
+            manager.update_beat_clock_player_state(
+                self.session_code,
+                player_id,
+                player_state,
+            )
         manager.set_beat_clock_state(self.session_code, state)
         return True
 
@@ -662,16 +669,11 @@ class BeatTheClockGameHandler(GameEventHandler):
                     if not payload:
                         continue
 
-                    for connection_info in manager.get_player_connections(
-                        self.session_code,
-                        player_id,
-                    ).values():
-                        websocket = connection_info.get("websocket")
-                        if websocket:
-                            await manager.send_personal_message(
-                                {"type": "beat_clock_question", "data": payload},
-                                websocket,
-                            )
+                    await manager.send_message_to_player(
+                        session_code=self.session_code,
+                        player_id=player_id,
+                        message={"type": "beat_clock_question", "data": payload},
+                    )
                 return
 
             game_state = get_game_session_state(db, self.session_code)
@@ -821,31 +823,67 @@ class BeatTheClockGameHandler(GameEventHandler):
 
         payload = self._question_payload(db, question_id, player_id, state)
         if payload:
-            await manager.send_personal_message(
-                {"type": "beat_clock_question", "data": payload},
-                websocket,
+            await manager.send_message_to_player(
+                session_code=self.session_code,
+                player_id=player_id,
+                message={
+                    "type": "beat_clock_question",
+                    "data": payload,
+                },
             )
+
+    async def _send_beat_clock_result_and_current_question(
+        self,
+        player_id: str,
+        result_payload: dict,
+        current_payload: Optional[dict],
+    ) -> None:
+        await manager.send_message_to_player(
+            session_code=self.session_code,
+            player_id=player_id,
+            message={
+                "type": "beat_clock_answer_result",
+                "data": result_payload,
+            },
+        )
+        if current_payload:
+            await manager.send_message_to_player(
+                session_code=self.session_code,
+                player_id=player_id,
+                message={
+                    "type": "beat_clock_question",
+                    "data": current_payload,
+                },
+            )
+
+    async def _send_beat_clock_rejection(
+        self,
+        player_id: str,
+        reason: str,
+        message: str,
+    ) -> None:
+        await manager.send_message_to_player(
+            session_code=self.session_code,
+            player_id=player_id,
+            message={
+                "type": "answer_rejected",
+                "data": {
+                    "reason": reason,
+                    "message": message,
+                },
+            },
+        )
 
     async def handle_player_answer(
         self, player_id: str, answer: str, question_id: str, db: Session
     ):
         state = manager.get_beat_clock_state(self.session_code)
         if not state.get("active"):
-            for connection_info in manager.get_player_connections(
-                self.session_code, player_id
-            ).values():
-                websocket = connection_info.get("websocket")
-                if websocket:
-                    await manager.send_personal_message(
-                        {
-                            "type": "answer_rejected",
-                            "data": {
-                                "reason": "game_not_active",
-                                "message": "Beat the Clock is not currently active.",
-                            },
-                        },
-                        websocket,
-                    )
+            await self._send_beat_clock_rejection(
+                player_id,
+                "game_not_active",
+                "Beat the Clock is not currently active.",
+            )
             return
 
         if utc_now() >= state.get("ends_at_dt", utc_now()):
@@ -882,23 +920,11 @@ class BeatTheClockGameHandler(GameEventHandler):
                     state,
                 )
 
-            for connection_info in manager.get_player_connections(
-                self.session_code, player_id
-            ).values():
-                websocket = connection_info.get("websocket")
-                if websocket:
-                    await manager.send_personal_message(
-                        {"type": "beat_clock_answer_result", "data": duplicate_payload},
-                        websocket,
-                    )
-                    if current_payload:
-                        await manager.send_personal_message(
-                            {
-                                "type": "beat_clock_question",
-                                "data": current_payload,
-                            },
-                            websocket,
-                        )
+            await self._send_beat_clock_result_and_current_question(
+                player_id,
+                duplicate_payload,
+                current_payload,
+            )
             if not current_payload:
                 await self._send_question_to_player(db, player_id, state)
             return
@@ -964,6 +990,11 @@ class BeatTheClockGameHandler(GameEventHandler):
             player_state["correct_count"] = player_state.get("correct_count", 0) + 1
 
         player_state["answered_count"] = player_state.get("answered_count", 0) + 1
+        manager.update_beat_clock_player_state(
+            self.session_code,
+            player_id,
+            player_state,
+        )
         score_row = get_scores_by_session_and_player(db, self.session_code, player_id)
         db.commit()
 

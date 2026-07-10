@@ -76,6 +76,7 @@ class ConnectionManager:
     HEARTBEAT_DISCONNECTED_SECONDS = 60
     PING_INTERVAL_SECONDS = 10
     MOBILE_DISCONNECT_GRACE_SECONDS = 30
+    TERMINAL_SESSION_TTL_SECONDS = 900
     ACK_RETRY_DELAY_SECONDS = 1.5
     ACK_MAX_RESENDS = 2
     ACK_EVENT_TYPES = {
@@ -283,6 +284,15 @@ class ConnectionManager:
             f"phun:prod:session:{session_code}:presence-meta",
         )
 
+    def _beat_clock_keys(self, session_code: str) -> tuple[str, str]:
+        return (
+            self._shared_state_key(session_code, "beat-clock:meta"),
+            self._shared_state_key(session_code, "beat-clock:players"),
+        )
+
+    def _terminal_session_key(self, session_code: str) -> str:
+        return f"phun:prod:terminal:{session_code}"
+
     def _presence_member(self, ws_id: str) -> str:
         return f"{websocket_bus.worker_id}:{ws_id}"
 
@@ -414,6 +424,50 @@ class ConnectionManager:
                 )
 
         return metadata
+
+    def _update_shared_presence_metadata(
+        self,
+        session_code: str,
+        predicate,
+        updater,
+    ) -> int:
+        client = websocket_bus.sync_client
+        if not client:
+            return 0
+
+        presence_key, meta_key = self._presence_keys(session_code)
+        now = int(time.time())
+        try:
+            client.zremrangebyscore(presence_key, "-inf", now)
+            members = client.zrangebyscore(presence_key, now + 1, "+inf")
+            if not members:
+                return 0
+
+            raw_values = client.hmget(meta_key, members)
+            pipe = client.pipeline()
+            updated = 0
+            for member, raw_value in zip(members, raw_values):
+                if not raw_value:
+                    continue
+                try:
+                    metadata = json.loads(raw_value)
+                except json.JSONDecodeError:
+                    continue
+                if not predicate(metadata):
+                    continue
+
+                updater(metadata)
+                metadata["updated_at"] = self._utc_now_iso()
+                pipe.hset(meta_key, member, json.dumps(metadata, separators=(",", ":")))
+                updated += 1
+
+            if updated:
+                pipe.expire(meta_key, self.PRESENCE_KEY_TTL_SECONDS)
+                pipe.execute()
+            return updated
+        except Exception:
+            logger.exception("Failed to update shared presence for %s", session_code)
+            return 0
 
     def has_shared_player_connections(self, session_code: str, player_id: str) -> bool:
         return any(
@@ -1000,6 +1054,7 @@ class ConnectionManager:
             if ws_id in self.websocket_registry:
                 del self.websocket_registry[ws_id]
             self._remove_presence(session_code, ws_id)
+            self._remove_presence(session_code, ws_id)
 
             logger.info(f"Client disconnected from session {session_code}")
 
@@ -1039,7 +1094,7 @@ class ConnectionManager:
         self,
         session_code: str,
         snapshot: Dict[str, Any],
-        ttl_seconds: int = 900,
+        ttl_seconds: int = TERMINAL_SESSION_TTL_SECONDS,
     ) -> Dict[str, Any]:
         """Keep final session/Fair Play state briefly after the live session ends."""
         expires_at = self._utc_now() + timedelta(seconds=ttl_seconds)
@@ -1053,6 +1108,19 @@ class ConnectionManager:
         }
 
         self.terminal_sessions[session_code] = terminal_snapshot
+        client = websocket_bus.sync_client
+        if client:
+            try:
+                client.set(
+                    self._terminal_session_key(session_code),
+                    json.dumps(terminal_snapshot, separators=(",", ":")),
+                    ex=ttl_seconds,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to cache terminal session snapshot in Redis for %s",
+                    session_code,
+                )
 
         logger.info(
             "Cached terminal session snapshot for %s until %s",
@@ -1064,6 +1132,20 @@ class ConnectionManager:
 
     def get_terminal_session(self, session_code: str) -> Optional[Dict[str, Any]]:
         """Return a terminal session snapshot if it has not expired."""
+        client = websocket_bus.sync_client
+        if client:
+            try:
+                raw_snapshot = client.get(self._terminal_session_key(session_code))
+                if raw_snapshot:
+                    snapshot = json.loads(raw_snapshot)
+                    self.terminal_sessions[session_code] = snapshot
+                    return dict(snapshot)
+            except Exception:
+                logger.exception(
+                    "Failed to read terminal session snapshot from Redis for %s",
+                    session_code,
+                )
+
         snapshot = self.terminal_sessions.get(session_code)
 
         if not snapshot:
@@ -1090,6 +1172,7 @@ class ConnectionManager:
     ) -> None:
         await asyncio.sleep(delay_seconds)
         self.terminal_sessions.pop(session_code, None)
+        self._redis_delete(self._terminal_session_key(session_code))
         logger.info("Cleaned terminal session snapshot for %s", session_code)
 
     def cleanup_session(self, session_code: str) -> None:
@@ -1271,6 +1354,70 @@ class ConnectionManager:
                     "player_id": player_id,
                     "message": message,
                     "critical": critical,
+                }
+            ),
+        )
+
+    async def _disconnect_local_player(
+        self,
+        session_code: str,
+        player_id: str,
+        *,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        close_code: int = 4000,
+        reason: str = "Disconnected",
+    ) -> int:
+        disconnected_count = 0
+        connections = list(self.get_player_connections(session_code, player_id).items())
+        for ws_id, connection_info in connections:
+            websocket = connection_info.get("websocket")
+            if not websocket:
+                continue
+
+            for message in messages or []:
+                await self.send_personal_message(message, websocket)
+
+            try:
+                await websocket.close(code=close_code, reason=reason)
+            except Exception as exc:
+                logger.debug("Error closing player websocket %s: %s", ws_id, exc)
+
+            if ws_id in self.active_connections.get(session_code, {}):
+                del self.active_connections[session_code][ws_id]
+            self.websocket_registry.pop(ws_id, None)
+            self._remove_presence(session_code, ws_id)
+            disconnected_count += 1
+
+        if session_code in self.active_connections and not self.active_connections[session_code]:
+            self.active_connections.pop(session_code, None)
+
+        return disconnected_count
+
+    async def disconnect_player_everywhere(
+        self,
+        session_code: str,
+        player_id: str,
+        *,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        close_code: int = 4000,
+        reason: str = "Disconnected",
+    ) -> None:
+        await asyncio.gather(
+            self._disconnect_local_player(
+                session_code=session_code,
+                player_id=player_id,
+                messages=messages,
+                close_code=close_code,
+                reason=reason,
+            ),
+            websocket_bus.publish(
+                {
+                    "kind": "disconnect_player",
+                    "session_code": session_code,
+                    "player_id": player_id,
+                    "messages": messages or [],
+                    "close_code": close_code,
+                    "reason": reason,
                 }
             ),
         )
@@ -1463,6 +1610,16 @@ class ConnectionManager:
                 player_id=event["player_id"],
                 message=event["message"],
                 critical=bool(event.get("critical")),
+            )
+            return
+
+        if kind == "disconnect_player":
+            await self._disconnect_local_player(
+                session_code=event["session_code"],
+                player_id=event["player_id"],
+                messages=event.get("messages") or [],
+                close_code=int(event.get("close_code") or 4000),
+                reason=event.get("reason") or "Disconnected",
             )
             return
 
@@ -1897,13 +2054,14 @@ class ConnectionManager:
         self, session_code: str, player_id: str, answered: bool = True
     ):
         """Set the answered status for a specific player in a session"""
-        if session_code not in self.active_connections:
-            logger.warning(
-                f"Session {session_code} not found when setting player_answered"
-            )
-            return False
+        updated_count = self._update_shared_presence_metadata(
+            session_code,
+            lambda metadata: metadata.get("client_type") == "mobile"
+            and metadata.get("player_id") == player_id,
+            lambda metadata: metadata.update({"player_answered": answered}),
+        )
 
-        for connection_info in self.active_connections[session_code].values():
+        for connection_info in self.active_connections.get(session_code, {}).values():
             if (
                 connection_info.get("player_id") == player_id
                 and connection_info.get("client_type") == "mobile"
@@ -1912,26 +2070,28 @@ class ConnectionManager:
                 ws_id = connection_info.get("ws_id")
                 if ws_id:
                     self._upsert_presence(session_code, ws_id, connection_info)
-                logger.debug(
-                    f"Set player_answered={answered} for player {player_id} in session {session_code}"
-                )
-                return True
+                updated_count += 1
+
+        if updated_count:
+            logger.debug(
+                f"Set player_answered={answered} for player {player_id} in session {session_code}"
+            )
+            return True
 
         logger.warning(
-            f"Player {player_id} not found in session {session_code} connections"
+            f"Player {player_id} not found in shared or local session {session_code} connections"
         )
         return False
 
     def reset_all_players_answered(self, session_code: str):
-        """Reset the answered status for all players in a session (e.g., when new question starts)"""
-        if session_code not in self.active_connections:
-            logger.warning(
-                f"Session {session_code} not found when resetting player_answered"
-            )
-            return
+        """Reset the answered status for all players in a session."""
+        count = self._update_shared_presence_metadata(
+            session_code,
+            lambda metadata: metadata.get("client_type") == "mobile",
+            lambda metadata: metadata.update({"player_answered": False}),
+        )
 
-        count = 0
-        for connection_info in self.active_connections[session_code].values():
+        for connection_info in self.active_connections.get(session_code, {}).values():
             if connection_info.get("client_type") == "mobile":
                 connection_info["player_answered"] = False
                 ws_id = connection_info.get("ws_id")
@@ -1940,11 +2100,20 @@ class ConnectionManager:
                 count += 1
 
         logger.debug(
-            f"Reset player_answered for {count} players in session {session_code}"
+            f"Reset player_answered for {count} shared/local players in session {session_code}"
         )
 
     def get_player_answered_status(self, session_code: str, player_id: str) -> bool:
         """Get the answered status for a specific player"""
+        shared_presence = self._shared_presence_metadata(session_code)
+        if shared_presence:
+            return any(
+                metadata.get("client_type") == "mobile"
+                and metadata.get("player_id") == player_id
+                and bool(metadata.get("player_answered", False))
+                for metadata in shared_presence
+            )
+
         if session_code not in self.active_connections:
             return False
 
@@ -1959,6 +2128,17 @@ class ConnectionManager:
 
     def get_answered_count(self, session_code: str) -> int:
         """Get the count of players who have answered in a session"""
+        shared_presence = self._shared_presence_metadata(session_code)
+        if shared_presence:
+            answered_players = {
+                metadata.get("player_id")
+                for metadata in shared_presence
+                if metadata.get("client_type") == "mobile"
+                and metadata.get("player_id")
+                and metadata.get("player_answered", False)
+            }
+            return len(answered_players)
+
         if session_code not in self.active_connections:
             return 0
 
@@ -2568,21 +2748,82 @@ class ConnectionManager:
 
     def set_beat_clock_state(self, session_code: str, state: Dict[str, Any]) -> None:
         self.beat_clock_states[session_code] = state
-        self._redis_json_set(
-            self._shared_state_key(session_code, "beat-clock"),
-            self._json_safe_state(state),
-        )
+        meta_key, players_key = self._beat_clock_keys(session_code)
+        meta_state = {key: value for key, value in state.items() if key != "players"}
+        self._redis_json_set(meta_key, self._json_safe_state(meta_state))
+        client = websocket_bus.sync_client
+        if client:
+            try:
+                client.expire(players_key, self.SHARED_STATE_TTL_SECONDS)
+            except Exception:
+                logger.exception(
+                    "Failed to refresh Beat the Clock player state TTL for %s",
+                    session_code,
+                )
 
     def get_beat_clock_state(self, session_code: str) -> Dict[str, Any]:
-        shared_state = self._redis_json_get(
-            self._shared_state_key(session_code, "beat-clock")
-        )
-        if shared_state:
+        meta_key, players_key = self._beat_clock_keys(session_code)
+        shared_state = self._redis_json_get(meta_key)
+        client = websocket_bus.sync_client
+
+        if shared_state is None:
+            legacy_state = self._redis_json_get(
+                self._shared_state_key(session_code, "beat-clock")
+            )
+            if legacy_state is not None:
+                shared_state = {
+                    key: value for key, value in legacy_state.items() if key != "players"
+                }
+                self._redis_json_set(meta_key, self._json_safe_state(shared_state))
+                if client and legacy_state.get("players"):
+                    try:
+                        pipe = client.pipeline()
+                        for player_id, player_state in legacy_state["players"].items():
+                            pipe.hset(
+                                players_key,
+                                player_id,
+                                json.dumps(
+                                    self._json_safe_state(player_state),
+                                    separators=(",", ":"),
+                                ),
+                            )
+                        pipe.expire(players_key, self.SHARED_STATE_TTL_SECONDS)
+                        pipe.execute()
+                    except Exception:
+                        logger.exception(
+                            "Failed to migrate legacy Beat the Clock player state for %s",
+                            session_code,
+                        )
+
+        if shared_state is not None:
+            players: Dict[str, Any] = {}
+            if client:
+                try:
+                    for player_id, raw_value in client.hgetall(players_key).items():
+                        try:
+                            players[player_id] = json.loads(raw_value)
+                        except json.JSONDecodeError:
+                            continue
+                except Exception:
+                    logger.exception(
+                        "Failed to read Beat the Clock player states for %s",
+                        session_code,
+                    )
+
             local_state = self.beat_clock_states.get(session_code, {})
-            merged_state = {**shared_state, **local_state}
-            for key, value in shared_state.items():
-                if key not in {"ends_at_dt", "started_at_dt"}:
+            merged_state = {**local_state, **shared_state}
+            for key, value in local_state.items():
+                if key in {"ends_at_dt", "started_at_dt"} and key not in merged_state:
                     merged_state[key] = value
+            ends_at_raw = merged_state.get("ends_at")
+            if ends_at_raw and not merged_state.get("ends_at_dt"):
+                try:
+                    merged_state["ends_at_dt"] = datetime.fromisoformat(
+                        str(ends_at_raw).replace("Z", "")
+                    )
+                except ValueError:
+                    pass
+            merged_state["players"] = players
             self.beat_clock_states[session_code] = merged_state
             return merged_state
 
@@ -2598,9 +2839,43 @@ class ConnectionManager:
         self.set_beat_clock_state(session_code, state)
         return state
 
+    def update_beat_clock_player_state(
+        self, session_code: str, player_id: str, player_state: Dict[str, Any]
+    ) -> None:
+        state = self.beat_clock_states.setdefault(session_code, {})
+        state.setdefault("players", {})[player_id] = player_state
+        client = websocket_bus.sync_client
+        if not client:
+            return
+
+        _meta_key, players_key = self._beat_clock_keys(session_code)
+        try:
+            pipe = client.pipeline()
+            pipe.hset(
+                players_key,
+                player_id,
+                json.dumps(
+                    self._json_safe_state(player_state),
+                    separators=(",", ":"),
+                ),
+            )
+            pipe.expire(players_key, self.SHARED_STATE_TTL_SECONDS)
+            pipe.execute()
+        except Exception:
+            logger.exception(
+                "Failed to update Beat the Clock player state for %s/%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+
     def clear_beat_clock_state(self, session_code: str) -> None:
         self.beat_clock_states.pop(session_code, None)
-        self._redis_delete(self._shared_state_key(session_code, "beat-clock"))
+        meta_key, players_key = self._beat_clock_keys(session_code)
+        self._redis_delete(
+            self._shared_state_key(session_code, "beat-clock"),
+            meta_key,
+            players_key,
+        )
 
 
 # Global connection manager instance

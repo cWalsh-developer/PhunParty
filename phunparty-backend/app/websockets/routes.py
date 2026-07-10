@@ -2976,13 +2976,10 @@ async def kick_player_for_fair_play(
         answer_status="kicked",
         message=message,
     )
-    connections = manager.get_player_connections(session_code, player_id)
-    for connection_info in connections.values():
-        websocket = connection_info.get("websocket")
-        if not websocket:
-            continue
-
-        await manager.send_personal_message(
+    await manager.disconnect_player_everywhere(
+        session_code,
+        player_id,
+        messages=[
             {
                 "type": "fair_play_status_update",
                 "data": {
@@ -2999,9 +2996,6 @@ async def kick_player_for_fair_play(
                     "message": message,
                 },
             },
-            websocket,
-        )
-        await manager.send_personal_message(
             {
                 "type": "kicked_from_session",
                 "data": {
@@ -3015,18 +3009,10 @@ async def kick_player_for_fair_play(
                     "message": message,
                 },
             },
-            websocket,
-        )
-        await asyncio.sleep(0.25)
-        try:
-            await websocket.close(
-                code=4003,
-                reason="Removed after Fair Play strikes",
-            )
-        except Exception as e:
-            logger.debug(f"Error closing kicked player websocket: {e}")
-
-    manager.disconnect_player_by_id(session_code, player_id)
+        ],
+        close_code=4003,
+        reason="Removed after Fair Play strikes",
+    )
     await manager.broadcast_to_session(
         session_code,
         {
