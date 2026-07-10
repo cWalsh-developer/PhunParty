@@ -3020,8 +3020,7 @@ def test_beat_clock_answer_updates_redis_projection_after_db_commit():
                                                         ):
                                                             with patch.object(
                                                                 handler,
-                                                                "_broadcast_state",
-                                                                AsyncMock(),
+                                                                "schedule_state_broadcast",
                                                             ):
                                                                 await handler.handle_player_answer(
                                                                     "P1",
@@ -3033,6 +3032,53 @@ def test_beat_clock_answer_updates_redis_projection_after_db_commit():
     asyncio.run(run_test())
 
     assert events == ["response", "score", "commit", "redis_update"]
+
+
+def test_beat_clock_state_broadcast_is_debounced_per_session():
+    handler = game_handlers.BeatTheClockGameHandler("SESSION123")
+    db = MagicMock()
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = db
+    session_factory.return_value.__exit__.return_value = False
+
+    async def run_test():
+        with patch.object(
+            game_handlers,
+            "SessionLocal",
+            session_factory,
+        ):
+            with patch.object(
+                game_handlers,
+                "get_session_by_code",
+                return_value=SimpleNamespace(owner_player_id="HOST1"),
+            ):
+                with patch.object(game_handlers, "set_rls_current_player"):
+                    with patch.object(
+                        handler,
+                        "_broadcast_state",
+                        AsyncMock(),
+                    ) as broadcast:
+                        first_task = handler.schedule_state_broadcast(
+                            delay_seconds=0.01
+                        )
+                        second_task = handler.schedule_state_broadcast(
+                            delay_seconds=0.01
+                        )
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await first_task
+                        await asyncio.wait_for(second_task, timeout=1)
+
+        broadcast.assert_awaited_once_with(db)
+
+    try:
+        asyncio.run(run_test())
+    finally:
+        task = game_handlers.BeatTheClockGameHandler._state_broadcast_tasks.pop(
+            "SESSION123",
+            None,
+        )
+        if task and not task.done():
+            task.cancel()
 
 
 def test_connection_generation_rejects_stale_mobile_socket():

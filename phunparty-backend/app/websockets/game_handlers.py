@@ -357,6 +357,9 @@ class TriviaGameHandler(GameEventHandler):
 class BeatTheClockGameHandler(GameEventHandler):
     """Handler for Beat the Clock game mode."""
 
+    _state_broadcast_tasks: dict[str, asyncio.Task] = {}
+    STATE_BROADCAST_DEBOUNCE_SECONDS = 0.35
+
     def __init__(self, session_code: str):
         super().__init__(session_code, BEAT_THE_CLOCK_GAME_TYPE)
 
@@ -580,7 +583,7 @@ class BeatTheClockGameHandler(GameEventHandler):
             question_id,
         )
         await self._send_question_to_player(db, player_id, state)
-        await self._broadcast_state(db)
+        self.schedule_state_broadcast()
 
     async def _broadcast_state(self, db: Session) -> dict:
         state = manager.get_beat_clock_state(self.session_code)
@@ -601,6 +604,47 @@ class BeatTheClockGameHandler(GameEventHandler):
             critical=True,
         )
         return payload
+
+    def schedule_state_broadcast(
+        self,
+        delay_seconds: Optional[float] = None,
+    ) -> asyncio.Task:
+        delay = (
+            self.STATE_BROADCAST_DEBOUNCE_SECONDS
+            if delay_seconds is None
+            else delay_seconds
+        )
+        existing_task = self._state_broadcast_tasks.get(self.session_code)
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
+
+        async def _delayed_broadcast() -> None:
+            try:
+                await asyncio.sleep(delay)
+                with SessionLocal() as broadcast_db:
+                    session = get_session_by_code(broadcast_db, self.session_code)
+                    owner_player_id = getattr(session, "owner_player_id", None)
+                    if owner_player_id:
+                        set_rls_current_player(broadcast_db, owner_player_id)
+                    await self._broadcast_state(broadcast_db)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to broadcast debounced Beat the Clock state for %s",
+                    self.session_code,
+                )
+            finally:
+                current_task = self._state_broadcast_tasks.get(self.session_code)
+                if current_task is asyncio.current_task():
+                    self._state_broadcast_tasks.pop(self.session_code, None)
+
+        task = asyncio.create_task(
+            _delayed_broadcast(),
+            name=f"beat-clock-state-broadcast-{self.session_code}",
+        )
+        self._state_broadcast_tasks[self.session_code] = task
+        return task
 
     async def handle_game_start(self, db: Session):
         try:
@@ -1054,7 +1098,7 @@ class BeatTheClockGameHandler(GameEventHandler):
             return
 
         await self._send_question_to_player(db, player_id, state)
-        await self._broadcast_state(db)
+        self.schedule_state_broadcast()
 
     async def _finish_when_timer_expires(
         self,
