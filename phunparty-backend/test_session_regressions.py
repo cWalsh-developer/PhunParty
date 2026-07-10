@@ -2636,6 +2636,23 @@ def test_redis_bus_rejects_malformed_events():
             "session_code": "SESSION123",
         }
     )
+    assert not bus._validate_event(
+        {
+            "version": 1,
+            "kind": "session_broadcast",
+            "session_code": "SESSION123",
+            "message": {"type": "debug_shell"},
+        }
+    )
+    assert bus._validate_event(
+        {
+            "version": 1,
+            "kind": "disconnect_player",
+            "session_code": "SESSION123",
+            "player_id": "P1",
+            "messages": [{"type": "kicked_from_session"}],
+        }
+    )
 
 
 def test_redis_bus_dispatches_different_sessions_independently():

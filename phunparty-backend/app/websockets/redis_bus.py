@@ -24,6 +24,47 @@ ALLOWED_EVENT_KINDS = {
     "disconnect_player",
     "revoke_connection_generation",
 }
+ALLOWED_WS_MESSAGE_TYPES = {
+    "answer_rejected",
+    "answer_submitted",
+    "beat_clock_answer_result",
+    "beat_clock_question",
+    "beat_clock_started",
+    "beat_clock_state",
+    "buzzer_rejected",
+    "buzzer_state_update",
+    "buzzer_winner",
+    "connection_established",
+    "correct_answer",
+    "countdown_started",
+    "error",
+    "fair_play_focus_grace_started",
+    "fair_play_question_reset",
+    "fair_play_settings_updated",
+    "fair_play_status_update",
+    "game_ended",
+    "game_started",
+    "game_status_update",
+    "incorrect_answer",
+    "initial_state",
+    "intro_skipped",
+    "intro_started",
+    "kicked_from_session",
+    "ping",
+    "player_answered",
+    "player_flagged",
+    "player_joined",
+    "player_kicked",
+    "player_left",
+    "pong",
+    "preload_question",
+    "question_failed",
+    "question_started",
+    "roster_update",
+    "session_stats",
+    "sync_state",
+    "ui_update",
+}
 
 
 def redis_namespace() -> str:
@@ -141,9 +182,7 @@ class RedisWebSocketBus:
 
         if kind in {"session_broadcast", "player_message"}:
             message = event.get("message")
-            if not isinstance(message, dict) or not isinstance(
-                message.get("type"), str
-            ):
+            if not self._validate_websocket_message(message):
                 logger.warning("Rejected Redis WebSocket event with invalid message")
                 return False
 
@@ -153,8 +192,7 @@ class RedisWebSocketBus:
                 logger.warning("Rejected Redis WebSocket disconnect with bad messages")
                 return False
             if not all(
-                isinstance(message, dict) and isinstance(message.get("type"), str)
-                for message in messages
+                self._validate_websocket_message(message) for message in messages
             ):
                 logger.warning("Rejected Redis WebSocket disconnect message shape")
                 return False
@@ -164,6 +202,24 @@ class RedisWebSocketBus:
             if not isinstance(generation, str) or len(generation) > 256:
                 logger.warning("Rejected Redis WebSocket revoke with bad generation")
                 return False
+
+        return True
+
+    def _validate_websocket_message(self, message: Any) -> bool:
+        if not isinstance(message, dict):
+            return False
+
+        message_type = message.get("type")
+        if not isinstance(message_type, str):
+            return False
+        if len(message_type) > 80:
+            return False
+        if message_type not in ALLOWED_WS_MESSAGE_TYPES:
+            logger.warning(
+                "Rejected Redis WebSocket message with disallowed type: %s",
+                message_type,
+            )
+            return False
 
         return True
 
