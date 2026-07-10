@@ -102,6 +102,10 @@ class ConnectionManager:
         self.active_connections: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # websocket_id -> {session_code, websocket}
         self.websocket_registry: Dict[str, Dict[str, Any]] = {}
+        # id(websocket) -> websocket_id. Keeps hot heartbeat/ACK lookups O(1).
+        self.websocket_to_ws_id: Dict[int, str] = {}
+        # (session_code, player_id) -> websocket_ids for targeted player sends.
+        self.player_connection_index: Dict[tuple[str, str], Set[str]] = {}
         # Question queue: session_code -> {question_id: question_data}
         # Stores questions that have been broadcast so mobile clients can retrieve them
         self.question_queue: Dict[str, Dict[str, Any]] = {}
@@ -137,19 +141,77 @@ class ConnectionManager:
         self._start_heartbeat_checker()
         self._start_automatic_ping()
 
+    def _websocket_lookup_key(self, websocket: WebSocket) -> int:
+        return id(websocket)
+
+    def _register_connection_indexes(
+        self,
+        session_code: str,
+        ws_id: str,
+        connection_info: Dict[str, Any],
+    ) -> None:
+        websocket = connection_info.get("websocket")
+        if websocket:
+            self.websocket_to_ws_id[self._websocket_lookup_key(websocket)] = ws_id
+
+        if connection_info.get("client_type") == "mobile" and connection_info.get(
+            "player_id"
+        ):
+            player_key = (session_code, connection_info["player_id"])
+            self.player_connection_index.setdefault(player_key, set()).add(ws_id)
+
+    def _remove_connection_indexes(
+        self,
+        session_code: Optional[str],
+        ws_id: Optional[str],
+        connection_info: Optional[Dict[str, Any]],
+    ) -> None:
+        if not ws_id:
+            return
+
+        websocket = (connection_info or {}).get("websocket")
+        if not websocket and ws_id in self.websocket_registry:
+            websocket = self.websocket_registry[ws_id].get("websocket")
+        if websocket:
+            self.websocket_to_ws_id.pop(self._websocket_lookup_key(websocket), None)
+
+        if (
+            session_code
+            and connection_info
+            and connection_info.get("client_type") == "mobile"
+            and connection_info.get("player_id")
+        ):
+            player_key = (session_code, connection_info["player_id"])
+            ws_ids = self.player_connection_index.get(player_key)
+            if ws_ids:
+                ws_ids.discard(ws_id)
+                if not ws_ids:
+                    self.player_connection_index.pop(player_key, None)
+
+    def _ws_id_for_websocket(self, websocket: WebSocket) -> Optional[str]:
+        ws_id = self.websocket_to_ws_id.get(self._websocket_lookup_key(websocket))
+        if ws_id and ws_id in self.websocket_registry:
+            return ws_id
+
+        for registry_ws_id, info in self.websocket_registry.items():
+            if info.get("websocket") == websocket:
+                self.websocket_to_ws_id[self._websocket_lookup_key(websocket)] = (
+                    registry_ws_id
+                )
+                return registry_ws_id
+
+        return None
+
     def _connection_info_for_websocket(
         self, websocket: WebSocket
     ) -> Optional[Dict[str, Any]]:
-        for registry_info in self.websocket_registry.values():
-            if registry_info.get("websocket") != websocket:
-                continue
-
-            session_code = registry_info.get("session_code")
-            for connection_info in self.active_connections.get(
-                session_code, {}
-            ).values():
-                if connection_info.get("websocket") == websocket:
-                    return connection_info
+        ws_id = self._ws_id_for_websocket(websocket)
+        if ws_id:
+            registry_info = self.websocket_registry.get(ws_id)
+            session_code = (registry_info or {}).get("session_code")
+            connection_info = self.active_connections.get(session_code, {}).get(ws_id)
+            if connection_info:
+                return connection_info
 
         return None
 
@@ -856,11 +918,7 @@ return 0
 
     def acknowledge_event(self, websocket: WebSocket, event_id: str) -> bool:
         """Mark a critical event as acknowledged by this websocket."""
-        ws_id = None
-        for registry_ws_id, info in self.websocket_registry.items():
-            if info["websocket"] == websocket:
-                ws_id = registry_ws_id
-                break
+        ws_id = self._ws_id_for_websocket(websocket)
 
         if not ws_id:
             logger.warning(f"ACK received for {event_id} from unknown websocket")
@@ -1044,6 +1102,7 @@ return 0
             "session_code": session_code,
             "websocket": websocket,
         }
+        self._register_connection_indexes(session_code, ws_id, connection_info)
         self._upsert_presence(session_code, ws_id, connection_info)
 
         logger.info(
@@ -1189,12 +1248,11 @@ return 0
         session_code = None
         client_info = None
 
-        # Find the websocket in registry
-        for ws_id, info in self.websocket_registry.items():
-            if info["websocket"] == websocket:
-                session_code = info["session_code"]
-                client_info = self.active_connections[session_code][ws_id]
-                break
+        ws_id = self._ws_id_for_websocket(websocket)
+        if ws_id:
+            registry_info = self.websocket_registry.get(ws_id, {})
+            session_code = registry_info.get("session_code")
+            client_info = self.active_connections.get(session_code, {}).get(ws_id)
 
         if ws_id and session_code:
             if (
@@ -1230,8 +1288,8 @@ return 0
                     del self.active_connections[session_code]
 
             # Remove from registry
-            if ws_id in self.websocket_registry:
-                del self.websocket_registry[ws_id]
+            self._remove_connection_indexes(session_code, ws_id, client_info)
+            self.websocket_registry.pop(ws_id, None)
             self._remove_presence(session_code, ws_id)
             if (
                 client_info
@@ -1381,6 +1439,9 @@ return 0
         self.fair_play_frozen_players.pop(session_code, None)
         self.fair_play_player_status.pop(session_code, None)
         self.pending_focus_losses.pop(session_code, None)
+        for player_key in list(self.player_connection_index):
+            if player_key[0] == session_code:
+                self.player_connection_index.pop(player_key, None)
         self._redis_delete(
             self._shared_state_key(session_code, "phase"),
             self._shared_state_key(session_code, "current-question"),
@@ -1480,23 +1541,19 @@ return 0
         if not sent:
             return False
 
-        for ws_id, registry_info in self.websocket_registry.items():
-            if registry_info["websocket"] != websocket:
-                continue
+        ws_id = self._ws_id_for_websocket(websocket)
+        connection_info = self.active_connections.get(session_code, {}).get(ws_id)
+        if not connection_info:
+            return sent
 
-            connection_info = self.active_connections.get(session_code, {}).get(ws_id)
-            if not connection_info:
-                return sent
-
-            self._track_ack_target(
-                message_with_metadata["event_id"],
-                session_code,
-                message_with_metadata,
-                ws_id,
-                connection_info,
-            )
-            self._schedule_ack_retry(message_with_metadata["event_id"])
-            break
+        self._track_ack_target(
+            message_with_metadata["event_id"],
+            session_code,
+            message_with_metadata,
+            ws_id,
+            connection_info,
+        )
+        self._schedule_ack_retry(message_with_metadata["event_id"])
 
         return sent
 
@@ -1575,6 +1632,7 @@ return 0
 
             if ws_id in self.active_connections.get(session_code, {}):
                 del self.active_connections[session_code][ws_id]
+            self._remove_connection_indexes(session_code, ws_id, connection_info)
             self.websocket_registry.pop(ws_id, None)
             self._remove_presence(session_code, ws_id)
             self._clear_player_connection_generation(
@@ -1617,6 +1675,7 @@ return 0
 
             if ws_id in self.active_connections.get(session_code, {}):
                 del self.active_connections[session_code][ws_id]
+            self._remove_connection_indexes(session_code, ws_id, connection_info)
             self.websocket_registry.pop(ws_id, None)
             self._remove_presence(session_code, ws_id)
             disconnected_count += 1
@@ -2111,15 +2170,9 @@ return 0
 
     def get_player_name_from_websocket(self, websocket: WebSocket) -> str:
         """Get player name from websocket for logging purposes"""
-        for ws_id, info in self.websocket_registry.items():
-            if info["websocket"] == websocket:
-                session_code = info["session_code"]
-                if (
-                    session_code in self.active_connections
-                    and ws_id in self.active_connections[session_code]
-                ):
-                    conn_info = self.active_connections[session_code][ws_id]
-                    return conn_info.get("player_name") or "Unknown"
+        connection_info = self._connection_info_for_websocket(websocket)
+        if connection_info:
+            return connection_info.get("player_name") or "Unknown"
         return "Unknown"
 
     def get_player_connections(
@@ -2129,6 +2182,23 @@ return 0
         Get all active connections for a specific player in a session.
         Returns dict of {ws_id: connection_info}
         """
+        player_key = (session_code, player_id)
+        indexed_ws_ids = self.player_connection_index.get(player_key)
+        if indexed_ws_ids:
+            player_connections = {}
+            stale_ws_ids = []
+            for ws_id in indexed_ws_ids:
+                conn_info = self.active_connections.get(session_code, {}).get(ws_id)
+                if conn_info:
+                    player_connections[ws_id] = conn_info
+                else:
+                    stale_ws_ids.append(ws_id)
+            for ws_id in stale_ws_ids:
+                indexed_ws_ids.discard(ws_id)
+            if not indexed_ws_ids:
+                self.player_connection_index.pop(player_key, None)
+            return player_connections
+
         if session_code not in self.active_connections:
             return {}
 
@@ -2139,6 +2209,7 @@ return 0
                 and conn_info.get("player_id") == player_id
             ):
                 player_connections[ws_id] = conn_info
+                self.player_connection_index.setdefault(player_key, set()).add(ws_id)
 
         return player_connections
 
@@ -2147,30 +2218,24 @@ return 0
         Disconnect all connections for a specific player.
         Returns number of connections disconnected.
         """
-        if session_code not in self.active_connections:
+        connections_to_remove = list(
+            self.get_player_connections(session_code, player_id).items()
+        )
+        if not connections_to_remove:
             return 0
 
         disconnected_count = 0
-        connections_to_remove = []
-
-        # Find all connections for this player
-        for ws_id, conn_info in self.active_connections[session_code].items():
-            if (
-                conn_info.get("client_type") == "mobile"
-                and conn_info.get("player_id") == player_id
-            ):
-                connections_to_remove.append((ws_id, conn_info))
 
         # Remove them
         for ws_id, conn_info in connections_to_remove:
             # Remove from session connections
-            if ws_id in self.active_connections[session_code]:
+            if ws_id in self.active_connections.get(session_code, {}):
                 del self.active_connections[session_code][ws_id]
                 disconnected_count += 1
 
             # Remove from registry
-            if ws_id in self.websocket_registry:
-                del self.websocket_registry[ws_id]
+            self._remove_connection_indexes(session_code, ws_id, conn_info)
+            self.websocket_registry.pop(ws_id, None)
             self._remove_presence(session_code, ws_id)
             self._clear_player_connection_generation(
                 session_code,
@@ -2681,43 +2746,33 @@ return 0
 
     def update_heartbeat(self, websocket: WebSocket):
         """Update the last heartbeat time for a websocket"""
-        for ws_id, info in self.websocket_registry.items():
-            if info["websocket"] == websocket:
-                session_code = info["session_code"]
-                if (
-                    session_code in self.active_connections
-                    and ws_id in self.active_connections[session_code]
-                ):
-                    self.active_connections[session_code][ws_id][
-                        "last_heartbeat"
-                    ] = datetime.now()
-                    self.active_connections[session_code][ws_id][
-                        "connection_state"
-                    ] = "connected"
-                    self._upsert_presence(
-                        session_code,
-                        ws_id,
-                        self.active_connections[session_code][ws_id],
-                    )
-                break
+        ws_id = self._ws_id_for_websocket(websocket)
+        if not ws_id:
+            return
+
+        session_code = self.websocket_registry.get(ws_id, {}).get("session_code")
+        connection_info = self.active_connections.get(session_code, {}).get(ws_id)
+        if not connection_info:
+            return
+
+        connection_info["last_heartbeat"] = datetime.now()
+        connection_info["connection_state"] = "connected"
+        self._upsert_presence(session_code, ws_id, connection_info)
 
     def mark_client_ready(self, websocket: WebSocket):
         """Mark a client as ready after they acknowledge connection"""
-        for ws_id, info in self.websocket_registry.items():
-            if info["websocket"] == websocket:
-                session_code = info["session_code"]
-                if (
-                    session_code in self.active_connections
-                    and ws_id in self.active_connections[session_code]
-                ):
-                    self.active_connections[session_code][ws_id]["is_ready"] = True
-                    self._upsert_presence(
-                        session_code,
-                        ws_id,
-                        self.active_connections[session_code][ws_id],
-                    )
-                    logger.info(f"Client {ws_id} marked as ready")
-                break
+        ws_id = self._ws_id_for_websocket(websocket)
+        if not ws_id:
+            return
+
+        session_code = self.websocket_registry.get(ws_id, {}).get("session_code")
+        connection_info = self.active_connections.get(session_code, {}).get(ws_id)
+        if not connection_info:
+            return
+
+        connection_info["is_ready"] = True
+        self._upsert_presence(session_code, ws_id, connection_info)
+        logger.info(f"Client {ws_id} marked as ready")
 
     async def broadcast_player_roster_update(self, session_code: str):
         """Broadcast the authoritative mobile player roster to host clients."""

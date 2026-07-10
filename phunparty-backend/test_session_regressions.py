@@ -2237,6 +2237,43 @@ def test_connection_generation_rejects_stale_mobile_socket():
         manager.websocket_registry.pop(ws_id, None)
 
 
+def test_connection_indexes_track_websocket_and_player_connections():
+    websocket = MagicMock()
+    session_code = "SESSION789"
+    player_id = "P1"
+    ws_id = "ws_indexed"
+    connection_info = {
+        "websocket": websocket,
+        "client_type": "mobile",
+        "player_id": player_id,
+        "player_name": "Alice",
+    }
+
+    manager.active_connections[session_code] = {ws_id: connection_info}
+    manager.websocket_registry[ws_id] = {
+        "session_code": session_code,
+        "websocket": websocket,
+    }
+
+    try:
+        manager._register_connection_indexes(session_code, ws_id, connection_info)
+
+        assert manager._connection_info_for_websocket(websocket) is connection_info
+        assert manager.get_player_connections(session_code, player_id) == {
+            ws_id: connection_info
+        }
+
+        manager._remove_connection_indexes(session_code, ws_id, connection_info)
+
+        assert id(websocket) not in manager.websocket_to_ws_id
+        assert (session_code, player_id) not in manager.player_connection_index
+    finally:
+        manager.active_connections.pop(session_code, None)
+        manager.websocket_registry.pop(ws_id, None)
+        manager.websocket_to_ws_id.pop(id(websocket), None)
+        manager.player_connection_index.pop((session_code, player_id), None)
+
+
 def test_revoke_connection_generation_closes_only_matching_socket():
     stale_socket = MagicMock()
     stale_socket.close = AsyncMock()
