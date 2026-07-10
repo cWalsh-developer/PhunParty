@@ -85,7 +85,8 @@ WEBSOCKET_MESSAGE_LIMITS = {
     "fair_play_focus_returned": (10, 60),
     "request_current_question": (20, 60),
 }
-WEBSOCKET_CONNECTION_LIMIT = (20, 300)
+WEBSOCKET_CONNECTION_IP_LIMIT = (120, 300)
+WEBSOCKET_AUTH_CONNECTION_LIMIT = (30, 300)
 WEBSOCKET_GLOBAL_MESSAGE_LIMIT = (120, 60)
 WEBSOCKET_BUZZER_LIMIT = (5, 3600)
 
@@ -683,7 +684,7 @@ async def websocket_endpoint(
 
     try:
         client_ip = get_websocket_client_ip(websocket)
-        limit, window_seconds = WEBSOCKET_CONNECTION_LIMIT
+        limit, window_seconds = WEBSOCKET_CONNECTION_IP_LIMIT
         allowed, retry_after = await hit_websocket_limit(
             scope="connection-ip",
             identifier=client_ip,
@@ -718,6 +719,23 @@ async def websocket_endpoint(
                 return
 
             authenticated_player_id = current_player.player_id
+            auth_limit, auth_window_seconds = WEBSOCKET_AUTH_CONNECTION_LIMIT
+            allowed, retry_after = await hit_websocket_limit(
+                scope="connection-player",
+                identifier=(f"{session_code}:{current_player.player_id}:{client_type}"),
+                limit=auth_limit,
+                window_seconds=auth_window_seconds,
+            )
+            if not allowed:
+                logger.warning(
+                    "Authenticated WebSocket connection rate limit exceeded: session=%s player=%s client_type=%s retry_after=%s",
+                    session_code,
+                    safe_player_ref(current_player.player_id),
+                    client_type,
+                    retry_after,
+                )
+                await websocket.close(code=4008, reason="Too many connection attempts")
+                return
 
             if client_type == "mobile":
                 player_id = current_player.player_id
