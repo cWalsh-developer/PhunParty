@@ -300,6 +300,10 @@ def get_all_games(db: Session) -> list[Game]:
 
 def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
     """Join an existing game session."""
+    # Do not lock the host-owned session row here. Under RLS, mobile players can
+    # be allowed to read/join a public session without being allowed to update it.
+    # The join mutates the player/assignment/score rows, which are protected below
+    # by the player row lock and unique database constraints.
     gameSession = (
         db.query(GameSession)
         .join(
@@ -308,7 +312,6 @@ def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
         )
         .filter(GameSession.session_code == session_code)
         .filter(GameSessionState.is_active.is_(True))
-        .with_for_update(of=GameSession)
         .first()
     )
     if not gameSession:

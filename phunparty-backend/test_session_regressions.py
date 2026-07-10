@@ -519,7 +519,7 @@ def test_check_and_advance_game_skips_stale_question_after_lock():
     assert result["current_question_index"] == 1
 
 
-def test_join_game_locks_active_session_and_player_rows():
+def test_join_game_checks_active_session_without_locking_host_row():
     mock_db = MagicMock()
     game_session = SimpleNamespace(session_code="SESSION123")
     player = SimpleNamespace(player_id="P1", active_game_code=None)
@@ -542,7 +542,7 @@ def test_join_game_locks_active_session_and_player_rows():
             result = dbCRUD.join_game(mock_db, "SESSION123", "P1")
 
     assert result is game_session
-    game_query.with_for_update.assert_called_once_with(of=dbCRUD.GameSession)
+    game_query.with_for_update.assert_not_called()
     player_query.with_for_update.assert_called_once_with()
     assign_player.assert_called_once_with(mock_db, "P1", "SESSION123")
     create_score.assert_called_once_with(mock_db, "SESSION123", "P1")
@@ -1919,51 +1919,39 @@ def test_fair_play_window_violation_defaults_to_multi_window_reason():
 
 
 def test_kick_player_for_fair_play_sends_status_before_closing_socket():
-    websocket = MagicMock()
-    websocket.close = AsyncMock()
     db = MagicMock()
 
     with patch.object(
         routes, "get_player_by_ID", return_value=SimpleNamespace(player_name="Alice")
     ):
         with patch.object(routes, "manager") as mock_manager:
-            mock_manager.get_player_connections.return_value = {
-                "ws1": {"websocket": websocket}
-            }
-            mock_manager.send_personal_message = AsyncMock(return_value=True)
+            mock_manager.disconnect_player_everywhere = AsyncMock()
             mock_manager.broadcast_to_session = AsyncMock()
             mock_manager.broadcast_player_roster_update = AsyncMock()
-            with patch.object(routes.asyncio, "sleep", new_callable=AsyncMock) as sleep:
-                asyncio.run(
-                    routes.kick_player_for_fair_play(
-                        "SESSION123",
-                        "P1",
-                        3,
-                        db,
-                    )
+            asyncio.run(
+                routes.kick_player_for_fair_play(
+                    "SESSION123",
+                    "P1",
+                    3,
+                    db,
                 )
+            )
 
-    personal_messages = [
-        call.args[0]["type"]
-        for call in mock_manager.send_personal_message.await_args_list
+    disconnect_kwargs = mock_manager.disconnect_player_everywhere.await_args.kwargs
+    disconnect_messages = disconnect_kwargs["messages"]
+    assert [message["type"] for message in disconnect_messages] == [
+        "fair_play_status_update",
+        "kicked_from_session",
     ]
-    assert personal_messages == ["fair_play_status_update", "kicked_from_session"]
-    fair_play_payload = mock_manager.send_personal_message.await_args_list[0].args[0][
-        "data"
-    ]
-    kicked_payload = mock_manager.send_personal_message.await_args_list[1].args[0][
-        "data"
-    ]
+    fair_play_payload = disconnect_messages[0]["data"]
+    kicked_payload = disconnect_messages[1]["data"]
     assert fair_play_payload["is_kicked"] is True
     assert fair_play_payload["strike_count"] == 3
     assert fair_play_payload["player_name"] == "Alice"
     assert kicked_payload["is_kicked"] is True
     assert kicked_payload["player_name"] == "Alice"
-    sleep.assert_awaited_once_with(0.25)
-    websocket.close.assert_awaited_once_with(
-        code=4003,
-        reason="Removed after Fair Play strikes",
-    )
+    assert disconnect_kwargs["close_code"] == 4003
+    assert disconnect_kwargs["reason"] == "Removed after Fair Play strikes"
     broadcast_kwargs = mock_manager.broadcast_to_session.await_args.kwargs
     assert "exclude_client_types" not in broadcast_kwargs
     kicked_broadcast = mock_manager.broadcast_to_session.await_args.args[1]["data"]
