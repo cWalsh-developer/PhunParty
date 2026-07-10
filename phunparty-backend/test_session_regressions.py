@@ -631,6 +631,72 @@ def test_submit_player_answer_skips_locked_progression_when_still_waiting():
     assert result["game_state"]["waiting_for_players"] is True
 
 
+def test_submit_player_answer_commits_before_unlocked_progression_precheck():
+    events = []
+    question = SimpleNamespace(
+        answer="A",
+        accepted_answers=[],
+        difficulty="easy",
+        question_options=["A", "B", "C"],
+    )
+    game_state = SimpleNamespace(
+        is_active=True,
+        isstarted=True,
+        current_question_id="Q1",
+        current_question_index=0,
+        total_questions=5,
+        fair_play_enabled=False,
+    )
+    mock_db = MagicMock()
+
+    def commit():
+        events.append("commit")
+
+    def precheck(db, session_code, question_id, progression_state):
+        events.append("precheck")
+        return {
+            "players_total": 2,
+            "players_answered": 1,
+            "waiting_for_players": True,
+            "ready_for_progression": False,
+            "progression_lock_skipped": True,
+        }
+
+    mock_db.commit.side_effect = commit
+
+    with patch.object(game_logic, "get_game_session_state", return_value=game_state):
+        with patch.object(game_logic, "get_player_response", return_value=None):
+            with patch.object(game_logic, "get_question_by_id", return_value=question):
+                with patch.object(game_logic, "create_player_response"):
+                    with patch.object(game_logic, "update_scores"):
+                        with patch.object(
+                            game_logic,
+                            "get_session_by_code",
+                            return_value=SimpleNamespace(owner_player_id="HOST1"),
+                        ):
+                            with patch.object(game_logic, "set_rls_current_player"):
+                                with patch.object(
+                                    game_logic,
+                                    "check_progression_readiness_without_lock",
+                                    side_effect=precheck,
+                                ):
+                                    with patch.object(
+                                        game_logic,
+                                        "check_and_advance_game",
+                                    ) as locked_progression:
+                                        result = game_logic.submit_player_answer(
+                                            mock_db,
+                                            "SESSION123",
+                                            "P1",
+                                            "Q1",
+                                            "A",
+                                        )
+
+    assert events == ["commit", "precheck"]
+    locked_progression.assert_not_called()
+    assert result["game_state"]["waiting_for_players"] is True
+
+
 def test_buzzer_hard_answer_payload_uses_text_input_without_options():
     handler = game_handlers.BuzzerGameHandler("SESSION123")
 
