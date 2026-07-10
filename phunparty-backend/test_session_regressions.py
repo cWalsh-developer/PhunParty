@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 import types
@@ -48,10 +49,93 @@ from app.logic import answer_validation, game_logic
 from app.routes import players as player_routes
 from app.schemas.game_state_models import GameSessionState
 from app.security import game_phase
-from app.websockets import game_handlers, game_lifecycle, game_modes, routes, scheduler
+from app.websockets import (
+    game_handlers,
+    game_lifecycle,
+    game_modes,
+    redis_bus,
+    routes,
+    scheduler,
+)
 from app.websockets.manager import SessionPhase, manager
 
 sqlalchemy.create_engine = _real_create_engine
+
+
+class _FakeRedisPipeline:
+    def __init__(self, redis_client):
+        self.redis_client = redis_client
+        self.operations = []
+
+    def hset(self, key, field, value):
+        self.operations.append(("hset", key, field, value))
+        return self
+
+    def hdel(self, key, field):
+        self.operations.append(("hdel", key, field))
+        return self
+
+    def expire(self, key, ttl):
+        self.operations.append(("expire", key, ttl))
+        return self
+
+    def execute(self):
+        for operation in self.operations:
+            if operation[0] == "hset":
+                _, key, field, value = operation
+                self.redis_client.hset(key, field, value)
+            elif operation[0] == "hdel":
+                _, key, field = operation
+                self.redis_client.hdel(key, field)
+        self.operations.clear()
+
+
+class _FakeRedis:
+    def __init__(self):
+        self.values = {}
+        self.hashes = {}
+        self.eval_calls = []
+
+    def pipeline(self):
+        return _FakeRedisPipeline(self)
+
+    def hset(self, key, field, value):
+        self.hashes.setdefault(key, {})[field] = value
+
+    def hget(self, key, field):
+        return self.hashes.get(key, {}).get(field)
+
+    def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
+
+    def hdel(self, key, field):
+        self.hashes.get(key, {}).pop(field, None)
+
+    def expire(self, key, ttl):
+        return True
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def set(self, key, value, ex=None):
+        self.values[key] = value
+
+    def delete(self, *keys):
+        for key in keys:
+            self.values.pop(key, None)
+            self.hashes.pop(key, None)
+
+    def eval(self, script, numkeys, key, *args):
+        self.eval_calls.append((script, numkeys, key, args))
+        if "redis.call('GET', KEYS[1]) == ARGV[1]" in script:
+            if self.values.get(key) == args[0]:
+                self.values.pop(key, None)
+                return 1
+            return 0
+
+        old = self.values.get(key)
+        self.values[key] = args[0]
+        return old
 
 
 def test_game_session_state_model_restores_timestamp_columns():
@@ -1956,6 +2040,183 @@ def test_kick_player_for_fair_play_sends_status_before_closing_socket():
     assert "exclude_client_types" not in broadcast_kwargs
     kicked_broadcast = mock_manager.broadcast_to_session.await_args.args[1]["data"]
     assert kicked_broadcast["player_name"] == "Alice"
+
+
+def test_redis_bus_uses_configured_namespace_for_default_channel():
+    with patch.dict(
+        os.environ,
+        {"REDIS_NAMESPACE": "phun:test", "WS_REDIS_CHANNEL": ""},
+        clear=False,
+    ):
+        bus = redis_bus.RedisWebSocketBus()
+
+    assert bus.namespace == "phun:test"
+    assert bus.channel == "phun:test:ws:events"
+    assert bus.key("session", "SESSION123", "presence") == (
+        "phun:test:session:SESSION123:presence"
+    )
+
+
+def test_redis_bus_rejects_malformed_events():
+    bus = redis_bus.RedisWebSocketBus()
+
+    assert bus._validate_event(
+        {
+            "version": 1,
+            "kind": "session_broadcast",
+            "session_code": "SESSION123",
+            "message": {"type": "roster_update"},
+        }
+    )
+    assert not bus._validate_event(
+        {
+            "version": 2,
+            "kind": "session_broadcast",
+            "session_code": "SESSION123",
+            "message": {"type": "roster_update"},
+        }
+    )
+    assert not bus._validate_event(
+        {
+            "version": 1,
+            "kind": "player_message",
+            "session_code": "SESSION123",
+            "message": {"type": "answer_result"},
+        }
+    )
+    assert not bus._validate_event(
+        {
+            "version": 1,
+            "kind": "unknown",
+            "session_code": "SESSION123",
+        }
+    )
+
+
+def test_fair_play_status_uses_per_player_redis_hash_fields():
+    fake_redis = _FakeRedis()
+
+    with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+        manager.fair_play_player_status.pop("SESSION123", None)
+        manager.update_fair_play_status("SESSION123", "P1", strike_count=1)
+        manager.update_fair_play_status("SESSION123", "P2", strike_count=2)
+
+        p1_status = manager.get_fair_play_status("SESSION123", "P1")
+        p2_status = manager.get_fair_play_status("SESSION123", "P2")
+
+    status_key = manager._fair_play_status_key("SESSION123")
+    assert set(fake_redis.hashes[status_key]) == {"P1", "P2"}
+    assert json.loads(fake_redis.hashes[status_key]["P1"])["strike_count"] == 1
+    assert p1_status["strike_count"] == 1
+    assert p2_status["strike_count"] == 2
+
+
+def test_fair_play_freeze_reset_reads_per_player_redis_hash_fields():
+    fake_redis = _FakeRedis()
+    session_code = "SESSION123"
+
+    with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+        manager.fair_play_frozen_players.pop(session_code, None)
+        manager.fair_play_player_status.pop(session_code, None)
+        manager.freeze_player_for_question(session_code, "P1", "Q1")
+        manager.freeze_player_for_question(session_code, "P2", "Q2")
+        manager.fair_play_frozen_players.pop(session_code, None)
+
+        manager.reset_fair_play_freezes_for_question(session_code, "Q2")
+
+        frozen_key = manager._fair_play_frozen_key(session_code)
+        assert fake_redis.hashes[frozen_key] == {"P2": "Q2"}
+        assert manager.get_fair_play_status(session_code, "P1")["is_frozen"] is False
+        assert manager.get_fair_play_status(session_code, "P2")["is_frozen"] is True
+
+
+def test_connection_generation_rejects_stale_mobile_socket():
+    fake_redis = _FakeRedis()
+    websocket = MagicMock()
+    session_code = "SESSION123"
+    player_id = "P1"
+    ws_id = "ws_old"
+    old_generation = "worker-a:ws_old"
+    fake_redis.values[manager._player_generation_key(session_code, player_id)] = (
+        "worker-b:ws_new"
+    )
+
+    manager.active_connections[session_code] = {
+        ws_id: {
+            "websocket": websocket,
+            "client_type": "mobile",
+            "player_id": player_id,
+            "connection_generation": old_generation,
+        }
+    }
+    manager.websocket_registry[ws_id] = {
+        "session_code": session_code,
+        "websocket": websocket,
+    }
+
+    try:
+        with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+            assert (
+                manager.connection_is_current(websocket, session_code, player_id)
+                is False
+            )
+    finally:
+        manager.active_connections.pop(session_code, None)
+        manager.websocket_registry.pop(ws_id, None)
+
+
+def test_revoke_connection_generation_closes_only_matching_socket():
+    stale_socket = MagicMock()
+    stale_socket.close = AsyncMock()
+    current_socket = MagicMock()
+    current_socket.close = AsyncMock()
+    session_code = "SESSION456"
+    player_id = "P1"
+
+    manager.active_connections[session_code] = {
+        "ws_stale": {
+            "websocket": stale_socket,
+            "client_type": "mobile",
+            "player_id": player_id,
+            "connection_generation": "worker-a:ws_stale",
+        },
+        "ws_current": {
+            "websocket": current_socket,
+            "client_type": "mobile",
+            "player_id": player_id,
+            "connection_generation": "worker-b:ws_current",
+        },
+    }
+    manager.websocket_registry["ws_stale"] = {
+        "session_code": session_code,
+        "websocket": stale_socket,
+    }
+    manager.websocket_registry["ws_current"] = {
+        "session_code": session_code,
+        "websocket": current_socket,
+    }
+
+    try:
+        disconnected = asyncio.run(
+            manager._disconnect_local_generation(
+                session_code,
+                player_id,
+                "worker-a:ws_stale",
+                close_code=4000,
+                reason="New connection established",
+            )
+        )
+    finally:
+        manager.active_connections.pop(session_code, None)
+        manager.websocket_registry.pop("ws_stale", None)
+        manager.websocket_registry.pop("ws_current", None)
+
+    assert disconnected == 1
+    stale_socket.close.assert_awaited_once_with(
+        code=4000,
+        reason="New connection established",
+    )
+    current_socket.close.assert_not_awaited()
 
 
 def test_buzzer_ui_update_sends_answer_data_only_to_winner():

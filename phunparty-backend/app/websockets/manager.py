@@ -280,8 +280,8 @@ class ConnectionManager:
 
     def _presence_keys(self, session_code: str) -> tuple[str, str]:
         return (
-            f"phun:prod:session:{session_code}:presence",
-            f"phun:prod:session:{session_code}:presence-meta",
+            websocket_bus.key("session", session_code, "presence"),
+            websocket_bus.key("session", session_code, "presence-meta"),
         )
 
     def _beat_clock_keys(self, session_code: str) -> tuple[str, str]:
@@ -291,9 +291,26 @@ class ConnectionManager:
         )
 
     def _terminal_session_key(self, session_code: str) -> str:
-        return f"phun:prod:terminal:{session_code}"
+        return websocket_bus.key("terminal", session_code)
+
+    def _fair_play_status_key(self, session_code: str) -> str:
+        return self._shared_state_key(session_code, "fair-play-status-by-player")
+
+    def _fair_play_frozen_key(self, session_code: str) -> str:
+        return self._shared_state_key(session_code, "fair-play-frozen-by-player")
+
+    def _pending_focus_key(self, session_code: str) -> str:
+        return self._shared_state_key(session_code, "pending-focus-by-player")
+
+    def _player_generation_key(self, session_code: str, player_id: str) -> str:
+        return websocket_bus.key(
+            "session", session_code, "player-generation", player_id
+        )
 
     def _presence_member(self, ws_id: str) -> str:
+        return f"{websocket_bus.worker_id}:{ws_id}"
+
+    def _connection_generation(self, ws_id: str) -> str:
         return f"{websocket_bus.worker_id}:{ws_id}"
 
     def _presence_expiry(self, connection_info: Dict[str, Any]) -> int:
@@ -325,6 +342,7 @@ class ConnectionManager:
             or "Unknown player",
             "player_photo": connection_info.get("player_photo"),
             "player_answered": connection_info.get("player_answered", False),
+            "connection_generation": connection_info.get("connection_generation"),
             "connection_state": connection_info.get("connection_state", "connected"),
             "is_ready": bool(connection_info.get("is_ready", False)),
             "connection_confirmed": bool(
@@ -425,6 +443,78 @@ class ConnectionManager:
 
         return metadata
 
+    def _claim_player_connection_generation(
+        self, session_code: str, player_id: str, generation: str
+    ) -> Optional[str]:
+        client = websocket_bus.sync_client
+        if not client:
+            return None
+
+        key = self._player_generation_key(session_code, player_id)
+        script = """
+local old = redis.call('GET', KEYS[1])
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+return old
+"""
+        try:
+            old_generation = client.eval(
+                script,
+                1,
+                key,
+                generation,
+                str(self.PRESENCE_KEY_TTL_SECONDS),
+            )
+            return str(old_generation) if old_generation else None
+        except Exception:
+            logger.exception(
+                "Failed to claim player connection generation for %s/%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+            if websocket_bus.connected:
+                raise
+            return None
+
+    def _get_player_connection_generation(
+        self, session_code: str, player_id: str
+    ) -> Optional[str]:
+        client = websocket_bus.sync_client
+        if not client:
+            return None
+        try:
+            value = client.get(self._player_generation_key(session_code, player_id))
+            return str(value) if value else None
+        except Exception:
+            logger.exception(
+                "Failed to read player connection generation for %s/%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+            return None
+
+    def _clear_player_connection_generation(
+        self, session_code: str, player_id: str, generation: Optional[str]
+    ) -> None:
+        client = websocket_bus.sync_client
+        if not client or not generation:
+            return
+
+        key = self._player_generation_key(session_code, player_id)
+        script = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+        try:
+            client.eval(script, 1, key, generation)
+        except Exception:
+            logger.exception(
+                "Failed to clear player connection generation for %s/%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+
     def _update_shared_presence_metadata(
         self,
         session_code: str,
@@ -479,7 +569,7 @@ class ConnectionManager:
         )
 
     def _shared_state_key(self, session_code: str, name: str) -> str:
-        return f"phun:prod:session:{session_code}:{name}"
+        return websocket_bus.key("session", session_code, name)
 
     def _redis_json_get(self, key: str) -> Optional[Dict[str, Any]]:
         client = websocket_bus.sync_client
@@ -513,6 +603,70 @@ class ConnectionManager:
             client.delete(*keys)
         except Exception:
             logger.exception("Failed to delete shared state keys %s", keys)
+
+    def _redis_hash_json_get(self, key: str, field: str) -> Optional[Dict[str, Any]]:
+        client = websocket_bus.sync_client
+        if not client:
+            return None
+        try:
+            raw_value = client.hget(key, field)
+            return json.loads(raw_value) if raw_value else None
+        except Exception:
+            logger.exception("Failed to read shared hash field %s/%s", key, field)
+            return None
+
+    def _redis_hash_json_set(self, key: str, field: str, value: Dict[str, Any]) -> None:
+        client = websocket_bus.sync_client
+        if not client:
+            return
+        try:
+            pipe = client.pipeline()
+            pipe.hset(key, field, json.dumps(value, separators=(",", ":")))
+            pipe.expire(key, self.SHARED_STATE_TTL_SECONDS)
+            pipe.execute()
+        except Exception:
+            logger.exception("Failed to write shared hash field %s/%s", key, field)
+
+    def _redis_hash_get(self, key: str, field: str) -> Optional[str]:
+        client = websocket_bus.sync_client
+        if not client:
+            return None
+        try:
+            return client.hget(key, field)
+        except Exception:
+            logger.exception("Failed to read shared hash field %s/%s", key, field)
+            return None
+
+    def _redis_hash_all(self, key: str) -> Dict[str, str]:
+        client = websocket_bus.sync_client
+        if not client:
+            return {}
+        try:
+            return dict(client.hgetall(key))
+        except Exception:
+            logger.exception("Failed to read shared hash %s", key)
+            return {}
+
+    def _redis_hash_set(self, key: str, field: str, value: str) -> None:
+        client = websocket_bus.sync_client
+        if not client:
+            return
+        try:
+            pipe = client.pipeline()
+            pipe.hset(key, field, value)
+            pipe.expire(key, self.SHARED_STATE_TTL_SECONDS)
+            pipe.execute()
+        except Exception:
+            logger.exception("Failed to write shared hash field %s/%s", key, field)
+
+    def _redis_hash_delete(self, key: str, field: str) -> None:
+        client = websocket_bus.sync_client
+        if not client:
+            return
+        try:
+            client.hdel(key, field)
+        except Exception:
+            logger.exception("Failed to delete shared hash field %s/%s", key, field)
 
     def _serialize_buzzer_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
         serialized = dict(state)
@@ -862,6 +1016,7 @@ class ConnectionManager:
             )
 
         ws_id = self.generate_websocket_id(websocket)
+        connection_generation = self._connection_generation(ws_id)
 
         # Initialize session if it doesn't exist
         if session_code not in self.active_connections:
@@ -879,6 +1034,7 @@ class ConnectionManager:
             "connection_state": "connected",
             "last_heartbeat": datetime.now(),
             "ws_id": ws_id,
+            "connection_generation": connection_generation,
             "is_ready": False,  # Track if client acknowledged connection
             "connection_confirmed": False,
         }
@@ -929,10 +1085,33 @@ class ConnectionManager:
 
             # Mark connection as confirmed after successful send
             connection_info["connection_confirmed"] = True
+            old_generation = None
+            if client_type == "mobile" and player_id:
+                old_generation = self._claim_player_connection_generation(
+                    session_code,
+                    player_id,
+                    connection_generation,
+                )
             self._upsert_presence(session_code, ws_id, connection_info)
             logger.info(
                 f"Connection confirmation sent to {client_type} client (ws_id: {ws_id})"
             )
+            if (
+                client_type == "mobile"
+                and player_id
+                and old_generation
+                and old_generation != connection_generation
+            ):
+                await websocket_bus.publish(
+                    {
+                        "kind": "revoke_connection_generation",
+                        "session_code": session_code,
+                        "player_id": player_id,
+                        "generation": old_generation,
+                        "close_code": 4000,
+                        "reason": "New connection established",
+                    }
+                )
 
         except Exception as e:
             logger.error(f"Failed to send connection confirmation: {e}")
@@ -1054,7 +1233,16 @@ class ConnectionManager:
             if ws_id in self.websocket_registry:
                 del self.websocket_registry[ws_id]
             self._remove_presence(session_code, ws_id)
-            self._remove_presence(session_code, ws_id)
+            if (
+                client_info
+                and client_info.get("client_type") == "mobile"
+                and client_info.get("player_id")
+            ):
+                self._clear_player_connection_generation(
+                    session_code,
+                    client_info.get("player_id"),
+                    client_info.get("connection_generation"),
+                )
 
             logger.info(f"Client disconnected from session {session_code}")
 
@@ -1202,6 +1390,9 @@ class ConnectionManager:
             self._shared_state_key(session_code, "fair-play-status"),
             self._shared_state_key(session_code, "fair-play-frozen"),
             self._shared_state_key(session_code, "pending-focus"),
+            self._fair_play_status_key(session_code),
+            self._fair_play_frozen_key(session_code),
+            self._pending_focus_key(session_code),
         )
 
         session_key_prefix = f"{session_code}:"
@@ -1386,12 +1577,76 @@ class ConnectionManager:
                 del self.active_connections[session_code][ws_id]
             self.websocket_registry.pop(ws_id, None)
             self._remove_presence(session_code, ws_id)
+            self._clear_player_connection_generation(
+                session_code,
+                player_id,
+                connection_info.get("connection_generation"),
+            )
             disconnected_count += 1
 
-        if session_code in self.active_connections and not self.active_connections[session_code]:
+        if (
+            session_code in self.active_connections
+            and not self.active_connections[session_code]
+        ):
             self.active_connections.pop(session_code, None)
 
         return disconnected_count
+
+    async def _disconnect_local_generation(
+        self,
+        session_code: str,
+        player_id: str,
+        generation: str,
+        *,
+        close_code: int = 4000,
+        reason: str = "Connection replaced",
+    ) -> int:
+        disconnected_count = 0
+        for ws_id, connection_info in list(
+            self.get_player_connections(session_code, player_id).items()
+        ):
+            if connection_info.get("connection_generation") != generation:
+                continue
+
+            websocket = connection_info.get("websocket")
+            if websocket:
+                try:
+                    await websocket.close(code=close_code, reason=reason)
+                except Exception as exc:
+                    logger.debug("Error closing stale websocket %s: %s", ws_id, exc)
+
+            if ws_id in self.active_connections.get(session_code, {}):
+                del self.active_connections[session_code][ws_id]
+            self.websocket_registry.pop(ws_id, None)
+            self._remove_presence(session_code, ws_id)
+            disconnected_count += 1
+
+        if (
+            session_code in self.active_connections
+            and not self.active_connections[session_code]
+        ):
+            self.active_connections.pop(session_code, None)
+        return disconnected_count
+
+    def connection_is_current(
+        self, websocket: WebSocket, session_code: str, player_id: Optional[str]
+    ) -> bool:
+        if not player_id:
+            return True
+
+        connection_info = self._connection_info_for_websocket(websocket)
+        if not connection_info:
+            return False
+
+        generation = connection_info.get("connection_generation")
+        if not generation:
+            return True
+
+        current_generation = self._get_player_connection_generation(
+            session_code,
+            player_id,
+        )
+        return current_generation is None or current_generation == generation
 
     async def disconnect_player_everywhere(
         self,
@@ -1620,6 +1875,16 @@ class ConnectionManager:
                 messages=event.get("messages") or [],
                 close_code=int(event.get("close_code") or 4000),
                 reason=event.get("reason") or "Disconnected",
+            )
+            return
+
+        if kind == "revoke_connection_generation":
+            await self._disconnect_local_generation(
+                session_code=event["session_code"],
+                player_id=event["player_id"],
+                generation=event["generation"],
+                close_code=int(event.get("close_code") or 4000),
+                reason=event.get("reason") or "Connection replaced",
             )
             return
 
@@ -1886,7 +2151,7 @@ class ConnectionManager:
             return 0
 
         disconnected_count = 0
-        ws_ids_to_remove = []
+        connections_to_remove = []
 
         # Find all connections for this player
         for ws_id, conn_info in self.active_connections[session_code].items():
@@ -1894,10 +2159,10 @@ class ConnectionManager:
                 conn_info.get("client_type") == "mobile"
                 and conn_info.get("player_id") == player_id
             ):
-                ws_ids_to_remove.append(ws_id)
+                connections_to_remove.append((ws_id, conn_info))
 
         # Remove them
-        for ws_id in ws_ids_to_remove:
+        for ws_id, conn_info in connections_to_remove:
             # Remove from session connections
             if ws_id in self.active_connections[session_code]:
                 del self.active_connections[session_code][ws_id]
@@ -1906,6 +2171,12 @@ class ConnectionManager:
             # Remove from registry
             if ws_id in self.websocket_registry:
                 del self.websocket_registry[ws_id]
+            self._remove_presence(session_code, ws_id)
+            self._clear_player_connection_generation(
+                session_code,
+                player_id,
+                conn_info.get("connection_generation"),
+            )
 
         logger.info(
             f"Disconnected {disconnected_count} connection(s) for player {player_id} in session {session_code}"
@@ -2152,14 +2423,11 @@ class ConnectionManager:
     def freeze_player_for_question(
         self, session_code: str, player_id: str, question_id: str
     ) -> None:
-        frozen_players = self._redis_json_get(
-            self._shared_state_key(session_code, "fair-play-frozen")
-        ) or self.fair_play_frozen_players.get(session_code, {})
+        frozen_players = self.fair_play_frozen_players.get(session_code, {})
         frozen_players[player_id] = question_id
         self.fair_play_frozen_players[session_code] = frozen_players
-        self._redis_json_set(
-            self._shared_state_key(session_code, "fair-play-frozen"),
-            frozen_players,
+        self._redis_hash_set(
+            self._fair_play_frozen_key(session_code), player_id, question_id
         )
         self.update_fair_play_status(
             session_code,
@@ -2171,12 +2439,28 @@ class ConnectionManager:
     def is_player_frozen_for_question(
         self, session_code: str, player_id: str, question_id: str
     ) -> bool:
-        shared_frozen = self._redis_json_get(
-            self._shared_state_key(session_code, "fair-play-frozen")
+        shared_frozen = self._redis_hash_get(
+            self._fair_play_frozen_key(session_code), player_id
         )
         if shared_frozen is not None:
-            self.fair_play_frozen_players[session_code] = shared_frozen
-            return shared_frozen.get(player_id) == question_id
+            self.fair_play_frozen_players.setdefault(session_code, {})[
+                player_id
+            ] = shared_frozen
+            return shared_frozen == question_id
+
+        legacy_frozen = self._redis_json_get(
+            self._shared_state_key(session_code, "fair-play-frozen")
+        )
+        if legacy_frozen is not None:
+            self.fair_play_frozen_players[session_code] = legacy_frozen
+            frozen_question_id = legacy_frozen.get(player_id)
+            if frozen_question_id:
+                self._redis_hash_set(
+                    self._fair_play_frozen_key(session_code),
+                    player_id,
+                    frozen_question_id,
+                )
+            return frozen_question_id == question_id
 
         return (
             self.fair_play_frozen_players.get(session_code, {}).get(player_id)
@@ -2186,10 +2470,21 @@ class ConnectionManager:
     def clear_player_fair_play_freeze(
         self, session_code: str, player_id: str, question_id: Optional[str] = None
     ) -> None:
-        frozen_players = self._redis_json_get(
-            self._shared_state_key(session_code, "fair-play-frozen")
-        ) or self.fair_play_frozen_players.get(session_code)
-        if not frozen_players:
+        frozen_question_id = self._redis_hash_get(
+            self._fair_play_frozen_key(session_code), player_id
+        )
+        frozen_players = self.fair_play_frozen_players.get(session_code)
+        if frozen_question_id is None and frozen_players:
+            frozen_question_id = frozen_players.get(player_id)
+        if frozen_question_id is None:
+            legacy_frozen = self._redis_json_get(
+                self._shared_state_key(session_code, "fair-play-frozen")
+            )
+            if legacy_frozen:
+                self.fair_play_frozen_players[session_code] = legacy_frozen
+                frozen_players = legacy_frozen
+                frozen_question_id = legacy_frozen.get(player_id)
+        if frozen_question_id is None:
             self.update_fair_play_status(
                 session_code,
                 player_id,
@@ -2199,20 +2494,16 @@ class ConnectionManager:
             )
             return
 
-        frozen_question_id = frozen_players.get(player_id)
         if question_id is not None and frozen_question_id != question_id:
             return
 
-        frozen_players.pop(player_id, None)
+        if frozen_players:
+            frozen_players.pop(player_id, None)
+        self._redis_hash_delete(self._fair_play_frozen_key(session_code), player_id)
         if not frozen_players:
             self.fair_play_frozen_players.pop(session_code, None)
-            self._redis_delete(self._shared_state_key(session_code, "fair-play-frozen"))
         else:
             self.fair_play_frozen_players[session_code] = frozen_players
-            self._redis_json_set(
-                self._shared_state_key(session_code, "fair-play-frozen"),
-                frozen_players,
-            )
 
         self.update_fair_play_status(
             session_code,
@@ -2226,15 +2517,19 @@ class ConnectionManager:
         self, session_code: str, player_id: str, **status: Any
     ) -> Dict[str, Any]:
         """Store host-visible Fair Play state for roster updates."""
-        session_status = self._redis_json_get(
-            self._shared_state_key(session_code, "fair-play-status")
-        ) or self.fair_play_player_status.setdefault(session_code, {})
+        session_status = self.fair_play_player_status.setdefault(session_code, {})
         player_status = session_status.setdefault(player_id, {})
+        shared_player_status = self._redis_hash_json_get(
+            self._fair_play_status_key(session_code), player_id
+        )
+        if shared_player_status:
+            player_status.update(shared_player_status)
         player_status.update(status)
         self.fair_play_player_status[session_code] = session_status
-        self._redis_json_set(
-            self._shared_state_key(session_code, "fair-play-status"),
-            session_status,
+        self._redis_hash_json_set(
+            self._fair_play_status_key(session_code),
+            player_id,
+            player_status,
         )
         for connection_info in self.get_player_connections(
             session_code, player_id
@@ -2245,12 +2540,28 @@ class ConnectionManager:
         return player_status
 
     def get_fair_play_status(self, session_code: str, player_id: str) -> Dict[str, Any]:
-        shared_status = self._redis_json_get(
+        shared_player_status = self._redis_hash_json_get(
+            self._fair_play_status_key(session_code), player_id
+        )
+        if shared_player_status is not None:
+            self.fair_play_player_status.setdefault(session_code, {})[
+                player_id
+            ] = shared_player_status
+            return dict(shared_player_status)
+
+        legacy_status = self._redis_json_get(
             self._shared_state_key(session_code, "fair-play-status")
         )
-        if shared_status is not None:
-            self.fair_play_player_status[session_code] = shared_status
-            return dict(shared_status.get(player_id, {}))
+        if legacy_status is not None:
+            self.fair_play_player_status[session_code] = legacy_status
+            player_status = dict(legacy_status.get(player_id, {}))
+            if player_status:
+                self._redis_hash_json_set(
+                    self._fair_play_status_key(session_code),
+                    player_id,
+                    player_status,
+                )
+            return player_status
 
         return dict(
             self.fair_play_player_status.get(session_code, {}).get(player_id, {})
@@ -2259,13 +2570,21 @@ class ConnectionManager:
     def reset_fair_play_freezes_for_question(
         self, session_code: str, question_id: str
     ) -> None:
-        frozen_players = self.fair_play_frozen_players.get(session_code)
+        frozen_players = dict(self.fair_play_frozen_players.get(session_code, {}))
+        shared_frozen_players = self._redis_hash_all(
+            self._fair_play_frozen_key(session_code)
+        )
+        frozen_players.update(shared_frozen_players)
+
         if not frozen_players:
             return
 
         for player_id, frozen_question_id in list(frozen_players.items()):
             if frozen_question_id != question_id:
                 frozen_players.pop(player_id, None)
+                self._redis_hash_delete(
+                    self._fair_play_frozen_key(session_code), player_id
+                )
                 self.update_fair_play_status(
                     session_code,
                     player_id,
@@ -2276,6 +2595,8 @@ class ConnectionManager:
 
         if not frozen_players:
             self.fair_play_frozen_players.pop(session_code, None)
+        else:
+            self.fair_play_frozen_players[session_code] = frozen_players
 
     def record_pending_focus_loss(
         self,
@@ -2292,26 +2613,38 @@ class ConnectionManager:
             "reason": reason,
             "lost_at": lost_at,
         }
-        session_pending = self._redis_json_get(
-            self._shared_state_key(session_code, "pending-focus")
-        ) or self.pending_focus_losses.setdefault(session_code, {})
+        session_pending = self.pending_focus_losses.setdefault(session_code, {})
         session_pending[player_id] = pending
         self.pending_focus_losses[session_code] = session_pending
-        self._redis_json_set(
-            self._shared_state_key(session_code, "pending-focus"),
-            session_pending,
+        self._redis_hash_json_set(
+            self._pending_focus_key(session_code),
+            player_id,
+            pending,
         )
         return pending
 
     def get_pending_focus_loss(
         self, session_code: str, player_id: str
     ) -> Optional[Dict[str, Any]]:
-        shared_pending = self._redis_json_get(
-            self._shared_state_key(session_code, "pending-focus")
+        shared_pending = self._redis_hash_json_get(
+            self._pending_focus_key(session_code), player_id
         )
         if shared_pending is not None:
-            self.pending_focus_losses[session_code] = shared_pending
-            pending = shared_pending.get(player_id)
+            self.pending_focus_losses.setdefault(session_code, {})[
+                player_id
+            ] = shared_pending
+            return dict(shared_pending)
+
+        legacy_pending = self._redis_json_get(
+            self._shared_state_key(session_code, "pending-focus")
+        )
+        if legacy_pending is not None:
+            self.pending_focus_losses[session_code] = legacy_pending
+            pending = legacy_pending.get(player_id)
+            if pending:
+                self._redis_hash_json_set(
+                    self._pending_focus_key(session_code), player_id, pending
+                )
             return dict(pending) if pending else None
 
         pending = self.pending_focus_losses.get(session_code, {}).get(player_id)
@@ -2320,22 +2653,30 @@ class ConnectionManager:
     def clear_pending_focus_loss(
         self, session_code: str, player_id: str
     ) -> Optional[Dict[str, Any]]:
-        session_pending = self._redis_json_get(
-            self._shared_state_key(session_code, "pending-focus")
-        ) or self.pending_focus_losses.get(session_code)
-        if not session_pending:
+        pending = self._redis_hash_json_get(
+            self._pending_focus_key(session_code), player_id
+        )
+        session_pending = self.pending_focus_losses.get(session_code)
+        if pending is None and session_pending:
+            pending = session_pending.get(player_id)
+        if pending is None:
+            legacy_pending = self._redis_json_get(
+                self._shared_state_key(session_code, "pending-focus")
+            )
+            if legacy_pending:
+                self.pending_focus_losses[session_code] = legacy_pending
+                session_pending = legacy_pending
+                pending = legacy_pending.get(player_id)
+        if pending is None:
             return None
 
-        pending = session_pending.pop(player_id, None)
+        if session_pending:
+            session_pending.pop(player_id, None)
+        self._redis_hash_delete(self._pending_focus_key(session_code), player_id)
         if not session_pending:
             self.pending_focus_losses.pop(session_code, None)
-            self._redis_delete(self._shared_state_key(session_code, "pending-focus"))
         else:
             self.pending_focus_losses[session_code] = session_pending
-            self._redis_json_set(
-                self._shared_state_key(session_code, "pending-focus"),
-                session_pending,
-            )
         return pending
 
     def update_heartbeat(self, websocket: WebSocket):
@@ -2772,7 +3113,9 @@ class ConnectionManager:
             )
             if legacy_state is not None:
                 shared_state = {
-                    key: value for key, value in legacy_state.items() if key != "players"
+                    key: value
+                    for key, value in legacy_state.items()
+                    if key != "players"
                 }
                 self._redis_json_set(meta_key, self._json_safe_state(shared_state))
                 if client and legacy_state.get("players"):

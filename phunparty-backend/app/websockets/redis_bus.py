@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -15,12 +16,38 @@ import redis as sync_redis
 logger = logging.getLogger(__name__)
 
 EventDispatcher = Callable[[dict[str, Any]], Awaitable[None]]
+SESSION_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,128}$")
+PLAYER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{2,128}$")
+ALLOWED_EVENT_KINDS = {
+    "session_broadcast",
+    "player_message",
+    "disconnect_player",
+    "revoke_connection_generation",
+}
+
+
+def redis_namespace() -> str:
+    configured = os.getenv("REDIS_NAMESPACE") or os.getenv("REDIS_KEY_PREFIX")
+    if configured:
+        return configured.strip().rstrip(":")
+
+    environment = os.getenv("ENVIRONMENT", "production").strip().lower()
+    if environment in {"prod", "production"}:
+        return "phun:prod"
+    if environment in {"stage", "staging"}:
+        return "phun:staging"
+    if environment in {"test", "testing"}:
+        return "phun:test"
+    return "phun:development"
 
 
 def websocket_redis_required() -> bool:
     configured = os.getenv("WS_REDIS_REQUIRED")
     if configured is not None:
         return configured.lower() == "true"
+
+    if os.getenv("ENVIRONMENT", "").lower() == "production":
+        return True
 
     worker_hints = " ".join(
         [
@@ -38,9 +65,15 @@ def websocket_redis_required() -> bool:
 
 class RedisWebSocketBus:
     def __init__(self) -> None:
-        self.redis_url = os.getenv("REDIS_URL")
-        self.channel = os.getenv("WS_REDIS_CHANNEL", "phun:prod:ws:events")
+        self.redis_url = os.getenv("WS_REDIS_URL") or os.getenv("REDIS_URL")
+        self.namespace = redis_namespace()
+        self.channel = os.getenv("WS_REDIS_CHANNEL") or self.key("ws", "events")
         self.worker_id = uuid.uuid4().hex
+        self.max_event_bytes = int(os.getenv("WS_BUS_MAX_EVENT_BYTES", "65536"))
+        self.socket_connect_timeout = float(
+            os.getenv("WS_REDIS_CONNECT_TIMEOUT", "0.5")
+        )
+        self.socket_timeout = float(os.getenv("WS_REDIS_SOCKET_TIMEOUT", "0.5"))
 
         self._redis: redis.Redis | None = None
         self._sync_redis: sync_redis.Redis | None = None
@@ -55,6 +88,71 @@ class RedisWebSocketBus:
     @property
     def sync_client(self) -> sync_redis.Redis | None:
         return self._sync_redis
+
+    def key(self, *parts: str) -> str:
+        cleaned = [str(part).strip(":") for part in parts if str(part)]
+        return ":".join([self.namespace, *cleaned])
+
+    def _validate_event(self, event: dict[str, Any]) -> bool:
+        if not isinstance(event, dict):
+            return False
+
+        version = event.get("version", 1)
+        if version != 1:
+            logger.warning("Rejected Redis WebSocket event with unsupported version")
+            return False
+
+        kind = event.get("kind")
+        if kind not in ALLOWED_EVENT_KINDS:
+            logger.warning("Rejected Redis WebSocket event with invalid kind: %s", kind)
+            return False
+
+        session_code = event.get("session_code")
+        if not isinstance(session_code, str) or not SESSION_CODE_PATTERN.fullmatch(
+            session_code
+        ):
+            logger.warning("Rejected Redis WebSocket event with invalid session_code")
+            return False
+
+        if kind in {
+            "player_message",
+            "disconnect_player",
+            "revoke_connection_generation",
+        }:
+            player_id = event.get("player_id")
+            if not isinstance(player_id, str) or not PLAYER_ID_PATTERN.fullmatch(
+                player_id
+            ):
+                logger.warning("Rejected Redis WebSocket event with invalid player_id")
+                return False
+
+        if kind in {"session_broadcast", "player_message"}:
+            message = event.get("message")
+            if not isinstance(message, dict) or not isinstance(
+                message.get("type"), str
+            ):
+                logger.warning("Rejected Redis WebSocket event with invalid message")
+                return False
+
+        if kind == "disconnect_player":
+            messages = event.get("messages", [])
+            if not isinstance(messages, list) or len(messages) > 5:
+                logger.warning("Rejected Redis WebSocket disconnect with bad messages")
+                return False
+            if not all(
+                isinstance(message, dict) and isinstance(message.get("type"), str)
+                for message in messages
+            ):
+                logger.warning("Rejected Redis WebSocket disconnect message shape")
+                return False
+
+        if kind == "revoke_connection_generation":
+            generation = event.get("generation")
+            if not isinstance(generation, str) or len(generation) > 256:
+                logger.warning("Rejected Redis WebSocket revoke with bad generation")
+                return False
+
+        return True
 
     async def connect(self, dispatcher: EventDispatcher) -> None:
         self._dispatcher = dispatcher
@@ -74,11 +172,17 @@ class RedisWebSocketBus:
             self.redis_url,
             encoding="utf-8",
             decode_responses=True,
+            socket_connect_timeout=self.socket_connect_timeout,
+            socket_timeout=self.socket_timeout,
+            health_check_interval=30,
         )
         self._sync_redis = sync_redis.from_url(
             self.redis_url,
             encoding="utf-8",
             decode_responses=True,
+            socket_connect_timeout=self.socket_connect_timeout,
+            socket_timeout=self.socket_timeout,
+            health_check_interval=30,
         )
         await self._redis.ping()
 
@@ -102,10 +206,15 @@ class RedisWebSocketBus:
                 raise RuntimeError("Redis WebSocket bus is not connected")
             return
 
-        envelope = {**event, "origin_worker_id": self.worker_id}
+        envelope = {**event, "version": 1, "origin_worker_id": self.worker_id}
+        if not self._validate_event(envelope):
+            raise ValueError("Invalid Redis WebSocket event")
+        encoded = json.dumps(envelope, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > self.max_event_bytes:
+            raise ValueError("Redis WebSocket event is too large")
         await self._redis.publish(
             self.channel,
-            json.dumps(envelope, separators=(",", ":")),
+            encoded,
         )
 
     async def _reader(self) -> None:
@@ -122,8 +231,16 @@ class RedisWebSocketBus:
                     await asyncio.sleep(0.01)
                     continue
 
-                event = json.loads(message["data"])
+                raw_data = message["data"]
+                if len(str(raw_data).encode("utf-8")) > self.max_event_bytes:
+                    logger.warning("Rejected oversized Redis WebSocket event")
+                    continue
+
+                event = json.loads(raw_data)
                 if event.get("origin_worker_id") == self.worker_id:
+                    continue
+
+                if not self._validate_event(event):
                     continue
 
                 if self._dispatcher:
