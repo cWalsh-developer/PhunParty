@@ -267,13 +267,22 @@ class ConnectionManager:
         connection_info: Dict[str, Any],
     ) -> None:
         websocket = connection_info["websocket"]
-        queue: asyncio.Queue[str] = connection_info["outbound_queue"]
+        queue = connection_info["outbound_queue"]
 
         while True:
-            payload = await queue.get()
+            queued_item = await queue.get()
+            if isinstance(queued_item, tuple):
+                payload, sent_future = queued_item
+            else:
+                payload = queued_item
+                sent_future = None
             try:
                 await websocket.send_text(payload)
+                if sent_future and not sent_future.done():
+                    sent_future.set_result(True)
             except WebSocketDisconnect:
+                if sent_future and not sent_future.done():
+                    sent_future.set_result(False)
                 logger.warning(
                     "WebSocket %s disconnected while draining outbound queue",
                     ws_id,
@@ -281,6 +290,8 @@ class ConnectionManager:
                 self.disconnect(websocket)
                 return
             except Exception:
+                if sent_future and not sent_future.done():
+                    sent_future.set_result(False)
                 logger.exception(
                     "Failed to send queued websocket message: session=%s ws_id=%s",
                     session_code,
@@ -320,23 +331,36 @@ class ConnectionManager:
         payload: str,
         *,
         critical: bool = False,
+        wait_for_send: bool = False,
     ) -> bool:
         queue = self._ensure_outbound_queue(session_code, ws_id, connection_info)
+        sent_future = None
+        if wait_for_send:
+            sent_future = asyncio.get_running_loop().create_future()
+        queued_item = (payload, sent_future)
 
         try:
-            queue.put_nowait(payload)
+            queue.put_nowait(queued_item)
+            if sent_future:
+                return bool(await sent_future)
             return True
         except asyncio.QueueFull:
             if not critical:
                 try:
-                    queue.get_nowait()
+                    dropped_item = queue.get_nowait()
                     queue.task_done()
+                    if isinstance(dropped_item, tuple):
+                        _payload, dropped_future = dropped_item
+                        if dropped_future and not dropped_future.done():
+                            dropped_future.set_result(False)
                 except asyncio.QueueEmpty:
                     pass
 
                 try:
-                    queue.put_nowait(payload)
+                    queue.put_nowait(queued_item)
                     self.dropped_outbound_message_count += 1
+                    if sent_future:
+                        return bool(await sent_future)
                     return True
                 except asyncio.QueueFull:
                     self.dropped_outbound_message_count += 1
@@ -349,11 +373,15 @@ class ConnectionManager:
 
             try:
                 await asyncio.wait_for(
-                    queue.put(payload),
+                    queue.put(queued_item),
                     timeout=self.outbound_queue_put_timeout,
                 )
+                if sent_future:
+                    return bool(await sent_future)
                 return True
             except asyncio.TimeoutError:
+                if sent_future and not sent_future.done():
+                    sent_future.set_result(False)
                 self.dropped_outbound_message_count += 1
                 logger.warning(
                     "Critical websocket broadcast queue timed out: session=%s ws_id=%s",
@@ -361,6 +389,73 @@ class ConnectionManager:
                     ws_id,
                 )
                 return False
+
+    async def _enqueue_broadcast_target(
+        self,
+        session_code: str,
+        ws_id: str,
+        connection_info: Dict[str, Any],
+        message_with_timestamp: Dict[str, Any],
+        *,
+        critical: bool,
+        should_require_ack: bool,
+    ) -> tuple[WebSocket, str, bool]:
+        websocket = connection_info["websocket"]
+        client_type = connection_info["client_type"]
+        max_attempts = 3 if critical else 1
+
+        for attempt in range(max_attempts):
+            try:
+                outbound_message = self._outbound_message_for_connection(
+                    message_with_timestamp,
+                    connection_info,
+                )
+                enqueued = await self._enqueue_broadcast_payload(
+                    session_code,
+                    ws_id,
+                    connection_info,
+                    json.dumps(outbound_message),
+                    critical=critical or should_require_ack,
+                )
+                if not enqueued:
+                    raise RuntimeError("outbound queue full")
+                if should_require_ack:
+                    self._track_ack_target(
+                        message_with_timestamp["event_id"],
+                        session_code,
+                        message_with_timestamp,
+                        ws_id,
+                        connection_info,
+                    )
+                logger.debug("Queued successfully to %s %s", client_type, ws_id)
+                return websocket, client_type, True
+            except WebSocketDisconnect:
+                logger.warning(
+                    "WebSocket %s (%s) disconnected during broadcast enqueue",
+                    ws_id,
+                    client_type,
+                )
+                return websocket, client_type, False
+            except Exception as exc:
+                if attempt < max_attempts - 1:
+                    logger.warning(
+                        "Retry %s/%s enqueue for %s: %s",
+                        attempt + 1,
+                        max_attempts,
+                        ws_id,
+                        exc,
+                    )
+                    await asyncio.sleep(0.05)
+                else:
+                    logger.error(
+                        "Failed to enqueue to %s after %s attempts: %s",
+                        ws_id,
+                        max_attempts,
+                        exc,
+                    )
+                    return websocket, client_type, False
+
+        return websocket, client_type, False
 
     def _player_task_key(self, session_code: str, player_id: str) -> str:
         return f"{session_code}:{player_id}"
@@ -1434,14 +1529,21 @@ return 0
                 },
                 "timestamp": datetime.now().timestamp(),
             }
-            await websocket.send_text(
+            connection_message_sent = await self._enqueue_broadcast_payload(
+                session_code,
+                ws_id,
+                connection_info,
                 json.dumps(
                     self._outbound_message_for_connection(
                         connection_established_message,
                         connection_info,
                     )
-                )
+                ),
+                critical=True,
+                wait_for_send=True,
             )
+            if not connection_message_sent:
+                raise RuntimeError("connection confirmation could not be sent")
 
             # Mark connection as confirmed after successful send
             connection_info["connection_confirmed"] = True
@@ -1792,12 +1894,31 @@ return 0
         for attempt in range(retries + 1):
             try:
                 connection_info = self._connection_info_for_websocket(websocket)
+                if not connection_info:
+                    return False
+                ws_id = connection_info.get("ws_id") or self._ws_id_for_websocket(
+                    websocket
+                )
+                registry_info = self.websocket_registry.get(ws_id or "")
+                session_code = (registry_info or {}).get("session_code")
+                if not ws_id or not session_code:
+                    return False
+
                 outbound_message = self._outbound_message_for_connection(
                     {**message, "timestamp": datetime.now().timestamp()},
                     connection_info,
                 )
-                await websocket.send_text(json.dumps(outbound_message))
-                return True
+                sent = await self._enqueue_broadcast_payload(
+                    session_code,
+                    ws_id,
+                    connection_info,
+                    json.dumps(outbound_message),
+                    critical=True,
+                    wait_for_send=True,
+                )
+                if sent:
+                    return True
+                raise RuntimeError("queued personal message was not sent")
             except WebSocketDisconnect:
                 logger.warning(
                     f"WebSocket disconnected during send (attempt {attempt + 1}/{retries + 1})"
@@ -2018,28 +2139,45 @@ return 0
     async def connection_is_current_async(
         self, websocket: WebSocket, session_code: str, player_id: Optional[str]
     ) -> bool:
+        return (
+            await self.connection_generation_status_async(
+                websocket,
+                session_code,
+                player_id,
+            )
+            != "stale"
+        )
+
+    async def connection_generation_status_async(
+        self,
+        websocket: WebSocket,
+        session_code: str,
+        player_id: Optional[str],
+    ) -> str:
         if not player_id:
-            return True
+            return "current"
 
         connection_info = self._connection_info_for_websocket(websocket)
         if not connection_info:
-            return False
+            return "stale"
 
         generation = connection_info.get("connection_generation")
         if not generation:
-            return True
+            return "current"
 
         current_generation = await self._get_player_connection_generation_async(
             session_code,
             player_id,
         )
         if current_generation is _REDIS_UNAVAILABLE:
-            return True
+            return "unknown"
         if current_generation is None and (
             websocket_bus.async_client or websocket_bus.sync_client
         ):
-            return False
-        return current_generation is None or current_generation == generation
+            return "stale"
+        if current_generation is None or current_generation == generation:
+            return "current"
+        return "stale"
 
     async def disconnect_player_everywhere(
         self,
@@ -2116,6 +2254,8 @@ return 0
             f"📡 Broadcasting '{message.get('type')}' to session {session_code}{filter_info}"
         )
 
+        enqueue_tasks = []
+
         for ws_id, connection_info in list(
             self.active_connections[session_code].items()
         ):
@@ -2139,62 +2279,29 @@ return 0
                 continue
 
             total_targets += 1
-            logger.debug(
-                f"  → Sending to {client_type} client {ws_id} (player: {player_name})"
-            )
-
-            # Retry logic for critical messages
-            max_attempts = 3 if critical else 1
-            sent = False
-
-            for attempt in range(max_attempts):
-                try:
-                    outbound_message = self._outbound_message_for_connection(
-                        message_with_timestamp,
-                        connection_info,
-                    )
-                    enqueued = await self._enqueue_broadcast_payload(
+            enqueue_tasks.append(
+                asyncio.create_task(
+                    self._enqueue_broadcast_target(
                         session_code,
                         ws_id,
                         connection_info,
-                        json.dumps(outbound_message),
-                        critical=critical or should_require_ack,
+                        message_with_timestamp,
+                        critical=critical,
+                        should_require_ack=should_require_ack,
                     )
-                    if not enqueued:
-                        raise RuntimeError("outbound queue full")
-                    if should_require_ack:
-                        self._track_ack_target(
-                            message_with_timestamp["event_id"],
-                            session_code,
-                            message_with_timestamp,
-                            ws_id,
-                            connection_info,
-                        )
+                )
+            )
+
+        if enqueue_tasks:
+            for websocket, client_type, sent in await asyncio.gather(*enqueue_tasks):
+                if sent:
                     success_count += 1
                     if client_type == "mobile":
                         mobile_sent += 1
                     elif client_type == "web":
                         web_sent += 1
-                    sent = True
-                    logger.debug(f"  ✓ Queued successfully to {client_type} {ws_id}")
-                    break
-                except WebSocketDisconnect:
-                    logger.warning(
-                        f"WebSocket {ws_id} ({client_type}) disconnected during broadcast"
-                    )
+                else:
                     disconnected_websockets.append(websocket)
-                    break
-                except Exception as e:
-                    if attempt < max_attempts - 1:
-                        logger.warning(
-                            f"Retry {attempt + 1}/{max_attempts} for {ws_id}: {e}"
-                        )
-                        await asyncio.sleep(0.05)
-                    else:
-                        logger.error(
-                            f"Failed to send to {ws_id} after {max_attempts} attempts: {e}"
-                        )
-                        disconnected_websockets.append(websocket)
 
         logger.info(
             "Broadcast complete: %s/%s clients received %s (mobile=%s, web=%s)",
@@ -3536,9 +3643,21 @@ return 0
                     ):
                         for ws_id, conn_info in list(connections.items()):
                             try:
-                                websocket = conn_info["websocket"]
-                                await websocket.send_text(json.dumps(ping_message))
-                                total_sent += 1
+                                queued = await self._enqueue_broadcast_payload(
+                                    session_code,
+                                    ws_id,
+                                    conn_info,
+                                    json.dumps(
+                                        self._outbound_message_for_connection(
+                                            ping_message,
+                                            conn_info,
+                                        )
+                                    ),
+                                )
+                                if queued:
+                                    total_sent += 1
+                                else:
+                                    total_failed += 1
                             except Exception as e:
                                 total_failed += 1
                                 logger.debug(f"Failed to send ping to {ws_id}: {e}")

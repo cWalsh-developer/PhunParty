@@ -75,7 +75,11 @@ async def handle_game_end(
                 )
                 return False
 
-            logger.info("Game session %s was already ended", session_code)
+            logger.info(
+                "Game session %s was already ended; skipping duplicate end broadcast",
+                session_code,
+            )
+            return False
 
         final_scores = get_final_scores(db, session_code)
         score_player_ids = [

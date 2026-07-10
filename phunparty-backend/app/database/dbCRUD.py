@@ -2028,6 +2028,24 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
     Also calculates final game results.
     """
     try:
+        ended_at = utc_now()
+        claimed_rows = (
+            db.query(GameSessionState)
+            .filter(
+                GameSessionState.session_code == session_code,
+                GameSessionState.is_active.is_(True),
+            )
+            .update(
+                {
+                    GameSessionState.ended_at: ended_at,
+                    GameSessionState.is_active: False,
+                    GameSessionState.isstarted: False,
+                    GameSessionState.is_waiting_for_players: False,
+                },
+                synchronize_session=False,
+            )
+        )
+
         game_state = (
             db.query(GameSessionState)
             .filter(GameSessionState.session_code == session_code)
@@ -2038,12 +2056,12 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
             logger.warning("Game session state not found for %s", session_code)
             return False
 
-        if not game_state.ended_at:
-            game_state.ended_at = utc_now()
-
-        game_state.is_active = False
-        game_state.isstarted = False
-        game_state.is_waiting_for_players = False
+        if claimed_rows == 0:
+            logger.info(
+                "Game session %s was already ended or not active; skipping finalizer claim",
+                session_code,
+            )
+            return False
 
         assigned_player_ids = (
             db.query(SessionAssignment.player_id)

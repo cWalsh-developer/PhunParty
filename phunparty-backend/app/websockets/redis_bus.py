@@ -134,8 +134,11 @@ class RedisWebSocketBus:
         self._dispatcher: EventDispatcher | None = None
         self._dispatch_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self._dispatch_tasks: dict[str, asyncio.Task] = {}
-        self._control_put_tasks: set[asyncio.Task] = set()
+        self.control_queue_maxsize = int(os.getenv("WS_BUS_CONTROL_QUEUE_MAXSIZE", "1000"))
+        self._control_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        self._control_tasks: dict[str, asyncio.Task] = {}
         self.dropped_event_count = 0
+        self.dropped_control_event_count = 0
         self.control_backpressure_count = 0
 
     @property
@@ -298,6 +301,10 @@ class RedisWebSocketBus:
             return
 
         session_code = event["session_code"]
+        if self._is_control_event(event):
+            self._enqueue_control_event(session_code, event)
+            return
+
         queue = self._dispatch_queues.get(session_code)
         if queue is None:
             queue = asyncio.Queue(maxsize=self.dispatch_queue_maxsize)
@@ -310,56 +317,78 @@ class RedisWebSocketBus:
         try:
             queue.put_nowait(event)
         except asyncio.QueueFull:
-            if self._is_control_event(event):
-                self.control_backpressure_count += 1
-                logger.warning(
-                    "Redis WebSocket control event queued behind full dispatch queue: session=%s kind=%s size=%s",
-                    session_code,
-                    event.get("kind"),
-                    queue.qsize(),
-                )
-                task = asyncio.create_task(
-                    self._put_control_event_when_ready(session_code, queue, event),
-                    name=f"ws-redis-control-put-{session_code}",
-                )
-                self._control_put_tasks.add(task)
-                task.add_done_callback(self._control_put_tasks.discard)
-                return
-
+            self.dropped_event_count += 1
             logger.warning(
-                "Redis WebSocket dispatch queue full for session=%s size=%s",
+                "Redis WebSocket dispatch queue full; coalescing event for session=%s size=%s",
                 session_code,
                 queue.qsize(),
             )
             try:
-                await asyncio.wait_for(
-                    queue.put(event),
-                    timeout=self.dispatch_queue_put_timeout,
+                dropped_event = queue.get_nowait()
+                queue.task_done()
+                logger.debug(
+                    "Dropped older Redis WebSocket event while coalescing: session=%s kind=%s",
+                    session_code,
+                    dropped_event.get("kind"),
                 )
-            except asyncio.TimeoutError:
+            except asyncio.QueueEmpty:
+                pass
+
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
                 self.dropped_event_count += 1
                 logger.error(
-                    "Dropped Redis WebSocket event after dispatch queue timeout: session=%s kind=%s",
+                    "Dropped Redis WebSocket event because dispatch queue stayed full: session=%s kind=%s",
                     session_code,
                     event.get("kind"),
                 )
 
-    async def _put_control_event_when_ready(
+    def _enqueue_control_event(
         self,
         session_code: str,
-        queue: asyncio.Queue[dict[str, Any]],
         event: dict[str, Any],
     ) -> None:
+        queue = self._control_queues.get(session_code)
+        if queue is None:
+            queue = asyncio.Queue(maxsize=self.control_queue_maxsize)
+            self._control_queues[session_code] = queue
+            self._control_tasks[session_code] = asyncio.create_task(
+                self._dispatch_control_events(session_code),
+                name=f"ws-redis-control-dispatch-{session_code}",
+            )
+
         try:
-            await queue.put(event)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception(
-                "Failed to enqueue Redis WebSocket control event: session=%s kind=%s",
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            self.control_backpressure_count += 1
+            logger.warning(
+                "Redis WebSocket control queue full; coalescing control event: session=%s kind=%s size=%s",
                 session_code,
                 event.get("kind"),
+                queue.qsize(),
             )
+            try:
+                dropped_event = queue.get_nowait()
+                queue.task_done()
+                self.dropped_control_event_count += 1
+                logger.warning(
+                    "Dropped older Redis WebSocket control event while coalescing: session=%s kind=%s",
+                    session_code,
+                    dropped_event.get("kind"),
+                )
+            except asyncio.QueueEmpty:
+                pass
+
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                self.dropped_control_event_count += 1
+                logger.error(
+                    "Dropped Redis WebSocket control event because control queue stayed full: session=%s kind=%s",
+                    session_code,
+                    event.get("kind"),
+                )
 
     def _is_control_event(self, event: dict[str, Any]) -> bool:
         if event.get("kind") in CONTROL_EVENT_KINDS:
@@ -390,6 +419,36 @@ class RedisWebSocketBus:
             except Exception:
                 logger.exception(
                     "Redis WebSocket event dispatch failed session=%s kind=%s",
+                    session_code,
+                    event.get("kind"),
+                )
+            finally:
+                queue.task_done()
+
+    async def _dispatch_control_events(self, session_code: str) -> None:
+        queue = self._control_queues[session_code]
+
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    queue.get(),
+                    timeout=self.dispatch_queue_idle_seconds,
+                )
+            except asyncio.TimeoutError:
+                if queue.empty():
+                    self._control_queues.pop(session_code, None)
+                    self._control_tasks.pop(session_code, None)
+                    return
+                continue
+
+            try:
+                if self._dispatcher:
+                    await self._dispatcher(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Redis WebSocket control event dispatch failed session=%s kind=%s",
                     session_code,
                     event.get("kind"),
                 )
@@ -445,9 +504,9 @@ class RedisWebSocketBus:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-        for task in list(self._control_put_tasks):
+        for task in list(self._control_tasks.values()):
             task.cancel()
-        for task in list(self._control_put_tasks):
+        for task in list(self._control_tasks.values()):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
@@ -463,7 +522,8 @@ class RedisWebSocketBus:
         self._reader_task = None
         self._dispatch_queues.clear()
         self._dispatch_tasks.clear()
-        self._control_put_tasks.clear()
+        self._control_queues.clear()
+        self._control_tasks.clear()
         self._pubsub = None
         self._redis = None
         self._sync_redis = None

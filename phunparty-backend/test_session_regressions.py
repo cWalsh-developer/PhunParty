@@ -1493,7 +1493,7 @@ def test_countdown_duration_is_server_owned():
     assert scheduler.normalize_countdown_duration_ms(None, "SESSION123") == 3000
 
 
-def test_game_lifecycle_broadcasts_final_scores_for_already_ended_session():
+def test_game_lifecycle_skips_duplicate_broadcast_for_already_ended_session():
     ended_at = datetime(2026, 6, 1, 12, 0, 0)
     game_state = SimpleNamespace(ended_at=ended_at)
     final_scores = [{"player_id": "P1", "player_name": "Player", "score": 2}]
@@ -1516,12 +1516,9 @@ def test_game_lifecycle_broadcasts_final_scores_for_already_ended_session():
                     game_lifecycle.handle_game_end("SESSION123", mock_db)
                 )
 
-    assert result is True
-    mock_manager.clear_question_queue.assert_called_once_with("SESSION123")
-    mock_manager.broadcast_to_session.assert_awaited_once()
-    message = mock_manager.broadcast_to_session.await_args.args[1]
-    assert message["type"] == "game_ended"
-    assert message["data"]["final_scores"] == final_scores
+    assert result is False
+    mock_manager.clear_question_queue.assert_not_called()
+    mock_manager.broadcast_to_session.assert_not_awaited()
 
 
 def test_game_lifecycle_terminal_snapshot_uses_shared_fair_play_statuses():
@@ -2903,8 +2900,9 @@ def test_redis_bus_does_not_drop_control_events_when_session_queue_is_full():
             )
             await asyncio.sleep(0)
             assert control_enqueue.done()
-            assert bus.control_backpressure_count == 1
             assert bus.dropped_event_count == 0
+            await asyncio.wait_for(bus._control_queues["FULL01"].join(), timeout=1)
+            assert "disconnect_player" in handled
 
             await bus._enqueue_event(
                 {
@@ -2915,23 +2913,79 @@ def test_redis_bus_does_not_drop_control_events_when_session_queue_is_full():
                 }
             )
             await asyncio.wait_for(bus._dispatch_queues["FAST01"].join(), timeout=1)
-            assert handled[-1] == "session_broadcast"
+            assert any(
+                item == "session_broadcast"
+                for item in handled
+            )
 
             release_first.set()
-            await asyncio.wait_for(
-                asyncio.gather(*bus._control_put_tasks),
-                timeout=1,
-            )
             await asyncio.wait_for(bus._dispatch_queues["FULL01"].join(), timeout=1)
         finally:
             await bus.close()
 
-        assert handled == [
-            "session_broadcast",
-            "session_broadcast",
-            "session_broadcast",
-            "disconnect_player",
-        ]
+        assert handled.count("session_broadcast") == 3
+        assert handled.count("disconnect_player") == 1
+
+    asyncio.run(run_test())
+
+
+def test_redis_bus_control_lane_is_bounded_and_nonblocking():
+    async def run_test():
+        bus = redis_bus.RedisWebSocketBus()
+        bus.control_queue_maxsize = 1
+        bus.dispatch_queue_idle_seconds = 60
+        started_first = asyncio.Event()
+        release_first = asyncio.Event()
+        handled = []
+
+        async def dispatcher(event):
+            handled.append(event["player_id"])
+            if not started_first.is_set():
+                started_first.set()
+                await release_first.wait()
+
+        bus._dispatcher = dispatcher
+
+        try:
+            await bus._enqueue_event(
+                {
+                    "version": 1,
+                    "kind": "disconnect_player",
+                    "session_code": "CTRL01",
+                    "player_id": "P1",
+                    "messages": [{"type": "kicked_from_session"}],
+                }
+            )
+            await asyncio.wait_for(started_first.wait(), timeout=1)
+
+            await bus._enqueue_event(
+                {
+                    "version": 1,
+                    "kind": "disconnect_player",
+                    "session_code": "CTRL01",
+                    "player_id": "P2",
+                    "messages": [{"type": "kicked_from_session"}],
+                }
+            )
+            await bus._enqueue_event(
+                {
+                    "version": 1,
+                    "kind": "disconnect_player",
+                    "session_code": "CTRL01",
+                    "player_id": "P3",
+                    "messages": [{"type": "kicked_from_session"}],
+                }
+            )
+
+            assert len(bus._control_tasks) == 1
+            assert bus.dropped_control_event_count >= 1
+            release_first.set()
+            await asyncio.wait_for(bus._control_queues["CTRL01"].join(), timeout=1)
+        finally:
+            await bus.close()
+
+        assert handled[0] == "P1"
+        assert handled[-1] == "P3"
 
     asyncio.run(run_test())
 
@@ -3011,6 +3065,91 @@ def test_local_session_broadcast_uses_per_socket_queues_for_slow_clients():
             manager.outbound_queue_maxsize = old_queue_maxsize
 
     asyncio.run(run_test())
+
+
+def test_personal_messages_share_socket_sender_queue_with_broadcasts():
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = []
+            self.first_send_started = asyncio.Event()
+            self.release_first_send = asyncio.Event()
+
+        async def send_text(self, payload):
+            self.sent.append(payload)
+            if len(self.sent) == 1:
+                self.first_send_started.set()
+                await self.release_first_send.wait()
+
+    async def run_test():
+        session_code = "QUEUE02"
+        websocket = FakeWebSocket()
+        manager.active_connections[session_code] = {
+            "ws_one": {
+                "websocket": websocket,
+                "client_type": "mobile",
+                "ws_id": "ws_one",
+                "player_id": "P1",
+            }
+        }
+        manager.websocket_registry["ws_one"] = {
+            "session_code": session_code,
+            "websocket": websocket,
+        }
+        manager.websocket_to_ws_id[id(websocket)] = "ws_one"
+
+        try:
+            broadcast_task = asyncio.create_task(
+                manager._broadcast_local_to_session(
+                    session_code,
+                    {"type": "roster_update", "data": {"step": 1}},
+                )
+            )
+            await asyncio.wait_for(websocket.first_send_started.wait(), timeout=1)
+            personal_task = asyncio.create_task(
+                manager.send_personal_message(
+                    {"type": "sync_state", "data": {"step": 2}},
+                    websocket,
+                    retries=0,
+                )
+            )
+            await asyncio.sleep(0.05)
+            assert len(websocket.sent) == 1
+            websocket.release_first_send.set()
+            await asyncio.wait_for(broadcast_task, timeout=1)
+            assert await asyncio.wait_for(personal_task, timeout=1)
+            assert len(websocket.sent) == 2
+        finally:
+            websocket.release_first_send.set()
+            for connection_info in manager.active_connections.get(
+                session_code,
+                {},
+            ).values():
+                sender_task = connection_info.get("outbound_sender_task")
+                if sender_task and not sender_task.done():
+                    sender_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await sender_task
+            manager.active_connections.pop(session_code, None)
+            manager.websocket_registry.pop("ws_one", None)
+            manager.websocket_to_ws_id.pop(id(websocket), None)
+
+    asyncio.run(run_test())
+
+
+def test_beat_clock_answer_does_not_need_route_owned_db_session():
+    handler = game_handlers.BeatTheClockGameHandler("SESSION123")
+
+    assert (
+        routes.websocket_message_needs_route_db(
+            {
+                "type": "submit_answer",
+                "data": {"question_id": "BTC001", "answer": "A"},
+            },
+            "mobile",
+            handler,
+        )
+        is False
+    )
 
 
 def test_fair_play_status_uses_per_player_redis_hash_fields():
@@ -3576,6 +3715,48 @@ def test_async_connection_generation_treats_redis_read_failure_as_available():
         manager.websocket_to_ws_id.pop(id(websocket), None)
 
     assert fake_redis.get_calls == [generation_key]
+
+
+def test_async_connection_generation_reports_unknown_on_redis_failure():
+    class FailingAsyncRedis(_FakeAsyncRedis):
+        async def get(self, key):
+            self.get_calls.append(key)
+            raise RuntimeError("redis unavailable")
+
+    fake_redis = FailingAsyncRedis()
+    websocket = MagicMock()
+    session_code = "SESSION123"
+    player_id = "P1"
+    ws_id = "ws_unknown"
+
+    manager.active_connections[session_code] = {
+        ws_id: {
+            "websocket": websocket,
+            "client_type": "mobile",
+            "player_id": player_id,
+            "connection_generation": "worker-a:ws_unknown",
+        }
+    }
+    manager.websocket_registry[ws_id] = {
+        "session_code": session_code,
+        "websocket": websocket,
+    }
+
+    try:
+        with patch.object(redis_bus.websocket_bus, "_redis", fake_redis):
+            status = asyncio.run(
+                manager.connection_generation_status_async(
+                    websocket,
+                    session_code,
+                    player_id,
+                )
+            )
+    finally:
+        manager.active_connections.pop(session_code, None)
+        manager.websocket_registry.pop(ws_id, None)
+        manager.websocket_to_ws_id.pop(id(websocket), None)
+
+    assert status == "unknown"
 
 
 def test_async_connection_generation_claim_uses_async_redis_eval():

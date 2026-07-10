@@ -543,10 +543,22 @@ class BeatTheClockGameHandler(GameEventHandler):
 
     async def _send_question_to_player(
         self,
-        db: Session,
+        db: Optional[Session],
         player_id: str,
         state: Optional[dict] = None,
     ) -> bool:
+        if db is None:
+            with SessionLocal() as owned_db:
+                try:
+                    set_rls_current_player(owned_db, player_id)
+                    return await self._send_question_to_player(
+                        owned_db,
+                        player_id,
+                        state,
+                    )
+                finally:
+                    clear_rls_context(owned_db)
+
         state = state or manager.get_beat_clock_state_for_player(
             self.session_code,
             player_id,
@@ -1105,8 +1117,56 @@ class BeatTheClockGameHandler(GameEventHandler):
             clear_rls_context(db)
             db.close()
 
+    def _build_stale_beat_clock_payload_in_thread(
+        self,
+        player_id: str,
+        question_id: str,
+        current_question_id: Optional[str],
+        player_state: dict,
+        state: dict,
+    ) -> dict:
+        db = SessionLocal()
+        try:
+            set_rls_current_player(db, player_id)
+            score_row = get_scores_by_session_and_player(
+                db,
+                self.session_code,
+                player_id,
+            )
+            duplicate_payload = {
+                "game_type": self.game_type,
+                "question_id": question_id,
+                "ignored": True,
+                "reason": "stale_question",
+                "score": score_row.score if score_row else 0,
+                "answered_count": player_state.get("answered_count", 0),
+                "correct_count": player_state.get("correct_count", 0),
+                "duration_seconds": state.get("duration_seconds"),
+                "ends_at": state.get("ends_at"),
+                "server_time_ms": manager._utc_now_ms(),
+            }
+            current_payload = None
+            if current_question_id:
+                current_payload = self._question_payload(
+                    db,
+                    current_question_id,
+                    player_id,
+                    state,
+                )
+            return {
+                "duplicate_payload": duplicate_payload,
+                "current_payload": current_payload,
+            }
+        finally:
+            clear_rls_context(db)
+            db.close()
+
     async def handle_player_answer(
-        self, player_id: str, answer: str, question_id: str, db: Session
+        self,
+        player_id: str,
+        answer: str,
+        question_id: str,
+        db: Optional[Session] = None,
     ):
         state = manager.get_beat_clock_state_for_player(
             self.session_code,
@@ -1128,31 +1188,16 @@ class BeatTheClockGameHandler(GameEventHandler):
         player_state = state.get("players", {}).get(player_id)
         if not player_state or player_state.get("current_question_id") != question_id:
             current_question_id = (player_state or {}).get("current_question_id")
-            score_row = get_scores_by_session_and_player(
-                db,
-                self.session_code,
+            stale_result = await asyncio.to_thread(
+                self._build_stale_beat_clock_payload_in_thread,
                 player_id,
+                question_id,
+                current_question_id,
+                dict(player_state or {}),
+                state,
             )
-            duplicate_payload = {
-                "game_type": self.game_type,
-                "question_id": question_id,
-                "ignored": True,
-                "reason": "stale_question",
-                "score": score_row.score if score_row else 0,
-                "answered_count": (player_state or {}).get("answered_count", 0),
-                "correct_count": (player_state or {}).get("correct_count", 0),
-                "duration_seconds": state.get("duration_seconds"),
-                "ends_at": state.get("ends_at"),
-                "server_time_ms": manager._utc_now_ms(),
-            }
-            current_payload = None
-            if current_question_id:
-                current_payload = self._question_payload(
-                    db,
-                    current_question_id,
-                    player_id,
-                    state,
-                )
+            duplicate_payload = stale_result["duplicate_payload"]
+            current_payload = stale_result["current_payload"]
 
             await self._send_beat_clock_result_and_current_question(
                 player_id,
@@ -1235,7 +1280,7 @@ class BeatTheClockGameHandler(GameEventHandler):
 
     async def _finish_now(
         self,
-        db: Session,
+        db: Optional[Session],
         acting_player_id: Optional[str] = None,
     ) -> None:
         finish_claim = manager.claim_beat_clock_finish(self.session_code)
@@ -1260,6 +1305,26 @@ class BeatTheClockGameHandler(GameEventHandler):
                 self.session_code,
             )
 
+        if db is None:
+            with SessionLocal() as finish_db:
+                try:
+                    if acting_player_id:
+                        set_rls_current_player(finish_db, acting_player_id)
+                    await self._finish_now_after_claim(
+                        finish_db,
+                        acting_player_id=acting_player_id,
+                    )
+                finally:
+                    clear_rls_context(finish_db)
+            return
+
+        await self._finish_now_after_claim(db, acting_player_id=acting_player_id)
+
+    async def _finish_now_after_claim(
+        self,
+        db: Session,
+        acting_player_id: Optional[str] = None,
+    ) -> None:
         state = manager.get_beat_clock_state(self.session_code)
         state["ending"] = True
         state["active"] = False

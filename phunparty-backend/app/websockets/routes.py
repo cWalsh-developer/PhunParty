@@ -89,12 +89,23 @@ WEBSOCKET_CONNECTION_IP_LIMIT = (120, 300)
 WEBSOCKET_AUTH_CONNECTION_LIMIT = (30, 300)
 WEBSOCKET_GLOBAL_MESSAGE_LIMIT = (120, 60)
 WEBSOCKET_BUZZER_LIMIT = (5, 3600)
+WEBSOCKET_READ_ONLY_MESSAGE_TYPES = {
+    "ping",
+    "pong",
+    "ack",
+    "connection_ack",
+    "sync_request",
+    "request_current_question",
+    "request_roster",
+    "get_session_stats",
+}
 
 
 def websocket_message_needs_route_db(
     message: dict,
     client_type: str,
     game_handler,
+    session_code: Optional[str] = None,
 ) -> bool:
     """Return whether the socket route must own a DB session for this message."""
     message_type = message.get("type")
@@ -104,13 +115,24 @@ def websocket_message_needs_route_db(
     if message_type == "submit_answer" and client_type == "mobile":
         data = message.get("data") or {}
         question_id = data.get("question_id")
-        game_type = getattr(game_handler, "game_type", "trivia")
-        return (
-            game_type != "trivia"
-            or str(question_id or "").upper().startswith("BTC")
+        handler_game_type = getattr(game_handler, "game_type", "trivia")
+        cached_game_type = (
+            manager.get_session_game_type(session_code) if session_code else None
         )
+        if (
+            handler_game_type in {"trivia", BEAT_THE_CLOCK_GAME_TYPE}
+            or cached_game_type == BEAT_THE_CLOCK_GAME_TYPE
+        ):
+            return False
+        if str(question_id or "").upper().startswith("BTC"):
+            return False
+        return True
 
     return True
+
+
+def websocket_message_is_mutating(message_type: Optional[str]) -> bool:
+    return message_type not in WEBSOCKET_READ_ONLY_MESSAGE_TYPES
 
 
 def get_websocket_client_ip(websocket: WebSocket) -> str:
@@ -285,6 +307,11 @@ async def close_websocket_safely(websocket: WebSocket, code: int, reason: str) -
 
 async def send_websocket_error_safely(websocket: WebSocket, message: str) -> bool:
     try:
+        if manager._connection_info_for_websocket(websocket):
+            return await manager.send_personal_message(
+                {"type": "error", "message": message},
+                websocket,
+            )
         await websocket.send_text(json.dumps({"type": "error", "message": message}))
         return True
     except RuntimeError as e:
@@ -900,19 +927,29 @@ async def websocket_endpoint(
                 message_type = message.get("type")
                 message_data = message.get("data", {}) or {}
 
-                if (
-                    client_type == "mobile"
-                    and not await manager.connection_is_current_async(
+                if client_type == "mobile":
+                    generation_status = await manager.connection_generation_status_async(
                         websocket,
                         session_code,
                         player_id,
                     )
-                ):
-                    await websocket.close(
-                        code=4000,
-                        reason="Connection replaced",
-                    )
-                    break
+                    if generation_status == "stale":
+                        await websocket.close(
+                            code=4000,
+                            reason="Connection replaced",
+                        )
+                        break
+                    if generation_status == "unknown" and websocket_message_is_mutating(
+                        message_type
+                    ):
+                        await manager.send_personal_message(
+                            {
+                                "type": "error",
+                                "message": "Realtime authority is temporarily unavailable. Please retry shortly.",
+                            },
+                            websocket,
+                        )
+                        continue
 
                 if not await enforce_websocket_message_rate_limit(
                     websocket,
@@ -929,6 +966,7 @@ async def websocket_endpoint(
                     message,
                     client_type,
                     game_handler,
+                    session_code,
                 ):
                     message_db, message_db_generator = open_db_session(
                         authenticated_player_id

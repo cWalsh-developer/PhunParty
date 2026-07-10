@@ -151,12 +151,17 @@ async def connect_one(
 
 async def run_connect(args) -> None:
     credentials = load_player_credentials(args.players_file)
-    connector = aiohttp.TCPConnector(limit=args.concurrency)
+    client_count = (
+        min(args.clients, len(credentials)) if credentials else args.clients
+    )
+    connector = aiohttp.TCPConnector(limit=max(args.concurrency, client_count))
     timeout = aiohttp.ClientTimeout(total=None, connect=15, sock_read=30)
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         semaphore = asyncio.Semaphore(args.concurrency)
 
-        async def guarded_connect(index: int) -> Sample:
+        async def guarded_connect(
+            index: int,
+        ) -> tuple[AnswerConnection | None, Sample]:
             async with semaphore:
                 credential = credentials[index] if index < len(credentials) else None
                 player_id = (
@@ -172,19 +177,31 @@ async def run_connect(args) -> None:
                         status="missing_token",
                         error="provide --players-file or --token",
                     )
+                    return None, sample
                 url = websocket_url(
                     args.ws_url,
                     token,
                     "mobile" if args.mobile else "web",
                     player_id,
                 )
-                return await connect_one(session, url, args.hold_seconds)
+                return await connect_answer_socket(
+                    session,
+                    url,
+                    player_id or f"WEB{index}",
+                )
 
-        client_count = (
-            min(args.clients, len(credentials)) if credentials else args.clients
-        )
-        samples = await asyncio.gather(
+        results = await asyncio.gather(
             *(guarded_connect(index) for index in range(client_count))
+        )
+        held_connections = [
+            connection for connection, sample in results if connection is not None
+        ]
+        samples = [sample for connection, sample in results]
+        print(f"connected and held: {len(held_connections)}/{client_count}")
+        await asyncio.sleep(args.hold_seconds)
+        await asyncio.gather(
+            *(connection.ws.close() for connection in held_connections),
+            return_exceptions=True,
         )
     print_summary("connection capacity", samples)
 
