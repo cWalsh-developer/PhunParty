@@ -923,6 +923,43 @@ def test_join_game_rejects_inactive_sessions_before_membership_changes():
     mock_db.commit.assert_not_called()
 
 
+def test_assign_player_to_session_does_not_rewrite_active_session_start():
+    mock_db = MagicMock()
+    original_start = datetime(2026, 6, 1, 12, 0, 0)
+    assignment = SimpleNamespace(session_start=original_start, session_end=None)
+
+    with patch.object(
+        dbCRUD,
+        "ensure_session_assignment_with_status",
+        return_value=(assignment, False),
+    ):
+        dbCRUD.assign_player_to_session(mock_db, "P1", "SESSION123")
+
+    assert assignment.session_start == original_start
+    assert assignment.session_end is None
+    mock_db.flush.assert_called_once()
+
+
+def test_assign_player_to_session_reopens_ended_membership_with_new_start():
+    mock_db = MagicMock()
+    original_start = datetime(2026, 6, 1, 12, 0, 0)
+    ended_at = datetime(2026, 6, 1, 12, 30, 0)
+    new_start = datetime(2026, 6, 1, 13, 0, 0)
+    assignment = SimpleNamespace(session_start=original_start, session_end=ended_at)
+
+    with patch.object(
+        dbCRUD,
+        "ensure_session_assignment_with_status",
+        return_value=(assignment, False),
+    ):
+        with patch.object(dbCRUD, "utc_now", return_value=new_start):
+            dbCRUD.assign_player_to_session(mock_db, "P1", "SESSION123")
+
+    assert assignment.session_start == new_start
+    assert assignment.session_end is None
+    mock_db.flush.assert_called_once()
+
+
 def test_join_queue_defaults_to_direct_idempotent_join():
     request = SimpleNamespace(session_code="SESSION123", websocket_id=None)
     http_request = MagicMock()

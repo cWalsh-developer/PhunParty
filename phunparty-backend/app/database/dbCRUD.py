@@ -911,6 +911,25 @@ def ensure_session_assignment(
     session_end: datetime | None = None,
 ) -> SessionAssignment:
     """Ensure a player/session membership row exists."""
+    assignment, _inserted = ensure_session_assignment_with_status(
+        db,
+        session_code,
+        player_id,
+        session_start=session_start,
+        session_end=session_end,
+    )
+    return assignment
+
+
+def ensure_session_assignment_with_status(
+    db: Session,
+    session_code: str,
+    player_id: str,
+    *,
+    session_start: datetime | None = None,
+    session_end: datetime | None = None,
+) -> tuple[SessionAssignment, bool]:
+    """Ensure a membership row exists and report whether this call inserted it."""
     session_start = session_start or utc_now()
 
     if _is_postgresql_session(db):
@@ -931,7 +950,7 @@ def ensure_session_assignment(
             )
             .returning(SessionAssignment.assignment_id)
         )
-        db.execute(stmt).scalar_one_or_none()
+        inserted_id = db.execute(stmt).scalar_one_or_none()
         assignment = (
             db.query(SessionAssignment)
             .filter(SessionAssignment.player_id == player_id)
@@ -939,7 +958,7 @@ def ensure_session_assignment(
             .first()
         )
         if assignment:
-            return assignment
+            return assignment, inserted_id is not None
         raise ValueError("Unable to ensure session assignment")
 
     existing_assignment = (
@@ -950,7 +969,7 @@ def ensure_session_assignment(
     )
 
     if existing_assignment:
-        return existing_assignment
+        return existing_assignment, False
 
     assignment = SessionAssignment(
         assignment_id=generate_assignment_id(),
@@ -961,14 +980,19 @@ def ensure_session_assignment(
     )
     db.add(assignment)
     db.flush()
-    return assignment
+    return assignment, True
 
 
 def assign_player_to_session(db: Session, player_id: str, session_code: str) -> None:
     """Assign a player to a game session."""
-    assignment = ensure_session_assignment(db, session_code, player_id)
+    assignment, inserted = ensure_session_assignment_with_status(
+        db,
+        session_code,
+        player_id,
+    )
+    if inserted or assignment.session_end is not None:
+        assignment.session_start = utc_now()
     assignment.session_end = None
-    assignment.session_start = utc_now()
     db.flush()
 
     # Session Questions Assignment CRUD operations --------------------------------------------------------------------------------------------------------------
