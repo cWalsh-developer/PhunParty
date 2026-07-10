@@ -506,7 +506,10 @@ class BeatTheClockGameHandler(GameEventHandler):
         player_id: str,
         state: Optional[dict] = None,
     ) -> bool:
-        state = state or manager.get_beat_clock_state(self.session_code)
+        state = state or manager.get_beat_clock_state_for_player(
+            self.session_code,
+            player_id,
+        )
         if not state.get("active"):
             return False
         ends_at_dt = state.get("ends_at_dt")
@@ -801,7 +804,10 @@ class BeatTheClockGameHandler(GameEventHandler):
     ) -> None:
         if not player_id:
             return
-        state = manager.get_beat_clock_state(self.session_code)
+        state = manager.get_beat_clock_state_for_player(
+            self.session_code,
+            player_id,
+        )
         if not state.get("active"):
             return
         ends_at_dt = state.get("ends_at_dt")
@@ -877,7 +883,10 @@ class BeatTheClockGameHandler(GameEventHandler):
     async def handle_player_answer(
         self, player_id: str, answer: str, question_id: str, db: Session
     ):
-        state = manager.get_beat_clock_state(self.session_code)
+        state = manager.get_beat_clock_state_for_player(
+            self.session_code,
+            player_id,
+        )
         if not state.get("active"):
             await self._send_beat_clock_rejection(
                 player_id,

@@ -3182,6 +3182,90 @@ return 0
         self.set_beat_clock_state(session_code, state)
         return state
 
+    def get_beat_clock_state_for_player(
+        self, session_code: str, player_id: str
+    ) -> Dict[str, Any]:
+        """Return Beat the Clock meta plus one player's state without HGETALL."""
+        meta_key, players_key = self._beat_clock_keys(session_code)
+        shared_state = self._redis_json_get(meta_key)
+        client = websocket_bus.sync_client
+        player_state = None
+
+        if shared_state is None:
+            legacy_state = self._redis_json_get(
+                self._shared_state_key(session_code, "beat-clock")
+            )
+            if legacy_state is not None:
+                shared_state = {
+                    key: value
+                    for key, value in legacy_state.items()
+                    if key != "players"
+                }
+                self._redis_json_set(meta_key, self._json_safe_state(shared_state))
+                player_state = (legacy_state.get("players") or {}).get(player_id)
+                if client and player_state is not None:
+                    try:
+                        pipe = client.pipeline()
+                        pipe.hset(
+                            players_key,
+                            player_id,
+                            json.dumps(
+                                self._json_safe_state(player_state),
+                                separators=(",", ":"),
+                            ),
+                        )
+                        pipe.expire(players_key, self.SHARED_STATE_TTL_SECONDS)
+                        pipe.execute()
+                    except Exception:
+                        logger.exception(
+                            "Failed to migrate Beat the Clock player state for %s/%s",
+                            session_code,
+                            safe_player_ref(player_id),
+                        )
+
+        if shared_state is not None:
+            if client and player_state is None:
+                try:
+                    raw_value = client.hget(players_key, player_id)
+                    if raw_value:
+                        player_state = json.loads(raw_value)
+                except Exception:
+                    logger.exception(
+                        "Failed to read Beat the Clock player state for %s/%s",
+                        session_code,
+                        safe_player_ref(player_id),
+                    )
+
+            local_state = self.beat_clock_states.get(session_code, {})
+            merged_state = {**local_state, **shared_state}
+            ends_at_raw = merged_state.get("ends_at")
+            if ends_at_raw and not merged_state.get("ends_at_dt"):
+                try:
+                    merged_state["ends_at_dt"] = datetime.fromisoformat(
+                        str(ends_at_raw).replace("Z", "")
+                    )
+                except ValueError:
+                    pass
+
+            players = dict(local_state.get("players") or {})
+            if player_state is not None:
+                players[player_id] = player_state
+            merged_state["players"] = players
+            self.beat_clock_states[session_code] = merged_state
+            return merged_state
+
+        state = self.beat_clock_states.setdefault(
+            session_code,
+            {
+                "active": False,
+                "players": {},
+                "questions": [],
+                "leaderboard": [],
+            },
+        )
+        self.set_beat_clock_state(session_code, state)
+        return state
+
     def update_beat_clock_player_state(
         self, session_code: str, player_id: str, player_state: Dict[str, Any]
     ) -> None:

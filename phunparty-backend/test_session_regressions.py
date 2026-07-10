@@ -95,6 +95,8 @@ class _FakeRedis:
         self.values = {}
         self.hashes = {}
         self.eval_calls = []
+        self.hget_calls = []
+        self.hgetall_calls = []
 
     def pipeline(self):
         return _FakeRedisPipeline(self)
@@ -103,9 +105,11 @@ class _FakeRedis:
         self.hashes.setdefault(key, {})[field] = value
 
     def hget(self, key, field):
+        self.hget_calls.append((key, field))
         return self.hashes.get(key, {}).get(field)
 
     def hgetall(self, key):
+        self.hgetall_calls.append(key)
         return dict(self.hashes.get(key, {}))
 
     def hdel(self, key, field):
@@ -2157,6 +2161,45 @@ def test_fair_play_freeze_reset_reads_per_player_redis_hash_fields():
         assert fake_redis.hashes[frozen_key] == {"P2": "Q2"}
         assert manager.get_fair_play_status(session_code, "P1")["is_frozen"] is False
         assert manager.get_fair_play_status(session_code, "P2")["is_frozen"] is True
+
+
+def test_beat_clock_player_state_read_avoids_full_player_hash_scan():
+    fake_redis = _FakeRedis()
+    session_code = "SESSION123"
+
+    with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+        manager.beat_clock_states.pop(session_code, None)
+        manager.set_beat_clock_state(
+            session_code,
+            {
+                "active": True,
+                "duration_seconds": 60,
+                "ends_at": "2026-07-10T12:00:00",
+                "questions": ["Q1"],
+                "players": {},
+                "leaderboard": [],
+            },
+        )
+        manager.update_beat_clock_player_state(
+            session_code,
+            "P1",
+            {"current_question_id": "Q1", "answered_count": 0},
+        )
+        manager.update_beat_clock_player_state(
+            session_code,
+            "P2",
+            {"current_question_id": "Q2", "answered_count": 1},
+        )
+        manager.beat_clock_states.pop(session_code, None)
+
+        state = manager.get_beat_clock_state_for_player(session_code, "P1")
+
+    assert state["active"] is True
+    assert state["players"] == {
+        "P1": {"current_question_id": "Q1", "answered_count": 0}
+    }
+    assert fake_redis.hget_calls == [(manager._beat_clock_keys(session_code)[1], "P1")]
+    assert fake_redis.hgetall_calls == []
 
 
 def test_connection_generation_rejects_stale_mobile_socket():

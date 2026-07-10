@@ -478,7 +478,7 @@ def get_active_fair_play_question_id(
     if game_type != BEAT_THE_CLOCK_GAME_TYPE:
         return current_question_id
 
-    beat_state = manager.get_beat_clock_state(session_code)
+    beat_state = manager.get_beat_clock_state_for_player(session_code, player_id)
     player_state = beat_state.get("players", {}).get(player_id, {})
     return player_state.get("current_question_id") or current_question_id
 
@@ -568,7 +568,10 @@ def build_sync_state(
     sync_state["game_type"] = game_type
     sync_state["connected_players"] = manager.get_mobile_players(session_code)
     if game_type == BEAT_THE_CLOCK_GAME_TYPE:
-        beat_clock_state = manager.get_beat_clock_state(session_code)
+        beat_clock_state = manager.get_beat_clock_state_for_player(
+            session_code,
+            player_id,
+        )
         sync_state["beat_clock"] = {
             "active": beat_clock_state.get("active", False),
             "duration_seconds": beat_clock_state.get("duration_seconds"),
