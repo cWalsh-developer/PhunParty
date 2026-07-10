@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import sqlalchemy
+from sqlalchemy.dialects import postgresql
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
@@ -904,6 +905,61 @@ def test_score_and_session_assignment_models_prevent_duplicate_membership_rows()
         "session_code",
         "player_id",
     )
+
+
+def test_postgres_session_assignment_uses_on_conflict_do_nothing():
+    mock_db = MagicMock()
+    assignment = SimpleNamespace(
+        assignment_id="A1",
+        session_code="SESSION123",
+        player_id="P1",
+    )
+    query = MagicMock()
+    query.filter.return_value = query
+    query.first.return_value = assignment
+    mock_db.query.return_value = query
+    mock_db.execute.return_value.scalar_one_or_none.return_value = "A1"
+
+    with patch.object(dbCRUD, "_is_postgresql_session", return_value=True):
+        result = dbCRUD.ensure_session_assignment(mock_db, "SESSION123", "P1")
+
+    statement = mock_db.execute.call_args.args[0]
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+    assert result is assignment
+    assert "ON CONFLICT" in compiled
+    assert "DO NOTHING" in compiled
+    assert "session_code" in compiled
+    assert "player_id" in compiled
+
+
+def test_postgres_score_creation_uses_on_conflict_do_nothing():
+    mock_db = MagicMock()
+    score = SimpleNamespace(score_id="S1", score=14)
+    query = MagicMock()
+    query.filter.return_value = query
+    query.first.return_value = score
+    mock_db.query.return_value = query
+    mock_db.execute.return_value.scalar_one_or_none.return_value = None
+
+    with patch.object(dbCRUD, "_is_postgresql_session", return_value=True):
+        with patch.object(dbCRUD, "ensure_session_assignment") as ensure_assignment:
+            with patch.object(
+                dbCRUD,
+                "get_player_by_ID",
+                return_value=SimpleNamespace(
+                    player_name="Alice",
+                    profile_photo_url="photo.jpg",
+                ),
+            ):
+                result = dbCRUD.create_score(mock_db, "SESSION123", "P1")
+
+    statement = mock_db.execute.call_args.args[0]
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+    assert result is score
+    ensure_assignment.assert_called_once_with(mock_db, "SESSION123", "P1")
+    assert "ON CONFLICT" in compiled
+    assert "DO NOTHING" in compiled
+    assert "score = " not in compiled
 
 
 def test_security_constraint_migration_deduplicates_scores_and_assignments():

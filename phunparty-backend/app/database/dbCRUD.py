@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timezone
 
 from sqlalchemy import and_, func, or_, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -910,6 +911,37 @@ def ensure_session_assignment(
     session_end: datetime | None = None,
 ) -> SessionAssignment:
     """Ensure a player/session membership row exists."""
+    session_start = session_start or utc_now()
+
+    if _is_postgresql_session(db):
+        stmt = (
+            pg_insert(SessionAssignment)
+            .values(
+                assignment_id=generate_assignment_id(),
+                player_id=player_id,
+                session_code=session_code,
+                session_start=session_start,
+                session_end=session_end,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    SessionAssignment.session_code,
+                    SessionAssignment.player_id,
+                ]
+            )
+            .returning(SessionAssignment.assignment_id)
+        )
+        db.execute(stmt).scalar_one_or_none()
+        assignment = (
+            db.query(SessionAssignment)
+            .filter(SessionAssignment.player_id == player_id)
+            .filter(SessionAssignment.session_code == session_code)
+            .first()
+        )
+        if assignment:
+            return assignment
+        raise ValueError("Unable to ensure session assignment")
+
     existing_assignment = (
         db.query(SessionAssignment)
         .filter(SessionAssignment.player_id == player_id)
@@ -924,7 +956,7 @@ def ensure_session_assignment(
         assignment_id=generate_assignment_id(),
         player_id=player_id,
         session_code=session_code,
-        session_start=session_start or utc_now(),
+        session_start=session_start,
         session_end=session_end,
     )
     db.add(assignment)
@@ -1157,6 +1189,42 @@ def create_score(db: Session, session_code: str, player_id: str) -> Scores:
     """Create a new score entry for a player in a game session."""
     ensure_session_assignment(db, session_code, player_id)
 
+    player = get_player_by_ID(db, player_id)
+    player_display_name = (
+        player.player_name if player and player.player_name else "Player"
+    )
+    player_photo_url = player.profile_photo_url if player else None
+
+    if _is_postgresql_session(db):
+        stmt = (
+            pg_insert(Scores)
+            .values(
+                score_id=generate_score_id(),
+                session_code=session_code,
+                player_id=player_id,
+                score=0,
+                player_display_name=player_display_name,
+                player_photo_url=player_photo_url,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    Scores.session_code,
+                    Scores.player_id,
+                ]
+            )
+            .returning(Scores.score_id)
+        )
+        db.execute(stmt).scalar_one_or_none()
+        score = (
+            db.query(Scores)
+            .filter(Scores.session_code == session_code)
+            .filter(Scores.player_id == player_id)
+            .first()
+        )
+        if score:
+            return score
+        raise ValueError("Unable to ensure score")
+
     existing_score = (
         db.query(Scores)
         .filter(Scores.session_code == session_code)
@@ -1169,17 +1237,13 @@ def create_score(db: Session, session_code: str, player_id: str) -> Scores:
 
     score_id = generate_score_id()
 
-    player = get_player_by_ID(db, player_id)
-
     new_score = Scores(
         score_id=score_id,
         session_code=session_code,
         player_id=player_id,
         score=0,
-        player_display_name=(
-            player.player_name if player and player.player_name else "Player"
-        ),
-        player_photo_url=(player.profile_photo_url if player else None),
+        player_display_name=player_display_name,
+        player_photo_url=player_photo_url,
     )
 
     db.add(new_score)
