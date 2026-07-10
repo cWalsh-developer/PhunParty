@@ -73,8 +73,16 @@ class _FakeRedisPipeline:
         self.operations.append(("hset", key, field, value))
         return self
 
-    def hdel(self, key, field):
-        self.operations.append(("hdel", key, field))
+    def hdel(self, key, *fields):
+        self.operations.append(("hdel", key, fields))
+        return self
+
+    def zadd(self, key, values):
+        self.operations.append(("zadd", key, values))
+        return self
+
+    def zrem(self, key, *members):
+        self.operations.append(("zrem", key, members))
         return self
 
     def expire(self, key, ttl):
@@ -87,8 +95,14 @@ class _FakeRedisPipeline:
                 _, key, field, value = operation
                 self.redis_client.hset(key, field, value)
             elif operation[0] == "hdel":
-                _, key, field = operation
-                self.redis_client.hdel(key, field)
+                _, key, fields = operation
+                self.redis_client.hdel(key, *fields)
+            elif operation[0] == "zadd":
+                _, key, values = operation
+                self.redis_client.zadd(key, values)
+            elif operation[0] == "zrem":
+                _, key, members = operation
+                self.redis_client.zrem(key, *members)
         self.operations.clear()
 
 
@@ -96,6 +110,7 @@ class _FakeRedis:
     def __init__(self):
         self.values = {}
         self.hashes = {}
+        self.zsets = {}
         self.eval_calls = []
         self.hget_calls = []
         self.hgetall_calls = []
@@ -114,11 +129,47 @@ class _FakeRedis:
         self.hgetall_calls.append(key)
         return dict(self.hashes.get(key, {}))
 
-    def hdel(self, key, field):
-        self.hashes.get(key, {}).pop(field, None)
+    def hdel(self, key, *fields):
+        hash_value = self.hashes.get(key, {})
+        if len(fields) == 1 and isinstance(fields[0], (list, tuple)):
+            fields = tuple(fields[0])
+        for item in fields:
+            hash_value.pop(item, None)
 
     def expire(self, key, ttl):
         return True
+
+    def hmget(self, key, members):
+        return [self.hashes.get(key, {}).get(member) for member in members]
+
+    def zadd(self, key, values):
+        self.zsets.setdefault(key, {}).update(values)
+
+    def zrem(self, key, *members):
+        zset = self.zsets.get(key, {})
+        for member in members:
+            zset.pop(member, None)
+
+    def zrangebyscore(self, key, min_score, max_score):
+        def score_value(value):
+            if value == "-inf":
+                return float("-inf")
+            if value == "+inf":
+                return float("inf")
+            return float(value)
+
+        low = score_value(min_score)
+        high = score_value(max_score)
+        return [
+            member
+            for member, score in self.zsets.get(key, {}).items()
+            if low <= float(score) <= high
+        ]
+
+    def zremrangebyscore(self, key, min_score, max_score):
+        members = self.zrangebyscore(key, min_score, max_score)
+        self.zrem(key, *members)
+        return len(members)
 
     def get(self, key):
         return self.values.get(key)
@@ -133,6 +184,14 @@ class _FakeRedis:
 
     def eval(self, script, numkeys, key, *args):
         self.eval_calls.append((script, numkeys, key, args))
+        if "redis.call('ZRANGEBYSCORE'" in script and "redis.call('HDEL'" in script:
+            meta_key = args[0]
+            now = args[1]
+            expired_members = self.zrangebyscore(key, "-inf", now)
+            self.zrem(key, *expired_members)
+            for member in expired_members:
+                self.hdel(meta_key, member)
+            return len(expired_members)
         if "redis.call('GET', KEYS[1]) == ARGV[1]" in script:
             if self.values.get(key) == args[0]:
                 self.values.pop(key, None)
@@ -1715,6 +1774,53 @@ def test_roster_update_uses_one_shared_presence_snapshot():
     assert roster_message["data"]["connected_players"][0]["player_name"] == "Alice"
     assert roster_message["data"]["connection_stats"]["web_clients"] == 1
     assert roster_message["data"]["connection_stats"]["mobile_clients"] == 1
+
+
+def test_shared_presence_cleanup_removes_expired_metadata():
+    fake_redis = _FakeRedis()
+    session_code = "SESSION123"
+    presence_key, meta_key = manager._presence_keys(session_code)
+    expired_member = manager._presence_member("ws_expired")
+    active_member = manager._presence_member("ws_active")
+    fake_redis.zsets[presence_key] = {
+        expired_member: 100,
+        active_member: 250,
+    }
+    fake_redis.hashes[meta_key] = {
+        expired_member: json.dumps(
+            {
+                "session_code": session_code,
+                "ws_id": "ws_expired",
+                "client_type": "mobile",
+                "player_id": "P1",
+            }
+        ),
+        active_member: json.dumps(
+            {
+                "session_code": session_code,
+                "ws_id": "ws_active",
+                "client_type": "mobile",
+                "player_id": "P2",
+            }
+        ),
+    }
+
+    with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+        with patch("app.websockets.manager.time.time", return_value=150):
+            metadata = manager._shared_presence_metadata(session_code)
+
+    assert metadata == [
+        {
+            "session_code": session_code,
+            "ws_id": "ws_active",
+            "client_type": "mobile",
+            "player_id": "P2",
+        }
+    ]
+    assert expired_member not in fake_redis.zsets[presence_key]
+    assert expired_member not in fake_redis.hashes[meta_key]
+    assert active_member in fake_redis.zsets[presence_key]
+    assert active_member in fake_redis.hashes[meta_key]
 
 
 def test_scheduled_roster_update_debounces_burst_requests():

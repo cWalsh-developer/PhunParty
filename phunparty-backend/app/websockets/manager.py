@@ -459,6 +459,27 @@ class ConnectionManager:
         except Exception:
             logger.exception("Failed to remove shared presence for %s", session_code)
 
+    def _cleanup_expired_shared_presence(
+        self, presence_key: str, meta_key: str, now: int
+    ) -> int:
+        client = websocket_bus.sync_client
+        if not client:
+            return 0
+
+        script = """
+local expired = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+for _, member in ipairs(expired) do
+    redis.call('ZREM', KEYS[1], member)
+    redis.call('HDEL', KEYS[2], member)
+end
+return #expired
+"""
+        try:
+            return int(client.eval(script, 2, presence_key, meta_key, str(now)) or 0)
+        except Exception:
+            logger.exception("Failed to cleanup expired shared presence metadata")
+            return 0
+
     def _shared_presence_metadata(self, session_code: str) -> List[Dict[str, Any]]:
         client = websocket_bus.sync_client
         if not client:
@@ -467,7 +488,7 @@ class ConnectionManager:
         presence_key, meta_key = self._presence_keys(session_code)
         now = int(time.time())
         try:
-            client.zremrangebyscore(presence_key, "-inf", now)
+            self._cleanup_expired_shared_presence(presence_key, meta_key, now)
             members = client.zrangebyscore(presence_key, now + 1, "+inf")
         except Exception:
             logger.exception("Failed to read shared presence for %s", session_code)
@@ -733,7 +754,7 @@ return 0
         presence_key, meta_key = self._presence_keys(session_code)
         now = int(time.time())
         try:
-            client.zremrangebyscore(presence_key, "-inf", now)
+            self._cleanup_expired_shared_presence(presence_key, meta_key, now)
             members = client.zrangebyscore(presence_key, now + 1, "+inf")
             if not members:
                 return 0
