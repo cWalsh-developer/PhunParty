@@ -1125,9 +1125,13 @@ class BeatTheClockGameHandler(GameEventHandler):
         db: Session,
         acting_player_id: Optional[str] = None,
     ) -> None:
-        state = manager.get_beat_clock_state(self.session_code)
-        if state.get("ending"):
+        if not manager.claim_beat_clock_finish(self.session_code):
+            logger.info(
+                "Skipping duplicate Beat the Clock finish for session=%s",
+                self.session_code,
+            )
             return
+        state = manager.get_beat_clock_state(self.session_code)
         state["ending"] = True
         state["active"] = False
         state["finished"] = True

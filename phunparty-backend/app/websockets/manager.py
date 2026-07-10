@@ -355,6 +355,9 @@ class ConnectionManager:
             self._shared_state_key(session_code, "beat-clock:players"),
         )
 
+    def _beat_clock_finish_key(self, session_code: str) -> str:
+        return self._shared_state_key(session_code, "beat-clock:finish")
+
     def _terminal_session_key(self, session_code: str) -> str:
         return websocket_bus.key("terminal", session_code)
 
@@ -3862,6 +3865,30 @@ return 0
                 safe_player_ref(player_id),
             )
 
+    def claim_beat_clock_finish(
+        self, session_code: str, ttl_seconds: int = 900
+    ) -> bool:
+        client = websocket_bus.sync_client
+        if client:
+            try:
+                return bool(
+                    client.set(
+                        self._beat_clock_finish_key(session_code),
+                        self._utc_now_iso(),
+                        nx=True,
+                        ex=ttl_seconds,
+                    )
+                )
+            except Exception:
+                logger.exception("Failed to claim Beat the Clock finish lock")
+                return False
+
+        state = self.beat_clock_states.setdefault(session_code, {})
+        if state.get("ending"):
+            return False
+        state["ending"] = True
+        return True
+
     def clear_beat_clock_state(self, session_code: str) -> None:
         self.beat_clock_states.pop(session_code, None)
         meta_key, players_key = self._beat_clock_keys(session_code)
@@ -3869,6 +3896,7 @@ return 0
             self._shared_state_key(session_code, "beat-clock"),
             meta_key,
             players_key,
+            self._beat_clock_finish_key(session_code),
         )
 
 

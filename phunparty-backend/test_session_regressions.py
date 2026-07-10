@@ -181,8 +181,11 @@ class _FakeRedis:
     def get(self, key):
         return self.values.get(key)
 
-    def set(self, key, value, ex=None):
+    def set(self, key, value, ex=None, nx=False):
+        if nx and key in self.values:
+            return False
         self.values[key] = value
+        return True
 
     def delete(self, *keys):
         self.delete_calls.append(keys)
@@ -3216,6 +3219,53 @@ def test_beat_clock_state_broadcast_is_debounced_per_session():
         )
         if task and not task.done():
             task.cancel()
+
+
+def test_beat_clock_finish_claim_is_single_winner_in_redis():
+    fake_redis = _FakeRedis()
+    session_code = "SESSION123"
+
+    with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+        first_claim = manager.claim_beat_clock_finish(session_code)
+        second_claim = manager.claim_beat_clock_finish(session_code)
+
+    assert first_claim is True
+    assert second_claim is False
+    assert manager._beat_clock_finish_key(session_code) in fake_redis.values
+
+
+def test_beat_clock_finish_now_skips_duplicate_finish_claim():
+    handler = game_handlers.BeatTheClockGameHandler("SESSION123")
+    db = MagicMock()
+
+    async def run_test():
+        with patch.object(
+            manager,
+            "claim_beat_clock_finish",
+            side_effect=[True, False],
+        ):
+            with patch.object(
+                manager,
+                "get_beat_clock_state",
+                return_value={"active": True, "players": {}, "leaderboard": []},
+            ):
+                with patch.object(
+                    handler,
+                    "_broadcast_state",
+                    AsyncMock(return_value={}),
+                ) as broadcast:
+                    with patch.object(
+                        game_handlers,
+                        "handle_game_end",
+                        AsyncMock(),
+                    ) as game_end:
+                        await handler._finish_now(db, acting_player_id="P1")
+                        await handler._finish_now(db, acting_player_id="P1")
+
+        broadcast.assert_awaited_once()
+        game_end.assert_awaited_once()
+
+    asyncio.run(run_test())
 
 
 def test_connection_generation_rejects_stale_mobile_socket():
