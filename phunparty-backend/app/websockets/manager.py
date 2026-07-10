@@ -3042,6 +3042,43 @@ return 0
             self.fair_play_player_status.get(session_code, {}).get(player_id, {})
         )
 
+    def get_fair_play_statuses(self, session_code: str) -> Dict[str, Dict[str, Any]]:
+        statuses: Dict[str, Dict[str, Any]] = {
+            player_id: dict(status)
+            for player_id, status in self.fair_play_player_status.get(
+                session_code, {}
+            ).items()
+            if isinstance(status, dict)
+        }
+
+        legacy_status = self._redis_json_get(
+            self._shared_state_key(session_code, "fair-play-status")
+        )
+        if isinstance(legacy_status, dict):
+            for player_id, status in legacy_status.items():
+                if isinstance(status, dict):
+                    statuses[str(player_id)] = dict(status)
+
+        shared_statuses = self._redis_hash_all(self._fair_play_status_key(session_code))
+        for player_id, raw_status in shared_statuses.items():
+            try:
+                status = json.loads(raw_status)
+            except (TypeError, json.JSONDecodeError):
+                logger.debug(
+                    "Ignoring invalid Fair Play status snapshot for %s/%s",
+                    session_code,
+                    safe_player_ref(str(player_id)),
+                )
+                continue
+            if isinstance(status, dict):
+                statuses[str(player_id)] = status
+
+        if statuses:
+            self.fair_play_player_status[session_code] = {
+                player_id: dict(status) for player_id, status in statuses.items()
+            }
+        return statuses
+
     def reset_fair_play_freezes_for_question(
         self, session_code: str, question_id: str
     ) -> None:

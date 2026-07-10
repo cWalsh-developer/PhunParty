@@ -89,7 +89,7 @@ async def handle_game_end(
             invalidate_profile_cache(player_id)
         cache.delete("game:sessions:public")
 
-        fair_play_statuses = manager.fair_play_player_status.get(session_code, {})
+        fair_play_statuses = manager.get_fair_play_statuses(session_code)
         removed_players = [
             {
                 "player_id": player_id,

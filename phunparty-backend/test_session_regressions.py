@@ -1323,6 +1323,85 @@ def test_game_lifecycle_broadcasts_final_scores_for_already_ended_session():
     assert message["data"]["final_scores"] == final_scores
 
 
+def test_game_lifecycle_terminal_snapshot_uses_shared_fair_play_statuses():
+    ended_at = datetime(2026, 6, 1, 12, 0, 0)
+    game_state = SimpleNamespace(ended_at=ended_at)
+    query_result = MagicMock()
+    query_result.filter.return_value = query_result
+    query_result.first.return_value = game_state
+    query_result.all.return_value = []
+    mock_db = MagicMock()
+    mock_db.query.return_value = query_result
+    fair_play_statuses = {
+        "P1": {"strike_count": 1, "is_kicked": False},
+        "P2": {"strike_count": 3, "is_kicked": True},
+    }
+    captured_snapshot = {}
+
+    def remember_terminal_session(session_code, snapshot, ttl_seconds):
+        captured_snapshot.update(snapshot)
+        return snapshot
+
+    with patch.object(game_lifecycle, "update_game_session_ended", return_value=True):
+        with patch.object(game_lifecycle, "get_final_scores", return_value=[]):
+            with patch.object(
+                game_lifecycle,
+                "get_session_by_code",
+                return_value=SimpleNamespace(owner_player_id="OWNER"),
+            ):
+                with patch.object(game_lifecycle, "set_rls_current_player"):
+                    with patch.object(
+                        game_lifecycle.manager,
+                        "get_fair_play_statuses",
+                        return_value=fair_play_statuses,
+                    ) as get_statuses:
+                        with patch.object(
+                            game_lifecycle.manager,
+                            "remember_terminal_session",
+                            side_effect=remember_terminal_session,
+                        ):
+                            with patch.object(
+                                game_lifecycle.manager,
+                                "set_session_phase",
+                                return_value={
+                                    "phase": "ended",
+                                    "phase_started_at": "2026-06-01T12:00:00",
+                                    "server_time_ms": 123,
+                                },
+                            ):
+                                with patch.object(
+                                    game_lifecycle.manager,
+                                    "broadcast_to_session",
+                                    AsyncMock(),
+                                ):
+                                    with patch.object(
+                                        game_lifecycle.manager,
+                                        "cleanup_session_later",
+                                        return_value=None,
+                                    ):
+                                        with patch.object(
+                                            game_lifecycle.manager,
+                                            "cleanup_terminal_session_later",
+                                            return_value=None,
+                                        ):
+                                            result = asyncio.run(
+                                                game_lifecycle.handle_game_end(
+                                                    "SESSION123", mock_db
+                                                )
+                                            )
+
+    assert result is True
+    get_statuses.assert_called_once_with("SESSION123")
+    assert captured_snapshot["fair_play_player_status"]["P2"]["is_kicked"] is True
+    assert captured_snapshot["removed_players"] == [
+        {
+            "player_id": "P2",
+            "strike_count": 3,
+            "is_kicked": True,
+        }
+    ]
+
+
 def test_buzzer_state_is_shared_per_session():
     manager.reset_buzzer_state("SESSION123")
 
@@ -2549,6 +2628,28 @@ def test_fair_play_status_uses_per_player_redis_hash_fields():
     assert json.loads(fake_redis.hashes[status_key]["P1"])["strike_count"] == 1
     assert p1_status["strike_count"] == 1
     assert p2_status["strike_count"] == 2
+
+
+def test_fair_play_statuses_read_shared_redis_hash_snapshot():
+    fake_redis = _FakeRedis()
+    session_code = "SESSION123"
+    status_key = manager._fair_play_status_key(session_code)
+    fake_redis.hashes[status_key] = {
+        "P1": json.dumps({"strike_count": 1, "is_kicked": False}),
+        "P2": json.dumps({"strike_count": 3, "is_kicked": True}),
+    }
+    manager.fair_play_player_status[session_code] = {"LOCAL_ONLY": {"strike_count": 2}}
+
+    try:
+        with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+            statuses = manager.get_fair_play_statuses(session_code)
+    finally:
+        manager.fair_play_player_status.pop(session_code, None)
+
+    assert statuses["P1"]["strike_count"] == 1
+    assert statuses["P2"]["is_kicked"] is True
+    assert statuses["LOCAL_ONLY"]["strike_count"] == 2
+    assert fake_redis.hgetall_calls == [status_key]
 
 
 def test_fair_play_freeze_reset_reads_per_player_redis_hash_fields():
