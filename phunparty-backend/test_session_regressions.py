@@ -2200,6 +2200,66 @@ def test_redis_bus_rejects_malformed_events():
     )
 
 
+def test_redis_bus_dispatches_different_sessions_independently():
+    async def run_test():
+        bus = redis_bus.RedisWebSocketBus()
+        bus.dispatch_queue_idle_seconds = 60
+        started_slow = asyncio.Event()
+        release_slow = asyncio.Event()
+        handled = []
+
+        async def dispatcher(event):
+            handled.append((event["session_code"], event["message"]["type"]))
+            if event["session_code"] == "SLOW01":
+                started_slow.set()
+                await release_slow.wait()
+
+        bus._dispatcher = dispatcher
+
+        await bus._enqueue_event(
+            {
+                "version": 1,
+                "kind": "session_broadcast",
+                "session_code": "SLOW01",
+                "message": {"type": "first"},
+            }
+        )
+        await asyncio.wait_for(started_slow.wait(), timeout=1)
+
+        await bus._enqueue_event(
+            {
+                "version": 1,
+                "kind": "session_broadcast",
+                "session_code": "FAST01",
+                "message": {"type": "second"},
+            }
+        )
+        await asyncio.wait_for(bus._dispatch_queues["FAST01"].join(), timeout=1)
+        assert ("FAST01", "second") in handled
+
+        await bus._enqueue_event(
+            {
+                "version": 1,
+                "kind": "session_broadcast",
+                "session_code": "SLOW01",
+                "message": {"type": "third"},
+            }
+        )
+        await asyncio.sleep(0)
+        assert handled == [("SLOW01", "first"), ("FAST01", "second")]
+
+        release_slow.set()
+        await asyncio.wait_for(bus._dispatch_queues["SLOW01"].join(), timeout=1)
+        assert handled == [
+            ("SLOW01", "first"),
+            ("FAST01", "second"),
+            ("SLOW01", "third"),
+        ]
+        await bus.close()
+
+    asyncio.run(run_test())
+
+
 def test_fair_play_status_uses_per_player_redis_hash_fields():
     fake_redis = _FakeRedis()
 

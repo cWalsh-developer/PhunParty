@@ -74,12 +74,21 @@ class RedisWebSocketBus:
             os.getenv("WS_REDIS_CONNECT_TIMEOUT", "0.5")
         )
         self.socket_timeout = float(os.getenv("WS_REDIS_SOCKET_TIMEOUT", "0.5"))
+        self.dispatch_queue_maxsize = int(os.getenv("WS_BUS_QUEUE_MAXSIZE", "1000"))
+        self.dispatch_queue_put_timeout = float(
+            os.getenv("WS_BUS_QUEUE_PUT_TIMEOUT", "0.05")
+        )
+        self.dispatch_queue_idle_seconds = float(
+            os.getenv("WS_BUS_QUEUE_IDLE_SECONDS", "60")
+        )
 
         self._redis: redis.Redis | None = None
         self._sync_redis: sync_redis.Redis | None = None
         self._pubsub = None
         self._reader_task: asyncio.Task | None = None
         self._dispatcher: EventDispatcher | None = None
+        self._dispatch_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        self._dispatch_tasks: dict[str, asyncio.Task] = {}
 
     @property
     def connected(self) -> bool:
@@ -217,6 +226,70 @@ class RedisWebSocketBus:
             encoded,
         )
 
+    async def _enqueue_event(self, event: dict[str, Any]) -> None:
+        if not self._dispatcher:
+            return
+
+        session_code = event["session_code"]
+        queue = self._dispatch_queues.get(session_code)
+        if queue is None:
+            queue = asyncio.Queue(maxsize=self.dispatch_queue_maxsize)
+            self._dispatch_queues[session_code] = queue
+            self._dispatch_tasks[session_code] = asyncio.create_task(
+                self._dispatch_session_events(session_code),
+                name=f"ws-redis-dispatch-{session_code}",
+            )
+
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            logger.warning(
+                "Redis WebSocket dispatch queue full for session=%s size=%s",
+                session_code,
+                queue.qsize(),
+            )
+            try:
+                await asyncio.wait_for(
+                    queue.put(event),
+                    timeout=self.dispatch_queue_put_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Dropped Redis WebSocket event after dispatch queue timeout: session=%s kind=%s",
+                    session_code,
+                    event.get("kind"),
+                )
+
+    async def _dispatch_session_events(self, session_code: str) -> None:
+        queue = self._dispatch_queues[session_code]
+
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    queue.get(),
+                    timeout=self.dispatch_queue_idle_seconds,
+                )
+            except asyncio.TimeoutError:
+                if queue.empty():
+                    self._dispatch_queues.pop(session_code, None)
+                    self._dispatch_tasks.pop(session_code, None)
+                    return
+                continue
+
+            try:
+                if self._dispatcher:
+                    await self._dispatcher(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Redis WebSocket event dispatch failed session=%s kind=%s",
+                    session_code,
+                    event.get("kind"),
+                )
+            finally:
+                queue.task_done()
+
     async def _reader(self) -> None:
         if not self._pubsub:
             return
@@ -243,8 +316,7 @@ class RedisWebSocketBus:
                 if not self._validate_event(event):
                     continue
 
-                if self._dispatcher:
-                    await self._dispatcher(event)
+                await self._enqueue_event(event)
 
             except asyncio.CancelledError:
                 raise
@@ -261,6 +333,12 @@ class RedisWebSocketBus:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._reader_task
 
+        for task in list(self._dispatch_tasks.values()):
+            task.cancel()
+        for task in list(self._dispatch_tasks.values()):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
         if self._pubsub:
             await self._pubsub.unsubscribe(self.channel)
             await self._pubsub.aclose()
@@ -271,6 +349,8 @@ class RedisWebSocketBus:
             self._sync_redis.close()
 
         self._reader_task = None
+        self._dispatch_queues.clear()
+        self._dispatch_tasks.clear()
         self._pubsub = None
         self._redis = None
         self._sync_redis = None
