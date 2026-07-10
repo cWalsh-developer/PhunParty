@@ -2879,6 +2879,48 @@ def test_beat_clock_player_state_read_avoids_full_player_hash_scan():
     assert fake_redis.hgetall_calls == []
 
 
+def test_beat_clock_leaderboard_uses_single_score_query_projection():
+    handler = game_handlers.BeatTheClockGameHandler("SESSION123")
+    db = MagicMock()
+    projected_scores = [
+        {
+            "rank": 1,
+            "player_id": "P1",
+            "display_name": "Alice",
+            "player_photo_url": "alice.jpg",
+            "score": 4,
+        },
+        {
+            "rank": 2,
+            "player_id": "P2",
+            "display_name": "Bob",
+            "player_photo_url": None,
+            "score": 2,
+        },
+    ]
+
+    with patch.object(
+        game_handlers,
+        "get_session_score_leaderboard",
+        return_value=projected_scores,
+    ) as leaderboard_query:
+        with patch.object(manager, "get_mobile_players") as get_mobile_players:
+            with patch.object(
+                game_handlers,
+                "get_scores_by_session_and_player",
+            ) as get_score:
+                leaderboard = handler._leaderboard(db)
+
+    leaderboard_query.assert_called_once_with(db, "SESSION123")
+    get_mobile_players.assert_not_called()
+    get_score.assert_not_called()
+    assert leaderboard[0]["display_name"] == "Alice"
+    assert leaderboard[0]["roster_player_id"] == game_handlers.make_roster_player_id(
+        "SESSION123",
+        "P1",
+    )
+
+
 def test_connection_generation_rejects_stale_mobile_socket():
     fake_redis = _FakeRedis()
     websocket = MagicMock()

@@ -17,6 +17,7 @@ from app.database.dbCRUD import (
     get_player_by_ID,
     get_question_by_id,
     get_scores_by_session_and_player,
+    get_session_score_leaderboard,
     get_session_by_code,
     get_session_questions_ordered,
     update_scores,
@@ -377,31 +378,16 @@ class BeatTheClockGameHandler(GameEventHandler):
         ]
 
     def _leaderboard(self, db: Session) -> list[dict]:
-        players = manager.get_mobile_players(self.session_code)
-        leaderboard = []
-        for player in players:
-            player_id = player.get("player_id")
-            if not player_id:
-                continue
-            score_row = get_scores_by_session_and_player(
-                db, self.session_code, player_id
-            )
-            leaderboard.append(
-                {
-                    "player_id": player_id,
-                    "roster_player_id": make_roster_player_id(
-                        self.session_code, player_id
-                    ),
-                    "display_name": player.get("player_name") or "Player",
-                    "player_photo_url": player.get("player_photo"),
-                    "score": score_row.score if score_row else 0,
-                }
-            )
-
-        leaderboard.sort(key=lambda item: (-item["score"], item["display_name"]))
-        for index, item in enumerate(leaderboard, start=1):
-            item["rank"] = index
-        return leaderboard
+        return [
+            {
+                **entry,
+                "roster_player_id": make_roster_player_id(
+                    self.session_code,
+                    entry["player_id"],
+                ),
+            }
+            for entry in get_session_score_leaderboard(db, self.session_code)
+        ]
 
     def _ensure_player_state(
         self,

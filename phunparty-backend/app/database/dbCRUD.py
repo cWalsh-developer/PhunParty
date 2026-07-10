@@ -1259,6 +1259,28 @@ def get_scores_by_session(db: Session, session_code: str) -> list[Scores]:
     return scores
 
 
+def get_session_score_leaderboard(db: Session, session_code: str) -> list[dict]:
+    """Return a session leaderboard from score snapshots in one query."""
+    scores = (
+        db.query(Scores)
+        .filter(Scores.session_code == session_code)
+        .order_by(Scores.score.desc(), Scores.player_display_name.asc())
+        .all()
+    )
+    leaderboard = []
+    for index, score in enumerate(scores, start=1):
+        leaderboard.append(
+            {
+                "rank": index,
+                "player_id": score.player_id,
+                "display_name": score.player_display_name or "Player",
+                "player_photo_url": score.player_photo_url,
+                "score": score.score,
+            }
+        )
+    return leaderboard
+
+
 def calculate_game_results(db: Session, session_code: str):
     """Determine the game results for a session and update the DB."""
     session_scores = db.query(Scores).filter(Scores.session_code == session_code).all()
