@@ -539,6 +539,42 @@ return old
                 raise
             return None
 
+    async def _claim_player_connection_generation_async(
+        self, session_code: str, player_id: str, generation: str
+    ) -> Optional[str]:
+        client = websocket_bus.async_client
+        if not client:
+            return self._claim_player_connection_generation(
+                session_code,
+                player_id,
+                generation,
+            )
+
+        key = self._player_generation_key(session_code, player_id)
+        script = """
+local old = redis.call('GET', KEYS[1])
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+return old
+"""
+        try:
+            old_generation = await client.eval(
+                script,
+                1,
+                key,
+                generation,
+                str(self.PRESENCE_KEY_TTL_SECONDS),
+            )
+            return str(old_generation) if old_generation else None
+        except Exception:
+            logger.exception(
+                "Failed to claim player connection generation for %s/%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+            if websocket_bus.connected:
+                raise
+            return None
+
     def _get_player_connection_generation(
         self, session_code: str, player_id: str
     ) -> Optional[str]:
@@ -547,6 +583,25 @@ return old
             return None
         try:
             value = client.get(self._player_generation_key(session_code, player_id))
+            return str(value) if value else None
+        except Exception:
+            logger.exception(
+                "Failed to read player connection generation for %s/%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+            return None
+
+    async def _get_player_connection_generation_async(
+        self, session_code: str, player_id: str
+    ) -> Optional[str]:
+        client = websocket_bus.async_client
+        if not client:
+            return self._get_player_connection_generation(session_code, player_id)
+        try:
+            value = await client.get(
+                self._player_generation_key(session_code, player_id)
+            )
             return str(value) if value else None
         except Exception:
             logger.exception(
@@ -572,6 +627,36 @@ return 0
 """
         try:
             client.eval(script, 1, key, generation)
+        except Exception:
+            logger.exception(
+                "Failed to clear player connection generation for %s/%s",
+                session_code,
+                safe_player_ref(player_id),
+            )
+
+    async def _clear_player_connection_generation_async(
+        self, session_code: str, player_id: str, generation: Optional[str]
+    ) -> None:
+        client = websocket_bus.async_client
+        if not client:
+            self._clear_player_connection_generation(
+                session_code,
+                player_id,
+                generation,
+            )
+            return
+        if not generation:
+            return
+
+        key = self._player_generation_key(session_code, player_id)
+        script = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+        try:
+            await client.eval(script, 1, key, generation)
         except Exception:
             logger.exception(
                 "Failed to clear player connection generation for %s/%s",
@@ -1148,7 +1233,7 @@ return 0
             connection_info["connection_confirmed"] = True
             old_generation = None
             if client_type == "mobile" and player_id:
-                old_generation = self._claim_player_connection_generation(
+                old_generation = await self._claim_player_connection_generation_async(
                     session_code,
                     player_id,
                     connection_generation,
@@ -1639,7 +1724,7 @@ return 0
             self._remove_connection_indexes(session_code, ws_id, connection_info)
             self.websocket_registry.pop(ws_id, None)
             self._remove_presence(session_code, ws_id)
-            self._clear_player_connection_generation(
+            await self._clear_player_connection_generation_async(
                 session_code,
                 player_id,
                 connection_info.get("connection_generation"),
@@ -1706,6 +1791,26 @@ return 0
             return True
 
         current_generation = self._get_player_connection_generation(
+            session_code,
+            player_id,
+        )
+        return current_generation is None or current_generation == generation
+
+    async def connection_is_current_async(
+        self, websocket: WebSocket, session_code: str, player_id: Optional[str]
+    ) -> bool:
+        if not player_id:
+            return True
+
+        connection_info = self._connection_info_for_websocket(websocket)
+        if not connection_info:
+            return False
+
+        generation = connection_info.get("connection_generation")
+        if not generation:
+            return True
+
+        current_generation = await self._get_player_connection_generation_async(
             session_code,
             player_id,
         )

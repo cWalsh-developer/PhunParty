@@ -98,6 +98,10 @@ class RedisWebSocketBus:
     def sync_client(self) -> sync_redis.Redis | None:
         return self._sync_redis
 
+    @property
+    def async_client(self) -> redis.Redis | None:
+        return self._redis
+
     def key(self, *parts: str) -> str:
         cleaned = [str(part).strip(":") for part in parts if str(part)]
         return ":".join([self.namespace, *cleaned])

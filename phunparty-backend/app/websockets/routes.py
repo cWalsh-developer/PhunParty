@@ -875,10 +875,13 @@ async def websocket_endpoint(
                 message_type = message.get("type")
                 message_data = message.get("data", {}) or {}
 
-                if client_type == "mobile" and not manager.connection_is_current(
-                    websocket,
-                    session_code,
-                    player_id,
+                if (
+                    client_type == "mobile"
+                    and not await manager.connection_is_current_async(
+                        websocket,
+                        session_code,
+                        player_id,
+                    )
                 ):
                     await websocket.close(
                         code=4000,
