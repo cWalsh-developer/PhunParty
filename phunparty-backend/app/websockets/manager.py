@@ -79,6 +79,7 @@ class ConnectionManager:
     TERMINAL_SESSION_TTL_SECONDS = 900
     ACK_RETRY_DELAY_SECONDS = 1.5
     ACK_MAX_RESENDS = 2
+    ROSTER_UPDATE_DEBOUNCE_SECONDS = 0.05
     ACK_EVENT_TYPES = {
         "game_started",
         "countdown_started",
@@ -135,6 +136,7 @@ class ConnectionManager:
         # player leave tasks: "session_code:player_id" -> asyncio.Task
         # Used to avoid flapping presence when mobile networks briefly disconnect.
         self.pending_player_leave_tasks: Dict[str, asyncio.Task] = {}
+        self.roster_update_tasks: Dict[str, asyncio.Task] = {}
         # Start heartbeat checker and automatic ping broadcaster
         self._heartbeat_task = None
         self._ping_task = None
@@ -310,7 +312,7 @@ class ConnectionManager:
                 )
 
                 # Keep all clients in sync after confirmed leave.
-                await self.broadcast_player_roster_update(session_code)
+                await self.schedule_player_roster_update(session_code)
 
             except asyncio.CancelledError:
                 logger.debug(
@@ -1228,9 +1230,8 @@ return 0
                     f"🔁 Player {player_name} reconnected within grace window; skipping duplicate player_joined"
                 )
 
-            # CRITICAL: Send roster update to ALL clients (web + mobile)
-            # This ensures everyone has the latest player list
-            await self.broadcast_player_roster_update(session_code)
+            # Coalesce roster rebuilds during join/reconnect bursts.
+            await self.schedule_player_roster_update(session_code)
 
             logger.info(
                 f"✅ Sent roster_update to all clients in session {session_code}"
@@ -1442,6 +1443,9 @@ return 0
         for player_key in list(self.player_connection_index):
             if player_key[0] == session_code:
                 self.player_connection_index.pop(player_key, None)
+        roster_task = self.roster_update_tasks.pop(session_code, None)
+        if roster_task and not roster_task.done():
+            roster_task.cancel()
         self._redis_delete(
             self._shared_state_key(session_code, "phase"),
             self._shared_state_key(session_code, "current-question"),
@@ -2801,6 +2805,40 @@ return 0
 
         logger.debug(
             f"📋 Broadcasted roster update to session {session_code}: {len(mobile_players)} players - {[p['player_name'] for p in mobile_players]}"
+        )
+
+    async def schedule_player_roster_update(
+        self, session_code: str, delay_seconds: Optional[float] = None
+    ) -> None:
+        """Debounce roster rebuild/broadcast work for join and reconnect bursts."""
+        existing_task = self.roster_update_tasks.get(session_code)
+        if existing_task and not existing_task.done():
+            return
+
+        delay = (
+            self.ROSTER_UPDATE_DEBOUNCE_SECONDS
+            if delay_seconds is None
+            else delay_seconds
+        )
+
+        async def delayed_roster_update() -> None:
+            try:
+                await asyncio.sleep(delay)
+                await self.broadcast_player_roster_update(session_code)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to broadcast debounced roster update for %s",
+                    session_code,
+                )
+            finally:
+                current_task = asyncio.current_task()
+                if self.roster_update_tasks.get(session_code) is current_task:
+                    self.roster_update_tasks.pop(session_code, None)
+
+        self.roster_update_tasks[session_code] = asyncio.create_task(
+            delayed_roster_update()
         )
 
     async def wait_for_ready_connections(self, session_code: str, timeout: float = 2.0):

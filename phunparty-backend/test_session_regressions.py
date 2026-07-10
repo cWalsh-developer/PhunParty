@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -1616,6 +1617,30 @@ def test_roster_update_broadcasts_to_non_mobile_clients_only():
     web_socket.send_text.assert_awaited_once()
     host_socket.send_text.assert_awaited_once()
     mobile_socket.send_text.assert_not_awaited()
+
+
+def test_scheduled_roster_update_debounces_burst_requests():
+    session_code = "ROSTERDEBOUNCE"
+
+    async def run_test():
+        with patch.object(manager, "broadcast_player_roster_update", AsyncMock()):
+            try:
+                await manager.schedule_player_roster_update(session_code, 0.01)
+                await manager.schedule_player_roster_update(session_code, 0.01)
+                await manager.schedule_player_roster_update(session_code, 0.01)
+                task = manager.roster_update_tasks[session_code]
+                await asyncio.wait_for(task, timeout=1)
+                manager.broadcast_player_roster_update.assert_awaited_once_with(
+                    session_code
+                )
+            finally:
+                task = manager.roster_update_tasks.pop(session_code, None)
+                if task and not task.done():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+
+    asyncio.run(run_test())
 
 
 def test_mobile_current_question_payload_rebuilds_missing_queue_from_db():
