@@ -830,6 +830,18 @@ return 0
         except Exception:
             logger.exception("Failed to delete shared state keys %s", keys)
 
+    def _redis_expire(self, *keys: str, ttl_seconds: int) -> None:
+        client = websocket_bus.sync_client
+        if not client or not keys:
+            return
+        try:
+            pipe = client.pipeline()
+            for key in keys:
+                pipe.expire(key, ttl_seconds)
+            pipe.execute()
+        except Exception:
+            logger.exception("Failed to expire shared state keys %s", keys)
+
     def _redis_hash_json_get(self, key: str, field: str) -> Optional[Dict[str, Any]]:
         client = websocket_bus.sync_client
         if not client:
@@ -1608,7 +1620,7 @@ return 0
         roster_task = self.roster_update_tasks.pop(session_code, None)
         if roster_task and not roster_task.done():
             roster_task.cancel()
-        self._redis_delete(
+        self._redis_expire(
             self._shared_state_key(session_code, "phase"),
             self._shared_state_key(session_code, "current-question"),
             self._shared_state_key(session_code, "game-type"),
@@ -1620,6 +1632,7 @@ return 0
             self._fair_play_status_key(session_code),
             self._fair_play_frozen_key(session_code),
             self._pending_focus_key(session_code),
+            ttl_seconds=self.TERMINAL_SESSION_TTL_SECONDS,
         )
 
         session_key_prefix = f"{session_code}:"

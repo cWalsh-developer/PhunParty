@@ -104,6 +104,9 @@ class _FakeRedisPipeline:
             elif operation[0] == "zrem":
                 _, key, members = operation
                 self.redis_client.zrem(key, *members)
+            elif operation[0] == "expire":
+                _, key, ttl = operation
+                self.redis_client.expire(key, ttl)
         self.operations.clear()
 
 
@@ -115,6 +118,8 @@ class _FakeRedis:
         self.eval_calls = []
         self.hget_calls = []
         self.hgetall_calls = []
+        self.expire_calls = []
+        self.delete_calls = []
 
     def pipeline(self):
         return _FakeRedisPipeline(self)
@@ -138,6 +143,7 @@ class _FakeRedis:
             hash_value.pop(item, None)
 
     def expire(self, key, ttl):
+        self.expire_calls.append((key, ttl))
         return True
 
     def hmget(self, key, members):
@@ -179,6 +185,7 @@ class _FakeRedis:
         self.values[key] = value
 
     def delete(self, *keys):
+        self.delete_calls.append(keys)
         for key in keys:
             self.values.pop(key, None)
             self.hashes.pop(key, None)
@@ -1456,6 +1463,29 @@ def test_game_lifecycle_terminal_snapshot_uses_shared_fair_play_statuses():
             "is_kicked": True,
         }
     ]
+
+
+def test_cleanup_session_expires_shared_state_instead_of_deleting_it():
+    fake_redis = _FakeRedis()
+    session_code = "SESSION123"
+    phase_key = manager._shared_state_key(session_code, "phase")
+    fair_play_key = manager._fair_play_status_key(session_code)
+    fake_redis.values[phase_key] = json.dumps({"phase": "ended"})
+    fake_redis.hashes[fair_play_key] = {
+        "P1": json.dumps({"strike_count": 1}),
+    }
+
+    with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+        manager.cleanup_session(session_code)
+
+    assert fake_redis.values[phase_key] == json.dumps({"phase": "ended"})
+    assert fake_redis.hashes[fair_play_key]["P1"] == json.dumps({"strike_count": 1})
+    assert fake_redis.delete_calls == []
+    assert (phase_key, manager.TERMINAL_SESSION_TTL_SECONDS) in fake_redis.expire_calls
+    assert (
+        fair_play_key,
+        manager.TERMINAL_SESSION_TTL_SECONDS,
+    ) in fake_redis.expire_calls
 
 
 def test_buzzer_state_is_shared_per_session():
