@@ -139,6 +139,9 @@ class ConnectionManager:
         # Used to avoid flapping presence when mobile networks briefly disconnect.
         self.pending_player_leave_tasks: Dict[str, asyncio.Task] = {}
         self.roster_update_tasks: Dict[str, asyncio.Task] = {}
+        self.outbound_queue_maxsize = 100
+        self.outbound_queue_put_timeout = 0.05
+        self.dropped_outbound_message_count = 0
         # Start heartbeat checker and automatic ping broadcaster
         self._heartbeat_task = None
         self._ping_task = None
@@ -178,6 +181,14 @@ class ConnectionManager:
             websocket = self.websocket_registry[ws_id].get("websocket")
         if websocket:
             self.websocket_to_ws_id.pop(self._websocket_lookup_key(websocket), None)
+
+        sender_task = (connection_info or {}).get("outbound_sender_task")
+        if (
+            sender_task
+            and not sender_task.done()
+            and sender_task is not asyncio.current_task()
+        ):
+            sender_task.cancel()
 
         if (
             session_code
@@ -242,6 +253,108 @@ class ConnectionManager:
             return self._sanitize_for_web_client(message)
 
         return message
+
+    async def _connection_sender_loop(
+        self,
+        session_code: str,
+        ws_id: str,
+        connection_info: Dict[str, Any],
+    ) -> None:
+        websocket = connection_info["websocket"]
+        queue: asyncio.Queue[str] = connection_info["outbound_queue"]
+
+        while True:
+            payload = await queue.get()
+            try:
+                await websocket.send_text(payload)
+            except WebSocketDisconnect:
+                logger.warning(
+                    "WebSocket %s disconnected while draining outbound queue",
+                    ws_id,
+                )
+                self.disconnect(websocket)
+                return
+            except Exception:
+                logger.exception(
+                    "Failed to send queued websocket message: session=%s ws_id=%s",
+                    session_code,
+                    ws_id,
+                )
+                self.disconnect(websocket)
+                return
+            finally:
+                queue.task_done()
+
+    def _ensure_outbound_queue(
+        self,
+        session_code: str,
+        ws_id: str,
+        connection_info: Dict[str, Any],
+    ) -> asyncio.Queue[str]:
+        queue = connection_info.get("outbound_queue")
+        task = connection_info.get("outbound_sender_task")
+
+        if queue is None:
+            queue = asyncio.Queue(maxsize=self.outbound_queue_maxsize)
+            connection_info["outbound_queue"] = queue
+
+        if not task or task.done():
+            connection_info["outbound_sender_task"] = asyncio.create_task(
+                self._connection_sender_loop(session_code, ws_id, connection_info),
+                name=f"ws-outbound-{session_code}-{ws_id}",
+            )
+
+        return queue
+
+    async def _enqueue_broadcast_payload(
+        self,
+        session_code: str,
+        ws_id: str,
+        connection_info: Dict[str, Any],
+        payload: str,
+        *,
+        critical: bool = False,
+    ) -> bool:
+        queue = self._ensure_outbound_queue(session_code, ws_id, connection_info)
+
+        try:
+            queue.put_nowait(payload)
+            return True
+        except asyncio.QueueFull:
+            if not critical:
+                try:
+                    queue.get_nowait()
+                    queue.task_done()
+                except asyncio.QueueEmpty:
+                    pass
+
+                try:
+                    queue.put_nowait(payload)
+                    self.dropped_outbound_message_count += 1
+                    return True
+                except asyncio.QueueFull:
+                    self.dropped_outbound_message_count += 1
+                    logger.warning(
+                        "Dropped websocket broadcast for full outbound queue: session=%s ws_id=%s",
+                        session_code,
+                        ws_id,
+                    )
+                    return False
+
+            try:
+                await asyncio.wait_for(
+                    queue.put(payload),
+                    timeout=self.outbound_queue_put_timeout,
+                )
+                return True
+            except asyncio.TimeoutError:
+                self.dropped_outbound_message_count += 1
+                logger.warning(
+                    "Critical websocket broadcast queue timed out: session=%s ws_id=%s",
+                    session_code,
+                    ws_id,
+                )
+                return False
 
     def _player_task_key(self, session_code: str, player_id: str) -> str:
         return f"{session_code}:{player_id}"
@@ -2034,7 +2147,15 @@ return 0
                         message_with_timestamp,
                         connection_info,
                     )
-                    await websocket.send_text(json.dumps(outbound_message))
+                    enqueued = await self._enqueue_broadcast_payload(
+                        session_code,
+                        ws_id,
+                        connection_info,
+                        json.dumps(outbound_message),
+                        critical=critical or should_require_ack,
+                    )
+                    if not enqueued:
+                        raise RuntimeError("outbound queue full")
                     if should_require_ack:
                         self._track_ack_target(
                             message_with_timestamp["event_id"],
@@ -2049,7 +2170,7 @@ return 0
                     elif client_type == "web":
                         web_sent += 1
                     sent = True
-                    logger.debug(f"  ✓ Sent successfully to {client_type} {ws_id}")
+                    logger.debug(f"  ✓ Queued successfully to {client_type} {ws_id}")
                     break
                 except WebSocketDisconnect:
                     logger.warning(
@@ -2539,49 +2660,6 @@ return 0
             ],
         )
         return deduped_players
-
-    def get_session_stats(self, session_code: str) -> Dict[str, Any]:
-        """Get statistics for a session"""
-        shared_presence = self._shared_presence_metadata(session_code)
-        if shared_presence:
-            mobile_players = self.get_mobile_players(session_code)
-            web_clients = sum(
-                1
-                for metadata in shared_presence
-                if metadata.get("client_type") == "web"
-                and metadata.get("connection_confirmed")
-            )
-            mobile_clients = sum(
-                1
-                for metadata in shared_presence
-                if metadata.get("client_type") == "mobile"
-                and metadata.get("connection_confirmed")
-            )
-            return {
-                "total_connections": web_clients + mobile_clients,
-                "web_clients": web_clients,
-                "mobile_clients": mobile_clients,
-                "mobile_players": mobile_players,
-                "phase": self.get_session_phase_state(session_code).get("phase"),
-                "pending_acks": self.get_pending_ack_summary(session_code),
-            }
-
-        connections = self.get_session_connections(session_code)
-        web_clients = sum(
-            1 for conn in connections.values() if conn["client_type"] == "web"
-        )
-        mobile_clients = sum(
-            1 for conn in connections.values() if conn["client_type"] == "mobile"
-        )
-
-        return {
-            "total_connections": len(connections),
-            "web_clients": web_clients,
-            "mobile_clients": mobile_clients,
-            "mobile_players": self.get_mobile_players(session_code),
-            "phase": self.get_session_phase_state(session_code).get("phase"),
-            "pending_acks": self.get_pending_ack_summary(session_code),
-        }
 
     async def send_personal_message_by_id(self, message: dict, websocket_id: str):
         """Send message to specific WebSocket by websocket_id"""

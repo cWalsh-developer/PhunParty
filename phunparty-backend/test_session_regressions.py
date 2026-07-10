@@ -2936,6 +2936,83 @@ def test_redis_bus_does_not_drop_control_events_when_session_queue_is_full():
     asyncio.run(run_test())
 
 
+def test_local_session_broadcast_uses_per_socket_queues_for_slow_clients():
+    class FakeWebSocket:
+        def __init__(self, name, block_event=None, release_event=None):
+            self.name = name
+            self.sent = []
+            self.block_event = block_event
+            self.release_event = release_event
+
+        async def send_text(self, payload):
+            self.sent.append(payload)
+            if self.block_event and self.release_event:
+                self.block_event.set()
+                await self.release_event.wait()
+
+    async def run_test():
+        session_code = "QUEUE01"
+        slow_started = asyncio.Event()
+        release_slow = asyncio.Event()
+        slow_ws = FakeWebSocket("slow", slow_started, release_slow)
+        fast_ws = FakeWebSocket("fast")
+        old_queue_maxsize = manager.outbound_queue_maxsize
+
+        manager.outbound_queue_maxsize = 10
+        manager.active_connections[session_code] = {
+            "ws_slow": {
+                "websocket": slow_ws,
+                "client_type": "web",
+                "ws_id": "ws_slow",
+            },
+            "ws_fast": {
+                "websocket": fast_ws,
+                "client_type": "web",
+                "ws_id": "ws_fast",
+            },
+        }
+        manager.websocket_registry["ws_slow"] = {
+            "session_code": session_code,
+            "websocket": slow_ws,
+        }
+        manager.websocket_registry["ws_fast"] = {
+            "session_code": session_code,
+            "websocket": fast_ws,
+        }
+        manager.websocket_to_ws_id[id(slow_ws)] = "ws_slow"
+        manager.websocket_to_ws_id[id(fast_ws)] = "ws_fast"
+
+        try:
+            broadcast_task = asyncio.create_task(
+                manager._broadcast_local_to_session(
+                    session_code,
+                    {"type": "roster_update", "data": {"ok": True}},
+                )
+            )
+            await asyncio.wait_for(slow_started.wait(), timeout=1)
+            await asyncio.wait_for(broadcast_task, timeout=0.2)
+            assert fast_ws.sent
+        finally:
+            release_slow.set()
+            for connection_info in manager.active_connections.get(
+                session_code,
+                {},
+            ).values():
+                sender_task = connection_info.get("outbound_sender_task")
+                if sender_task and not sender_task.done():
+                    sender_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await sender_task
+            manager.active_connections.pop(session_code, None)
+            manager.websocket_registry.pop("ws_slow", None)
+            manager.websocket_registry.pop("ws_fast", None)
+            manager.websocket_to_ws_id.pop(id(slow_ws), None)
+            manager.websocket_to_ws_id.pop(id(fast_ws), None)
+            manager.outbound_queue_maxsize = old_queue_maxsize
+
+    asyncio.run(run_test())
+
+
 def test_fair_play_status_uses_per_player_redis_hash_fields():
     fake_redis = _FakeRedis()
 
