@@ -3308,9 +3308,22 @@ def test_beat_clock_finish_claim_is_single_winner_in_redis():
         first_claim = manager.claim_beat_clock_finish(session_code)
         second_claim = manager.claim_beat_clock_finish(session_code)
 
-    assert first_claim is True
-    assert second_claim is False
+    assert first_claim == game_handlers.BeatClockFinishClaim.ACQUIRED
+    assert second_claim == game_handlers.BeatClockFinishClaim.ALREADY_ACQUIRED
     assert manager._beat_clock_finish_key(session_code) in fake_redis.values
+
+
+def test_beat_clock_finish_claim_reports_redis_unavailable():
+    class FailingRedis(_FakeRedis):
+        def set(self, *args, **kwargs):
+            raise RuntimeError("redis unavailable")
+
+    fake_redis = FailingRedis()
+
+    with patch.object(redis_bus.websocket_bus, "_sync_redis", fake_redis):
+        claim = manager.claim_beat_clock_finish("SESSION123")
+
+    assert claim == game_handlers.BeatClockFinishClaim.UNAVAILABLE
 
 
 def test_clear_beat_clock_state_preserves_finish_marker_until_ttl():
@@ -3335,7 +3348,10 @@ def test_beat_clock_finish_now_skips_duplicate_finish_claim():
         with patch.object(
             manager,
             "claim_beat_clock_finish",
-            side_effect=[True, False],
+            side_effect=[
+                game_handlers.BeatClockFinishClaim.ACQUIRED,
+                game_handlers.BeatClockFinishClaim.ALREADY_ACQUIRED,
+            ],
         ):
             with patch.object(
                 manager,
@@ -3353,6 +3369,42 @@ def test_beat_clock_finish_now_skips_duplicate_finish_claim():
                         AsyncMock(),
                     ) as game_end:
                         await handler._finish_now(db, acting_player_id="P1")
+                        await handler._finish_now(db, acting_player_id="P1")
+
+        broadcast.assert_awaited_once()
+        game_end.assert_awaited_once()
+
+    asyncio.run(run_test())
+
+
+def test_beat_clock_finish_now_retries_unavailable_finish_claim_then_finalizes():
+    handler = game_handlers.BeatTheClockGameHandler("SESSION123")
+    db = MagicMock()
+
+    async def run_test():
+        with patch.object(
+            manager,
+            "claim_beat_clock_finish",
+            side_effect=[
+                game_handlers.BeatClockFinishClaim.UNAVAILABLE,
+                game_handlers.BeatClockFinishClaim.ACQUIRED,
+            ],
+        ):
+            with patch.object(
+                manager,
+                "get_beat_clock_state",
+                return_value={"active": True, "players": {}, "leaderboard": []},
+            ):
+                with patch.object(
+                    handler,
+                    "_broadcast_state",
+                    AsyncMock(return_value={}),
+                ) as broadcast:
+                    with patch.object(
+                        game_handlers,
+                        "handle_game_end",
+                        AsyncMock(),
+                    ) as game_end:
                         await handler._finish_now(db, acting_player_id="P1")
 
         broadcast.assert_awaited_once()

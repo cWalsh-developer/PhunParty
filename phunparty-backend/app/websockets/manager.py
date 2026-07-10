@@ -65,6 +65,12 @@ class SessionPhase(str, Enum):
     ENDED = "ended"
 
 
+class BeatClockFinishClaim(str, Enum):
+    ACQUIRED = "acquired"
+    ALREADY_ACQUIRED = "already_acquired"
+    UNAVAILABLE = "unavailable"
+
+
 class ConnectionManager:
     """Manages WebSocket connections for game sessions"""
 
@@ -4002,27 +4008,30 @@ return 0
 
     def claim_beat_clock_finish(
         self, session_code: str, ttl_seconds: int = 900
-    ) -> bool:
+    ) -> BeatClockFinishClaim:
         client = websocket_bus.sync_client
         if client:
             try:
-                return bool(
-                    client.set(
-                        self._beat_clock_finish_key(session_code),
-                        self._utc_now_iso(),
-                        nx=True,
-                        ex=ttl_seconds,
-                    )
+                claimed = client.set(
+                    self._beat_clock_finish_key(session_code),
+                    self._utc_now_iso(),
+                    nx=True,
+                    ex=ttl_seconds,
+                )
+                return (
+                    BeatClockFinishClaim.ACQUIRED
+                    if claimed
+                    else BeatClockFinishClaim.ALREADY_ACQUIRED
                 )
             except Exception:
                 logger.exception("Failed to claim Beat the Clock finish lock")
-                return False
+                return BeatClockFinishClaim.UNAVAILABLE
 
         state = self.beat_clock_states.setdefault(session_code, {})
         if state.get("ending"):
-            return False
+            return BeatClockFinishClaim.ALREADY_ACQUIRED
         state["ending"] = True
-        return True
+        return BeatClockFinishClaim.ACQUIRED
 
     def clear_beat_clock_state(self, session_code: str) -> None:
         self.beat_clock_states.pop(session_code, None)

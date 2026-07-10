@@ -37,7 +37,7 @@ from app.security.question_payload import sanitize_question_for_client
 from app.security.roster_identity import make_roster_player_id
 from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.game_modes import BEAT_THE_CLOCK_GAME_TYPE
-from app.websockets.manager import SessionPhase, manager
+from app.websockets.manager import BeatClockFinishClaim, SessionPhase, manager
 from app.websockets.scheduler import (
     NEXT_QUESTION_REVEAL_DELAY_MS,
     advance_or_end_current_question,
@@ -1238,12 +1238,28 @@ class BeatTheClockGameHandler(GameEventHandler):
         db: Session,
         acting_player_id: Optional[str] = None,
     ) -> None:
-        if not manager.claim_beat_clock_finish(self.session_code):
+        finish_claim = manager.claim_beat_clock_finish(self.session_code)
+        if finish_claim == BeatClockFinishClaim.UNAVAILABLE:
+            for retry_delay in (0.05, 0.1, 0.2):
+                await asyncio.sleep(retry_delay)
+                finish_claim = manager.claim_beat_clock_finish(self.session_code)
+                if finish_claim != BeatClockFinishClaim.UNAVAILABLE:
+                    break
+
+        if finish_claim == BeatClockFinishClaim.ALREADY_ACQUIRED:
             logger.info(
                 "Skipping duplicate Beat the Clock finish for session=%s",
                 self.session_code,
             )
             return
+
+        if finish_claim == BeatClockFinishClaim.UNAVAILABLE:
+            logger.warning(
+                "Beat the Clock finish lock unavailable after retries; "
+                "falling back to idempotent DB finalization for session=%s",
+                self.session_code,
+            )
+
         state = manager.get_beat_clock_state(self.session_code)
         state["ending"] = True
         state["active"] = False
