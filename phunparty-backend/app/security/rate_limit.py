@@ -13,6 +13,19 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+RATE_LIMIT_HIT_SCRIPT = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl < 0 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+    ttl = tonumber(ARGV[1])
+end
+return { current, ttl }
+"""
+
 
 @dataclass(frozen=True)
 class RateLimit:
@@ -115,16 +128,14 @@ class RateLimiter:
         limit: int,
         window_seconds: int,
     ) -> tuple[bool, int]:
-        current = await self._redis.incr(key)
-
-        if current == 1:
-            await self._redis.expire(key, window_seconds)
-
-        ttl = await self._redis.ttl(key)
-        if ttl < 0:
-            await self._redis.expire(key, window_seconds)
-            ttl = window_seconds
-
+        current, ttl = await self._redis.eval(
+            RATE_LIMIT_HIT_SCRIPT,
+            1,
+            key,
+            window_seconds,
+        )
+        current = int(current)
+        ttl = int(ttl)
         retry_after = ttl if ttl > 0 else window_seconds
         return current <= limit, retry_after
 

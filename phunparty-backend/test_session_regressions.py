@@ -48,7 +48,7 @@ from app.database import performance_migrations
 from app.logic import answer_validation, game_logic
 from app.routes import players as player_routes
 from app.schemas.game_state_models import GameSessionState
-from app.security import game_phase
+from app.security import game_phase, rate_limit
 from app.websockets import (
     game_handlers,
     game_lifecycle,
@@ -138,9 +138,38 @@ class _FakeRedis:
         return old
 
 
+class _FakeAsyncRateLimitRedis:
+    def __init__(self, count: int, ttl: int):
+        self.count = count
+        self.ttl = ttl
+        self.eval_calls = []
+
+    async def eval(self, script, numkeys, key, window_seconds):
+        self.eval_calls.append((script, numkeys, key, window_seconds))
+        return [self.count, self.ttl]
+
+
 def test_game_session_state_model_restores_timestamp_columns():
     assert hasattr(GameSessionState, "started_at")
     assert hasattr(GameSessionState, "ended_at")
+
+
+def test_rate_limiter_uses_single_redis_lua_hit():
+    limiter = rate_limit.RateLimiter()
+    fake_redis = _FakeAsyncRateLimitRedis(count=3, ttl=42)
+    limiter._redis = fake_redis
+
+    allowed, retry_after = asyncio.run(limiter._hit_redis("rl:test", 5, 60))
+
+    assert allowed is True
+    assert retry_after == 42
+    assert len(fake_redis.eval_calls) == 1
+    script, numkeys, key, window_seconds = fake_redis.eval_calls[0]
+    assert "INCR" in script
+    assert "TTL" in script
+    assert numkeys == 1
+    assert key == "rl:test"
+    assert window_seconds == 60
 
 
 def test_create_game_session_cleans_up_partial_setup_failures():
