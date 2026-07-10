@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import List
 
 from app.database.dbCRUD import create_game as cg
@@ -39,6 +40,9 @@ from sqlalchemy.orm import Session
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+USE_PROCESS_LOCAL_JOIN_QUEUE = (
+    os.getenv("USE_PROCESS_LOCAL_JOIN_QUEUE", "false").lower() == "true"
+)
 
 
 @router.post("/", tags=["Game"])
@@ -258,6 +262,24 @@ async def join_game_queue(
             return JoinQueueResponse(
                 success=True,
                 message="Already joined this session",
+                queue_id=None,
+                estimated_wait_time=0,
+            )
+
+        if not USE_PROCESS_LOCAL_JOIN_QUEUE:
+            try:
+                join_game(db, request.session_code, current_player.player_id)
+            except ValueError as exc:
+                return JoinQueueResponse(
+                    success=False,
+                    message=str(exc),
+                    queue_id=None,
+                    estimated_wait_time=0,
+                )
+
+            return JoinQueueResponse(
+                success=True,
+                message="Successfully joined the game!",
                 queue_id=None,
                 estimated_wait_time=0,
             )

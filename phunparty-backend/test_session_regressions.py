@@ -47,6 +47,7 @@ sys.modules.setdefault("passlib.context", passlib_context_module)
 from app.database import dbCRUD
 from app.database import performance_migrations
 from app.logic import answer_validation, game_logic
+from app.routes import game as game_routes
 from app.routes import players as player_routes
 from app.schemas.game_state_models import GameSessionState
 from app.security import game_phase, rate_limit
@@ -781,6 +782,41 @@ def test_join_game_rejects_inactive_sessions_before_membership_changes():
     assign_player.assert_not_called()
     create_score.assert_not_called()
     mock_db.commit.assert_not_called()
+
+
+def test_join_queue_defaults_to_direct_idempotent_join():
+    request = SimpleNamespace(session_code="SESSION123", websocket_id=None)
+    http_request = MagicMock()
+    current_player = SimpleNamespace(player_id="P1")
+    db = MagicMock()
+
+    with patch.object(game_routes, "USE_PROCESS_LOCAL_JOIN_QUEUE", False):
+        with patch.object(game_routes, "enforce_rate_limit", AsyncMock()):
+            with patch.object(game_routes, "get_client_ip", return_value="127.0.0.1"):
+                with patch.object(game_routes, "assert_public_or_member_or_owner"):
+                    with patch.object(
+                        game_routes, "is_session_member", return_value=False
+                    ):
+                        with patch.object(game_routes, "join_game") as join_game:
+                            with patch.object(
+                                game_routes.join_queue_manager,
+                                "add_to_queue",
+                                AsyncMock(),
+                            ) as add_to_queue:
+                                response = asyncio.run(
+                                    game_routes.join_game_queue(
+                                        request,
+                                        http_request,
+                                        current_player,
+                                        db,
+                                    )
+                                )
+
+    join_game.assert_called_once_with(db, "SESSION123", "P1")
+    add_to_queue.assert_not_called()
+    assert response.success is True
+    assert response.queue_id is None
+    assert response.estimated_wait_time == 0
 
 
 def test_score_and_session_assignment_models_prevent_duplicate_membership_rows():
