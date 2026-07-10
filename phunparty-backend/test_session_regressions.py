@@ -973,7 +973,11 @@ def test_join_queue_defaults_to_direct_idempotent_join():
                     with patch.object(
                         game_routes, "is_session_member", return_value=False
                     ):
-                        with patch.object(game_routes, "join_game") as join_game:
+                        with patch.object(
+                            game_routes.asyncio,
+                            "to_thread",
+                            AsyncMock(),
+                        ) as to_thread:
                             with patch.object(
                                 game_routes.join_queue_manager,
                                 "add_to_queue",
@@ -988,11 +992,39 @@ def test_join_queue_defaults_to_direct_idempotent_join():
                                     )
                                 )
 
-    join_game.assert_called_once_with(db, "SESSION123", "P1")
+    to_thread.assert_awaited_once_with(
+        game_routes._join_game_in_thread_session,
+        "SESSION123",
+        "P1",
+    )
     add_to_queue.assert_not_called()
     assert response.success is True
     assert response.queue_id is None
     assert response.estimated_wait_time == 0
+
+
+def test_join_game_thread_helper_uses_thread_local_session_and_rls():
+    thread_db = MagicMock()
+    session_factory = MagicMock(return_value=thread_db)
+
+    with patch.object(game_routes, "SessionLocal", session_factory):
+        with patch.object(game_routes, "set_rls_current_player") as set_rls:
+            with patch.object(game_routes, "clear_rls_context") as clear_rls:
+                with patch.object(
+                    game_routes,
+                    "join_game",
+                    return_value="joined",
+                ) as join_game:
+                    result = game_routes._join_game_in_thread_session(
+                        "SESSION123",
+                        "P1",
+                    )
+
+    assert result == "joined"
+    set_rls.assert_called_once_with(thread_db, "P1")
+    join_game.assert_called_once_with(thread_db, "SESSION123", "P1")
+    clear_rls.assert_called_once_with(thread_db)
+    thread_db.close.assert_called_once()
 
 
 def test_score_and_session_assignment_models_prevent_duplicate_membership_rows():

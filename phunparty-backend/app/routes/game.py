@@ -1,7 +1,9 @@
+import asyncio
 import logging
 import os
 from typing import List
 
+from app.config import SessionLocal
 from app.database.dbCRUD import create_game as cg
 from app.database.dbCRUD import create_game_session, end_game_session
 from app.database.dbCRUD import get_all_games as gag
@@ -34,6 +36,7 @@ from app.security.ownership import (
     is_session_member,
 )
 from app.security.rate_limit import enforce_rate_limit, get_client_ip
+from app.security.rls import clear_rls_context, set_rls_current_player
 from app.websockets.manager import manager
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -43,6 +46,16 @@ logger = logging.getLogger(__name__)
 USE_PROCESS_LOCAL_JOIN_QUEUE = (
     os.getenv("USE_PROCESS_LOCAL_JOIN_QUEUE", "false").lower() == "true"
 )
+
+
+def _join_game_in_thread_session(session_code: str, player_id: str):
+    thread_db = SessionLocal()
+    try:
+        set_rls_current_player(thread_db, player_id)
+        return join_game(thread_db, session_code, player_id)
+    finally:
+        clear_rls_context(thread_db)
+        thread_db.close()
 
 
 @router.post("/", tags=["Game"])
@@ -200,18 +213,28 @@ async def join_game_route(
     db: Session = Depends(get_db),
 ):
     """
-    Join an existing game session (direct join - may fail under high concurrency).
-    For safer concurrent joins, use /join-queue endpoint instead.
+    Join an existing game session through the idempotent transactional join path.
     """
     try:
         await enforce_rate_limit(
             request,
-            scope="game-join-ip",
-            identifier=get_client_ip(request),
-            limit=30,
+            scope="game-join-player",
+            identifier=current_player.player_id,
+            limit=20,
             window_seconds=300,
         )
-        game = join_game(db, req.session_code, current_player.player_id)
+        await enforce_rate_limit(
+            request,
+            scope="game-join-ip",
+            identifier=get_client_ip(request),
+            limit=300,
+            window_seconds=300,
+        )
+        await asyncio.to_thread(
+            _join_game_in_thread_session,
+            req.session_code,
+            current_player.player_id,
+        )
         return {
             "message": "Successfully joined the game!",
         }
@@ -238,9 +261,8 @@ async def join_game_queue(
     db: Session = Depends(get_db),
 ):
     """
-    Join a game session via queue system to prevent race conditions.
-    This is the recommended way to join sessions when multiple players might join simultaneously.
-    Returns a queue_id for tracking the join status.
+    Join a game session. By default this uses the direct idempotent join path.
+    Set USE_PROCESS_LOCAL_JOIN_QUEUE=true only for single-worker local testing.
     """
     try:
         await enforce_rate_limit(
@@ -254,7 +276,7 @@ async def join_game_queue(
             http_request,
             scope="join-queue-ip",
             identifier=get_client_ip(http_request),
-            limit=60,
+            limit=300,
             window_seconds=300,
         )
         assert_public_or_member_or_owner(db, current_player, request.session_code)
@@ -268,7 +290,11 @@ async def join_game_queue(
 
         if not USE_PROCESS_LOCAL_JOIN_QUEUE:
             try:
-                join_game(db, request.session_code, current_player.player_id)
+                await asyncio.to_thread(
+                    _join_game_in_thread_session,
+                    request.session_code,
+                    current_player.player_id,
+                )
             except ValueError as exc:
                 return JoinQueueResponse(
                     success=False,
