@@ -326,10 +326,12 @@ class ConnectionManager:
         return True
 
     def _drop_oldest_replaceable_outbound_item(
-        self, queue: asyncio.Queue[Any]
+        self,
+        queue: asyncio.Queue[Any],
+        *,
+        coalesce_key: Optional[str] = None,
     ) -> bool:
         drained_items = []
-        dropped = False
 
         while True:
             try:
@@ -339,14 +341,30 @@ class ConnectionManager:
             except asyncio.QueueEmpty:
                 break
 
-        for queued_item in drained_items:
-            if not dropped and self._outbound_item_can_be_evicted(queued_item):
+        drop_index = None
+        if coalesce_key:
+            for index, queued_item in enumerate(drained_items):
+                if (
+                    isinstance(queued_item, OutboundQueueItem)
+                    and queued_item.coalesce_key == coalesce_key
+                    and self._outbound_item_can_be_evicted(queued_item)
+                ):
+                    drop_index = index
+                    break
+
+        if drop_index is None:
+            for index, queued_item in enumerate(drained_items):
+                if self._outbound_item_can_be_evicted(queued_item):
+                    drop_index = index
+                    break
+
+        for index, queued_item in enumerate(drained_items):
+            if index == drop_index:
                 self._resolve_outbound_future(queued_item, False)
-                dropped = True
                 continue
             queue.put_nowait(queued_item)
 
-        return dropped
+        return drop_index is not None
 
     def _fail_pending_outbound_queue(self, queue: asyncio.Queue[Any]) -> None:
         while True:
@@ -497,7 +515,8 @@ class ConnectionManager:
         except asyncio.QueueFull:
             if not critical:
                 dropped_replaceable = self._drop_oldest_replaceable_outbound_item(
-                    queue
+                    queue,
+                    coalesce_key=queued_item.coalesce_key,
                 )
                 if not dropped_replaceable:
                     self.dropped_outbound_message_count += 1
@@ -574,6 +593,14 @@ class ConnectionManager:
                     message_with_timestamp,
                     connection_info,
                 )
+                if should_require_ack:
+                    self._track_ack_target(
+                        message_with_timestamp["event_id"],
+                        session_code,
+                        message_with_timestamp,
+                        ws_id,
+                        connection_info,
+                    )
                 enqueued = await self._enqueue_broadcast_payload(
                     session_code,
                     ws_id,
@@ -586,18 +613,20 @@ class ConnectionManager:
                     coalesce_key=self._message_coalesce_key(message_with_timestamp),
                 )
                 if not enqueued:
+                    if should_require_ack:
+                        self._remove_ack_target(
+                            message_with_timestamp["event_id"],
+                            ws_id,
+                        )
                     raise RuntimeError("outbound queue full")
-                if should_require_ack:
-                    self._track_ack_target(
-                        message_with_timestamp["event_id"],
-                        session_code,
-                        message_with_timestamp,
-                        ws_id,
-                        connection_info,
-                    )
                 logger.debug("Queued successfully to %s %s", client_type, ws_id)
                 return websocket, client_type, True
             except WebSocketDisconnect:
+                if should_require_ack:
+                    self._remove_ack_target(
+                        message_with_timestamp["event_id"],
+                        ws_id,
+                    )
                 logger.warning(
                     "WebSocket %s (%s) disconnected during broadcast enqueue",
                     ws_id,
@@ -605,6 +634,11 @@ class ConnectionManager:
                 )
                 return websocket, client_type, False
             except Exception as exc:
+                if should_require_ack:
+                    self._remove_ack_target(
+                        message_with_timestamp["event_id"],
+                        ws_id,
+                    )
                 if attempt < max_attempts - 1:
                     logger.warning(
                         "Retry %s/%s enqueue for %s: %s",
@@ -1490,8 +1524,13 @@ return 0
 
         event_state = self.pending_acks.get(event_id)
         if not event_state:
-            logger.debug(f"ACK received for unknown or completed event {event_id}")
-            return False
+            event_id, event_state = self._resolve_ack_event_for_websocket(
+                event_id,
+                ws_id,
+            )
+            if not event_state:
+                logger.debug(f"ACK received for unknown or completed event {event_id}")
+                return False
 
         target_state = event_state["targets"].get(ws_id)
         if not target_state:
@@ -1516,6 +1555,27 @@ return 0
                 retry_task.cancel()
 
         return True
+
+    def _resolve_ack_event_for_websocket(
+        self,
+        ack_id: str,
+        ws_id: str,
+    ) -> tuple[str, Optional[Dict[str, Any]]]:
+        """Resolve legacy message_id ACKs to this socket's target-specific event."""
+        for pending_event_id, event_state in self.pending_acks.items():
+            target_state = event_state.get("targets", {}).get(ws_id)
+            if not target_state:
+                continue
+
+            event_message = event_state.get("message") or {}
+            target_message = target_state.get("message") or {}
+            if ack_id in {
+                event_message.get("message_id"),
+                target_message.get("message_id"),
+            }:
+                return pending_event_id, event_state
+
+        return ack_id, None
 
     def get_pending_ack_summary(
         self, session_code: Optional[str] = None
@@ -1564,7 +1624,26 @@ return 0
             "sent_at": self._utc_now_iso(),
         }
 
+    def _remove_ack_target(self, event_id: str, ws_id: str) -> None:
+        event_state = self.pending_acks.get(event_id)
+        if not event_state:
+            return
+
+        event_state.get("targets", {}).pop(ws_id, None)
+        if not event_state.get("targets"):
+            self.pending_acks.pop(event_id, None)
+            retry_task = self.ack_retry_tasks.pop(event_id, None)
+            if (
+                retry_task
+                and not retry_task.done()
+                and retry_task is not asyncio.current_task()
+            ):
+                retry_task.cancel()
+
     def _schedule_ack_retry(self, event_id: str) -> None:
+        if event_id not in self.pending_acks:
+            return
+
         existing_task = self.ack_retry_tasks.get(event_id)
         if existing_task and not existing_task.done():
             return
@@ -2184,15 +2263,6 @@ return 0
             "requires_ack": True,
         }
 
-        enqueued_or_sent = await self.send_personal_message(
-            message_with_metadata,
-            websocket,
-            wait_for_send=wait_for_send,
-            critical=True,
-        )
-        if not enqueued_or_sent:
-            return False
-
         self._track_ack_target(
             message_with_metadata["event_id"],
             session_code,
@@ -2200,6 +2270,17 @@ return 0
             ws_id,
             connection_info,
         )
+
+        enqueued_or_sent = await self.send_personal_message(
+            message_with_metadata,
+            websocket,
+            wait_for_send=wait_for_send,
+            critical=True,
+        )
+        if not enqueued_or_sent:
+            self._remove_ack_target(message_with_metadata["event_id"], ws_id)
+            return False
+
         self._schedule_ack_retry(message_with_metadata["event_id"])
 
         return enqueued_or_sent

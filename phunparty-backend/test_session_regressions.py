@@ -3364,6 +3364,65 @@ def test_noncritical_outbound_overflow_does_not_evict_critical_message():
     asyncio.run(run_test())
 
 
+def test_noncritical_outbound_overflow_prefers_same_coalesce_key():
+    async def run_test():
+        session_code = "QUEUE05"
+        ws_id = "ws_one"
+        connection_info = {
+            "websocket": MagicMock(),
+            "client_type": "mobile",
+            "ws_id": ws_id,
+            "player_id": "P1",
+        }
+        queue = asyncio.Queue(maxsize=3)
+        connection_info["outbound_queue"] = queue
+        futures = {
+            key: asyncio.get_running_loop().create_future()
+            for key in ("beat_clock_state", "roster_update", "session_stats")
+        }
+
+        try:
+            for key in futures:
+                queue.put_nowait(
+                    OutboundQueueItem(
+                        payload=json.dumps({"type": key, "old": True}),
+                        sent_future=futures[key],
+                        critical=False,
+                        replaceable=True,
+                        coalesce_key=key,
+                    )
+                )
+
+            queued = await manager._enqueue_broadcast_payload(
+                session_code,
+                ws_id,
+                connection_info,
+                json.dumps({"type": "roster_update", "old": False}),
+                critical=False,
+                replaceable=True,
+                coalesce_key="roster_update",
+            )
+
+            assert queued is True
+            assert futures["roster_update"].result() is False
+            assert not futures["beat_clock_state"].done()
+            assert not futures["session_stats"].done()
+
+            remaining_payloads = []
+            while not queue.empty():
+                item = queue.get_nowait()
+                queue.task_done()
+                remaining_payloads.append(json.loads(item.payload))
+
+            assert {"type": "beat_clock_state", "old": True} in remaining_payloads
+            assert {"type": "session_stats", "old": True} in remaining_payloads
+            assert {"type": "roster_update", "old": False} in remaining_payloads
+        finally:
+            manager._fail_pending_outbound_queue(queue)
+
+    asyncio.run(run_test())
+
+
 def test_personal_critical_ack_ids_are_target_specific():
     class FakeWebSocket:
         def __init__(self):
@@ -3449,6 +3508,145 @@ def test_personal_critical_ack_ids_are_target_specific():
             manager.websocket_registry.pop("ws_p2", None)
             manager.websocket_to_ws_id.pop(id(ws1), None)
             manager.websocket_to_ws_id.pop(id(ws2), None)
+
+    asyncio.run(run_test())
+
+
+def test_personal_critical_ack_can_arrive_during_send():
+    class AckingWebSocket:
+        def __init__(self):
+            self.sent = []
+            self.ack_results = []
+
+        async def send_text(self, payload):
+            message = json.loads(payload)
+            self.sent.append(message)
+            self.ack_results.append(
+                manager.acknowledge_event(self, message["event_id"])
+            )
+
+    async def run_test():
+        session_code = "ACKP04"
+        websocket = AckingWebSocket()
+        manager.active_connections[session_code] = {
+            "ws_p1": {
+                "websocket": websocket,
+                "client_type": "mobile",
+                "ws_id": "ws_p1",
+                "player_id": "P1",
+                "connection_generation": "worker:ws_p1",
+            }
+        }
+        manager.websocket_registry["ws_p1"] = {
+            "session_code": session_code,
+            "websocket": websocket,
+        }
+        manager.websocket_to_ws_id[id(websocket)] = "ws_p1"
+
+        try:
+            sent = await manager.send_personal_critical_message(
+                session_code,
+                {
+                    "type": "beat_clock_answer_result",
+                    "data": {"question_id": "BTC001", "score": 8},
+                },
+                websocket,
+            )
+
+            assert sent is True
+            assert websocket.ack_results == [True]
+            assert not any(
+                event_id.startswith(session_code)
+                for event_id in manager.pending_acks
+            )
+            assert not any(
+                event_id.startswith(session_code)
+                for event_id in manager.ack_retry_tasks
+            )
+        finally:
+            for connection_info in manager.active_connections.get(
+                session_code,
+                {},
+            ).values():
+                sender_task = connection_info.get("outbound_sender_task")
+                if sender_task and not sender_task.done():
+                    sender_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await sender_task
+            manager.active_connections.pop(session_code, None)
+            manager.websocket_registry.pop("ws_p1", None)
+            manager.websocket_to_ws_id.pop(id(websocket), None)
+
+    asyncio.run(run_test())
+
+
+def test_personal_critical_ack_accepts_legacy_message_id_for_same_target():
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def send_text(self, payload):
+            self.sent.append(json.loads(payload))
+
+    async def run_test():
+        session_code = "ACKP05"
+        websocket = FakeWebSocket()
+        manager.active_connections[session_code] = {
+            "ws_p1": {
+                "websocket": websocket,
+                "client_type": "mobile",
+                "ws_id": "ws_p1",
+                "player_id": "P1",
+                "connection_generation": "worker:ws_p1",
+            }
+        }
+        manager.websocket_registry["ws_p1"] = {
+            "session_code": session_code,
+            "websocket": websocket,
+        }
+        manager.websocket_to_ws_id[id(websocket)] = "ws_p1"
+
+        try:
+            sent = await manager.send_personal_critical_message(
+                session_code,
+                {
+                    "type": "beat_clock_answer_result",
+                    "data": {"question_id": "BTC001", "score": 8},
+                },
+                websocket,
+            )
+            assert sent is True
+            assert websocket.sent
+
+            assert manager.acknowledge_event(
+                websocket,
+                websocket.sent[0]["message_id"],
+            ) is True
+            assert not any(
+                event_id.startswith(session_code)
+                for event_id in manager.pending_acks
+            )
+        finally:
+            for event_id in list(manager.pending_acks):
+                if event_id.startswith(session_code):
+                    manager.pending_acks.pop(event_id, None)
+                    retry_task = manager.ack_retry_tasks.pop(event_id, None)
+                    if retry_task and not retry_task.done():
+                        retry_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await retry_task
+            for connection_info in manager.active_connections.get(
+                session_code,
+                {},
+            ).values():
+                sender_task = connection_info.get("outbound_sender_task")
+                if sender_task and not sender_task.done():
+                    sender_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await sender_task
+            manager.active_connections.pop(session_code, None)
+            manager.websocket_registry.pop("ws_p1", None)
+            manager.websocket_to_ws_id.pop(id(websocket), None)
 
     asyncio.run(run_test())
 
