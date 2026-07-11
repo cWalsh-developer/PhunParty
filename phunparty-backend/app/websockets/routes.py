@@ -33,7 +33,7 @@ from app.dependencies import (
     require_admin_api_key,
 )
 from app.logic.game_logic import check_and_advance_game
-from app.security.game_phase import is_question_accepting_answers
+from app.security.game_phase import is_question_accepting_answers_async
 from app.security.loggingUtils import safe_player_ref
 from app.security.ownership import assert_session_member_or_owner, assert_session_owner
 from app.security.question_payload import sanitize_question_for_client
@@ -1565,7 +1565,7 @@ async def handle_websocket_message(
             )
             return
 
-        phase_allowed, phase_reason = is_question_accepting_answers(
+        phase_allowed, phase_reason = await is_question_accepting_answers_async(
             session_code, question_id
         )
         if not phase_allowed:

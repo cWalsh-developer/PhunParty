@@ -24,6 +24,8 @@ from app.database.dbCRUD import (
 )
 from app.logic.game_logic import (
     build_question_with_randomized_options,
+    check_and_advance_game,
+    check_progression_readiness_without_lock,
     get_game_session_state,
     question_allows_fuzzy_validation,
     submit_player_answer,
@@ -149,6 +151,76 @@ class TriviaGameHandler(GameEventHandler):
     def __init__(self, session_code: str):
         super().__init__(session_code, "trivia")
 
+    def _recover_progression_for_existing_answer(
+        self,
+        db: Session,
+        player_id: str,
+        question_id: str,
+    ) -> Optional[dict]:
+        """
+        Reconcile progression after a retry submits an answer already stored in DB.
+
+        If the first submission recorded the answer but the client disconnected before
+        the next-question/game-ended broadcast completed, the retry would otherwise be
+        rejected as a duplicate and everyone could remain on a waiting screen.
+        """
+        session = get_session_by_code(db, self.session_code)
+        progression_actor_id = (
+            session.owner_player_id if session and session.owner_player_id else player_id
+        )
+        set_rls_current_player(db, progression_actor_id)
+
+        game_state = get_game_session_state(db, self.session_code)
+        if (
+            not game_state
+            or not game_state.is_active
+            or not game_state.isstarted
+            or game_state.current_question_id != question_id
+        ):
+            return None
+
+        readiness = check_progression_readiness_without_lock(
+            db,
+            self.session_code,
+            question_id,
+            game_state,
+        )
+        if not readiness.get("ready_for_progression"):
+            return readiness
+
+        progression = check_and_advance_game(db, self.session_code, question_id)
+        if "error" in progression:
+            db.rollback()
+            logger.warning(
+                "TRIVIA DUPLICATE RECOVERY FAILED session=%s player=%s question=%s error=%s",
+                self.session_code,
+                safe_player_ref(player_id),
+                question_id,
+                progression["error"],
+            )
+            return progression
+
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.exception(
+                "TRIVIA DUPLICATE RECOVERY COMMIT FAILED session=%s player=%s question=%s",
+                self.session_code,
+                safe_player_ref(player_id),
+                question_id,
+            )
+            return {"error": str(exc)}
+
+        logger.warning(
+            "TRIVIA DUPLICATE RECOVERY PROGRESSION session=%s player=%s question=%s action=%s",
+            self.session_code,
+            safe_player_ref(player_id),
+            question_id,
+            progression.get("action"),
+        )
+        return progression
+
     def _submit_answer_in_thread_session(
         self,
         player_id: str,
@@ -182,6 +254,20 @@ class TriviaGameHandler(GameEventHandler):
                 question_id,
                 answer,
             )
+            if result.get("error") == "Player has already answered this question":
+                recovered_progression = self._recover_progression_for_existing_answer(
+                    db,
+                    player_id,
+                    question_id,
+                )
+                if recovered_progression and "error" not in recovered_progression:
+                    result = {
+                        "player_answer": answer,
+                        "question_id": question_id,
+                        "duplicate_submission": True,
+                        "game_state": recovered_progression,
+                    }
+                    set_rls_current_player(db, player_id)
             player = get_player_by_ID(db, player_id)
             player_name = player.player_name if player else "Unknown Player"
             return result, player_name

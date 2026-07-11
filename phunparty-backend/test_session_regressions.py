@@ -2383,6 +2383,91 @@ def test_trivia_answer_submission_runs_db_work_in_thread():
     asyncio.run(run_test())
 
 
+def test_trivia_duplicate_answer_recovery_advances_recorded_final_answer():
+    handler = game_handlers.TriviaGameHandler("SESSION123")
+    db = MagicMock()
+    game_state = SimpleNamespace(
+        is_active=True,
+        isstarted=True,
+        current_question_id="Q15",
+        current_question_index=14,
+        total_questions=15,
+    )
+
+    with patch.object(
+        game_handlers,
+        "get_session_by_code",
+        return_value=SimpleNamespace(owner_player_id="HOST1"),
+    ), patch.object(
+        game_handlers,
+        "get_game_session_state",
+        return_value=game_state,
+    ), patch.object(
+        game_handlers,
+        "check_progression_readiness_without_lock",
+        return_value={"ready_for_progression": True},
+    ), patch.object(
+        game_handlers,
+        "check_and_advance_game",
+        return_value={
+            "action": "game_ended",
+            "game_state": "ended",
+            "current_question_index": 14,
+            "total_questions": 15,
+        },
+    ) as advance, patch.object(
+        game_handlers,
+        "set_rls_current_player",
+    ) as set_rls:
+        result = handler._recover_progression_for_existing_answer(
+            db,
+            "P1",
+            "Q15",
+        )
+
+    advance.assert_called_once_with(db, "SESSION123", "Q15")
+    db.commit.assert_called_once()
+    assert result["action"] == "game_ended"
+    assert set_rls.call_args_list[0].args == (db, "HOST1")
+
+
+def test_trivia_duplicate_recovered_game_end_broadcasts_lifecycle_end():
+    handler = game_handlers.TriviaGameHandler("SESSION123")
+
+    async def run_test():
+        with patch.object(game_handlers, "manager") as mock_manager:
+            mock_manager.broadcast_to_session = AsyncMock()
+            mock_manager.send_personal_message = AsyncMock()
+            mock_manager.get_answered_count.return_value = 1
+            mock_manager.get_session_connections.return_value = {}
+            with patch.object(
+                game_handlers.asyncio,
+                "to_thread",
+                new_callable=AsyncMock,
+                return_value=(
+                    {
+                        "duplicate_submission": True,
+                        "game_state": {"action": "game_ended"},
+                    },
+                    "Alice",
+                ),
+            ), patch.object(
+                game_handlers,
+                "handle_game_end",
+                AsyncMock(return_value=True),
+            ) as game_end:
+                await handler.handle_player_answer(
+                    "P1",
+                    "A",
+                    "Q15",
+                    MagicMock(),
+                )
+
+        game_end.assert_awaited_once()
+
+    asyncio.run(run_test())
+
+
 def test_mobile_current_question_payload_rebuilds_missing_queue_from_db():
     question = {
         "question_id": "Q1",
