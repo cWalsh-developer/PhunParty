@@ -1494,7 +1494,7 @@ def test_countdown_duration_is_server_owned():
     assert scheduler.normalize_countdown_duration_ms(None, "SESSION123") == 3000
 
 
-def test_game_lifecycle_skips_duplicate_broadcast_for_already_ended_session():
+def test_game_lifecycle_rebroadcasts_duplicate_end_for_already_ended_session():
     ended_at = datetime(2026, 6, 1, 12, 0, 0)
     game_state = SimpleNamespace(ended_at=ended_at)
     final_scores = [{"player_id": "P1", "player_name": "Player", "score": 2}]
@@ -1517,9 +1517,49 @@ def test_game_lifecycle_skips_duplicate_broadcast_for_already_ended_session():
                     game_lifecycle.handle_game_end("SESSION123", mock_db)
                 )
 
-    assert result is False
-    mock_manager.clear_question_queue.assert_not_called()
-    mock_manager.broadcast_to_session.assert_not_awaited()
+    assert result is True
+    mock_manager.clear_question_queue.assert_called_once_with("SESSION123")
+    mock_manager.broadcast_to_session.assert_awaited_once()
+    message = mock_manager.broadcast_to_session.await_args.args[1]
+    assert message["type"] == "game_ended"
+    assert message["data"]["final_scores"] == final_scores
+
+
+def test_game_lifecycle_repairs_incomplete_end_state_before_broadcast():
+    game_state = SimpleNamespace(
+        ended_at=None,
+        is_active=True,
+        isstarted=True,
+        is_waiting_for_players=True,
+    )
+    query_result = MagicMock()
+    query_result.filter.return_value = query_result
+    query_result.first.return_value = game_state
+    query_result.all.return_value = []
+    mock_db = MagicMock()
+    mock_db.query.return_value = query_result
+
+    with patch.object(game_lifecycle, "update_game_session_ended", return_value=False):
+        with patch.object(game_lifecycle, "get_final_scores", return_value=[]):
+            with patch.object(game_lifecycle, "manager") as mock_manager:
+                mock_manager.set_session_phase.return_value = {
+                    "phase": "ended",
+                    "phase_started_at": "2026-06-01T12:00:00",
+                    "server_time_ms": 123,
+                }
+                mock_manager.broadcast_to_session = AsyncMock()
+
+                result = asyncio.run(
+                    game_lifecycle.handle_game_end("SESSION123", mock_db)
+                )
+
+    assert result is True
+    assert game_state.ended_at is not None
+    assert game_state.is_active is False
+    assert game_state.isstarted is False
+    assert game_state.is_waiting_for_players is False
+    mock_db.commit.assert_called_once()
+    mock_manager.broadcast_to_session.assert_awaited_once()
 
 
 def test_game_lifecycle_terminal_snapshot_uses_shared_fair_play_statuses():
