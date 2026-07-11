@@ -32,6 +32,10 @@ build/
 .coverage
 coverage.xml
 htmlcov/
+.loadtest/
+load_test_players*.json
+!phunparty-backend/load_test_players.example.json
+players.local.json
 
 # Node.js
 node_modules/

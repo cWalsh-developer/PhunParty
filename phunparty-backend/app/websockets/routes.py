@@ -89,6 +89,106 @@ WEBSOCKET_CONNECTION_IP_LIMIT = (120, 300)
 WEBSOCKET_AUTH_CONNECTION_LIMIT = (30, 300)
 WEBSOCKET_GLOBAL_MESSAGE_LIMIT = (120, 60)
 WEBSOCKET_BUZZER_LIMIT = (5, 3600)
+WEBSOCKET_READ_ONLY_MESSAGE_TYPES = {
+    "ping",
+    "pong",
+    "ack",
+    "connection_ack",
+    "sync_request",
+    "request_current_question",
+    "request_roster",
+    "get_session_stats",
+}
+
+
+def websocket_message_needs_route_db(
+    message: dict,
+    client_type: str,
+    game_handler,
+    session_code: Optional[str] = None,
+) -> bool:
+    """Return whether the socket route must own a DB session for this message."""
+    message_type = message.get("type")
+    if message_type in {"ping", "pong", "ack", "connection_ack"}:
+        return False
+
+    if message_type == "submit_answer" and client_type == "mobile":
+        data = message.get("data") or {}
+        question_id = data.get("question_id")
+        handler_game_type = getattr(game_handler, "game_type", "trivia")
+        cached_game_type = (
+            manager.get_session_game_type(session_code) if session_code else None
+        )
+        if (
+            handler_game_type in {"trivia", BEAT_THE_CLOCK_GAME_TYPE}
+            or cached_game_type == BEAT_THE_CLOCK_GAME_TYPE
+        ):
+            return False
+        if str(question_id or "").upper().startswith("BTC"):
+            return False
+        return True
+
+    return True
+
+
+async def websocket_message_needs_route_db_async(
+    message: dict,
+    client_type: str,
+    game_handler,
+    session_code: Optional[str] = None,
+) -> bool:
+    """Async route-DB decision for the WebSocket receive loop."""
+    message_type = message.get("type")
+    if message_type in {"ping", "pong", "ack", "connection_ack"}:
+        return False
+
+    if message_type == "submit_answer" and client_type == "mobile":
+        data = message.get("data") or {}
+        question_id = data.get("question_id")
+        handler_game_type = getattr(game_handler, "game_type", "trivia")
+        cached_game_type = (
+            await manager.get_session_game_type_async(session_code)
+            if session_code
+            else None
+        )
+        if (
+            handler_game_type in {"trivia", BEAT_THE_CLOCK_GAME_TYPE}
+            or cached_game_type == BEAT_THE_CLOCK_GAME_TYPE
+        ):
+            return False
+        if str(question_id or "").upper().startswith("BTC"):
+            return False
+        return True
+
+    return True
+
+
+def websocket_message_is_mutating(message_type: Optional[str]) -> bool:
+    return message_type not in WEBSOCKET_READ_ONLY_MESSAGE_TYPES
+
+
+def websocket_focus_return_allowed_during_unknown_authority(
+    websocket: WebSocket,
+    session_code: str,
+    player_id: Optional[str],
+) -> bool:
+    if not player_id:
+        return False
+    if not manager.get_pending_focus_loss(session_code, player_id):
+        return False
+
+    connection_info = manager._connection_info_for_websocket(websocket)
+    if not connection_info:
+        return False
+    if connection_info.get("client_type") != "mobile":
+        return False
+    if connection_info.get("player_id") != player_id:
+        return False
+
+    return any(
+        info is connection_info
+        for info in manager.get_player_connections(session_code, player_id).values()
+    )
 
 
 def get_websocket_client_ip(websocket: WebSocket) -> str:
@@ -152,7 +252,7 @@ async def enforce_websocket_message_rate_limit(
     if message_type == "buzzer_press":
         question_id = data.get("question_id") or data.get("current_question_id")
         if not question_id:
-            phase_state = manager.get_session_phase_state(session_code)
+            phase_state = await manager.get_session_phase_state_async(session_code)
             question_id = phase_state.get("current_question_id") or "unknown"
         limit, window_seconds = WEBSOCKET_BUZZER_LIMIT
         identifier = f"{session_code}:{question_id}:{player_id}"
@@ -263,6 +363,11 @@ async def close_websocket_safely(websocket: WebSocket, code: int, reason: str) -
 
 async def send_websocket_error_safely(websocket: WebSocket, message: str) -> bool:
     try:
+        if manager._connection_info_for_websocket(websocket):
+            return await manager.send_personal_message(
+                {"type": "error", "message": message},
+                websocket,
+            )
         await websocket.send_text(json.dumps({"type": "error", "message": message}))
         return True
     except RuntimeError as e:
@@ -878,19 +983,40 @@ async def websocket_endpoint(
                 message_type = message.get("type")
                 message_data = message.get("data", {}) or {}
 
-                if (
-                    client_type == "mobile"
-                    and not await manager.connection_is_current_async(
+                if client_type == "mobile":
+                    generation_status = await manager.connection_generation_status_async(
                         websocket,
                         session_code,
                         player_id,
                     )
-                ):
-                    await websocket.close(
-                        code=4000,
-                        reason="Connection replaced",
+                    if generation_status == "stale":
+                        await websocket.close(
+                            code=4000,
+                            reason="Connection replaced",
+                        )
+                        break
+                    allow_unknown_focus_return = (
+                        generation_status == "unknown"
+                        and message_type == "fair_play_focus_returned"
+                        and websocket_focus_return_allowed_during_unknown_authority(
+                            websocket,
+                            session_code,
+                            player_id,
+                        )
                     )
-                    break
+                    if (
+                        generation_status == "unknown"
+                        and websocket_message_is_mutating(message_type)
+                        and not allow_unknown_focus_return
+                    ):
+                        await manager.send_personal_message(
+                            {
+                                "type": "error",
+                                "message": "Realtime authority is temporarily unavailable. Please retry shortly.",
+                            },
+                            websocket,
+                        )
+                        continue
 
                 if not await enforce_websocket_message_rate_limit(
                     websocket,
@@ -901,9 +1027,17 @@ async def websocket_endpoint(
                 ):
                     continue
 
-                message_db, message_db_generator = open_db_session(
-                    authenticated_player_id
-                )
+                message_db = None
+                message_db_generator = None
+                if await websocket_message_needs_route_db_async(
+                    message,
+                    client_type,
+                    game_handler,
+                    session_code,
+                ):
+                    message_db, message_db_generator = open_db_session(
+                        authenticated_player_id
+                    )
                 try:
                     await handle_websocket_message(
                         message,
@@ -916,7 +1050,8 @@ async def websocket_endpoint(
                         message_db,
                     )
                 finally:
-                    close_db_session(message_db_generator)
+                    if message_db_generator is not None:
+                        close_db_session(message_db_generator)
 
             except WebSocketDisconnect:
                 break
@@ -1105,7 +1240,7 @@ async def handle_websocket_message(
     player_id: Optional[str],
     authenticated_player_id: str,
     game_handler,
-    db: Session,
+    db: Optional[Session],
 ):
     """Handle incoming WebSocket messages"""
     message_type = message.get("type")
@@ -1302,15 +1437,31 @@ async def handle_websocket_message(
         raw_answer = data.get("answer")
         question_id = data.get("question_id")
 
-        phase_state = manager.get_session_phase_state(session_code)
+        phase_state = await manager.get_session_phase_state_async(session_code)
         current_phase = phase_state.get("phase")
         current_question_id = phase_state.get("current_question_id")
-        resolved_submit_game_type = resolve_session_game_type(db, session_code)
-        beat_clock_state = manager.get_beat_clock_state(session_code)
+        if db is not None:
+            resolved_submit_game_type = resolve_session_game_type(db, session_code)
+        else:
+            resolved_submit_game_type = getattr(game_handler, "game_type", "trivia")
+
+        question_looks_like_beat_clock = str(question_id or "").upper().startswith(
+            "BTC"
+        )
+        if (
+            resolved_submit_game_type == BEAT_THE_CLOCK_GAME_TYPE
+            or question_looks_like_beat_clock
+        ):
+            beat_clock_state = await manager.get_beat_clock_state_for_player_async(
+                session_code,
+                player_id or "",
+            )
+        else:
+            beat_clock_state = {}
         is_beat_clock_submission = (
             resolved_submit_game_type == BEAT_THE_CLOCK_GAME_TYPE
             or bool(beat_clock_state.get("active"))
-            or str(question_id or "").upper().startswith("BTC")
+            or question_looks_like_beat_clock
         )
         if (
             is_beat_clock_submission
@@ -1389,7 +1540,7 @@ async def handle_websocket_message(
 
             if manager.is_player_frozen_for_question(
                 session_code, player_id, question_id
-            ) or is_player_kicked(db, session_code, player_id):
+            ):
                 await manager.send_personal_message(
                     {
                         "type": "answer_rejected",
@@ -1399,7 +1550,7 @@ async def handle_websocket_message(
                             "is_frozen": manager.is_player_frozen_for_question(
                                 session_code, player_id, question_id
                             ),
-                            "is_kicked": is_player_kicked(db, session_code, player_id),
+                            "is_kicked": False,
                         },
                     },
                     websocket,
@@ -1512,7 +1663,7 @@ async def handle_websocket_message(
 
         if manager.is_player_frozen_for_question(
             session_code, player_id, question_id
-        ) or is_player_kicked(db, session_code, player_id):
+        ) or (db is not None and is_player_kicked(db, session_code, player_id)):
             await manager.send_personal_message(
                 {
                     "type": "answer_rejected",
@@ -1522,7 +1673,11 @@ async def handle_websocket_message(
                         "is_frozen": manager.is_player_frozen_for_question(
                             session_code, player_id, question_id
                         ),
-                        "is_kicked": is_player_kicked(db, session_code, player_id),
+                        "is_kicked": (
+                            is_player_kicked(db, session_code, player_id)
+                            if db is not None
+                            else False
+                        ),
                     },
                 },
                 websocket,
@@ -1548,7 +1703,19 @@ async def handle_websocket_message(
     elif message_type == "buzzer_press" and client_type == "mobile":
         # Player pressing buzzer (for buzzer games)
         if player_id and hasattr(game_handler, "handle_buzzer_press"):
-            phase_state = manager.get_session_phase_state(session_code)
+            phase_state = await manager.get_session_phase_state_async(session_code)
+            if phase_state.get("unavailable"):
+                await manager.send_personal_message(
+                    {
+                        "type": "error",
+                        "data": {
+                            "reason": "state_unavailable",
+                            "message": "Game state is temporarily unavailable. Please retry shortly.",
+                        },
+                    },
+                    websocket,
+                )
+                return
             current_question_id = phase_state.get("current_question_id")
             incoming_question_id = data.get("question_id")
             if not incoming_question_id or incoming_question_id != current_question_id:
@@ -1612,7 +1779,7 @@ async def handle_websocket_message(
         await handle_update_session_settings(session_code, data, db)
 
     elif message_type == "start_beat_clock_round" and client_type == "web":
-        phase_state = manager.get_session_phase_state(session_code)
+        phase_state = await manager.get_session_phase_state_async(session_code)
         if not countdown_phase_has_elapsed(phase_state):
             logger.info(
                 "Ignoring start_beat_clock_round for %s; countdown has not completed. phase=%s question_start_at=%s",
@@ -1645,7 +1812,8 @@ async def handle_websocket_message(
         return
 
     elif message_type == "intro_complete" and client_type == "web":
-        current_phase = manager.get_session_phase_state(session_code).get("phase")
+        phase_state = await manager.get_session_phase_state_async(session_code)
+        current_phase = phase_state.get("phase")
         if current_phase != SessionPhase.INTRO_AUDIO.value:
             logger.info(
                 f"Ignoring intro_complete for {session_code}; current phase is {current_phase}"
@@ -1711,7 +1879,8 @@ async def handle_websocket_message(
         )
 
     elif message_type == "skip_intro" and client_type == "web":
-        current_phase = manager.get_session_phase_state(session_code).get("phase")
+        phase_state = await manager.get_session_phase_state_async(session_code)
+        current_phase = phase_state.get("phase")
         if current_phase != SessionPhase.INTRO_AUDIO.value:
             logger.info(
                 f"Ignoring skip_intro for {session_code}; current phase is {current_phase}"
@@ -1724,7 +1893,7 @@ async def handle_websocket_message(
             {
                 "type": "intro_skipped",
                 "data": {
-                    **manager.get_session_phase_state(session_code),
+                    **phase_state,
                     "skipped_at": iso_utc(utc_now()),
                 },
             },
@@ -1788,7 +1957,7 @@ async def handle_websocket_message(
         )
 
     elif message_type == "countdown_complete" and client_type == "web":
-        phase_state = manager.get_session_phase_state(session_code)
+        phase_state = await manager.get_session_phase_state_async(session_code)
         current_phase = phase_state.get("phase")
         if current_phase != SessionPhase.COUNTDOWN.value:
             logger.info(
@@ -1934,7 +2103,7 @@ async def handle_mobile_disconnect_during_fair_play(
     if is_player_kicked(db, session_code, player_id):
         return
 
-    phase_state = manager.get_session_phase_state(session_code)
+    phase_state = await manager.get_session_phase_state_async(session_code)
     if phase_state.get("phase") != SessionPhase.QUESTION.value:
         return
 
@@ -2030,7 +2199,7 @@ async def handle_fair_play_focus_lost(
     if not game_state or not getattr(game_state, "fair_play_enabled", False):
         return
 
-    phase_state = manager.get_session_phase_state(session_code)
+    phase_state = await manager.get_session_phase_state_async(session_code)
     if phase_state.get("phase") != SessionPhase.QUESTION.value:
         return
     is_beat_clock_fair_play = (
@@ -2178,7 +2347,7 @@ async def resync_buzzer_ui_after_fair_play_return(
         if game_type != BUZZER_GAME_TYPE:
             return
 
-        phase_state = manager.get_session_phase_state(session_code)
+        phase_state = await manager.get_session_phase_state_async(session_code)
         current_question_id = phase_state.get("current_question_id")
 
         if question_id and current_question_id and question_id != current_question_id:
@@ -2199,7 +2368,7 @@ async def resync_buzzer_ui_after_fair_play_return(
         # update_mobile_buzzer_ui is the authoritative per-player state:
         # winner -> answer_mode, others -> waiting/frozen/active as appropriate.
         if hasattr(buzzer_handler, "update_mobile_buzzer_ui"):
-            state = manager.get_buzzer_state(session_code)
+            state = await manager.get_buzzer_state_async(session_code)
 
             logger.warning(
                 "FAIR PLAY RETURN BUZZER RESYNC session=%s player=%s question=%s current_winner=%s accepting_buzzes=%s transitioning=%s",
@@ -2507,7 +2676,7 @@ async def schedule_absent_player_fair_play_checks(
 ):
     """Strike eligible players who are still absent shortly after a question starts."""
     await asyncio.sleep(grace_ms / 1000)
-    phase_state = manager.get_session_phase_state(session_code)
+    phase_state = await manager.get_session_phase_state_async(session_code)
     if (
         phase_state.get("phase") != SessionPhase.QUESTION.value
         or phase_state.get("current_question_id") != question_id
@@ -2716,7 +2885,7 @@ async def apply_buzzer_fair_play_freeze(
         if game_type != BUZZER_GAME_TYPE:
             return
 
-        state = manager.get_buzzer_state(session_code)
+        state = await manager.get_buzzer_state_async(session_code)
 
         if state.get("current_question_id") != question_id:
             logger.info(
@@ -2768,7 +2937,8 @@ async def apply_buzzer_fair_play_freeze(
                 question_id,
             )
 
-        manager.save_buzzer_state(session_code, state)
+        if not await manager.save_buzzer_state_async(session_code, state):
+            return
         await manager.broadcast_buzzer_state_update(session_code)
 
         buzzer_handler = create_game_handler(session_code, BUZZER_GAME_TYPE)
@@ -2844,7 +3014,7 @@ async def handle_focus_violation(
     if not game_state or not getattr(game_state, "fair_play_enabled", False):
         return
 
-    phase_state = manager.get_session_phase_state(session_code)
+    phase_state = await manager.get_session_phase_state_async(session_code)
     if phase_state.get("phase") != SessionPhase.QUESTION.value:
         return
     fair_play_game_type = phase_state.get("game_type") or resolve_session_game_type(

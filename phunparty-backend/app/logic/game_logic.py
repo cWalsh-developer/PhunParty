@@ -125,9 +125,23 @@ def submit_player_answer(
     if is_correct:
         update_scores(db, session_code, player_id)
 
-    # Game progression mutates session-owned state.
-    # The answer and score are recorded under the answering player's RLS context,
-    # but advancing/revealing/ending the session must run as the session owner.
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception(
+            "ANSWER SUBMIT COMMIT FAILED session=%s player=%s question=%s",
+            session_code,
+            player_id,
+            authoritative_question_id,
+        )
+        return {
+            "error": str(exc),
+            "question_id": authoritative_question_id,
+        }
+
+    # Game progression mutates session-owned state. The answer is committed before
+    # the cheap readiness check so concurrent final answers can observe each other.
     session = get_session_by_code(db, session_code)
     progression_actor_id = (
         session.owner_player_id if session and session.owner_player_id else player_id
@@ -142,33 +156,59 @@ def submit_player_answer(
 
     set_rls_current_player(db, progression_actor_id)
 
-    game_progression = check_progression_readiness_without_lock(
-        db,
-        session_code,
-        authoritative_question_id,
-        game_state,
-    )
-
-    if game_progression.get("ready_for_progression"):
-        game_progression = check_and_advance_game(
-            db, session_code, authoritative_question_id
+    game_state_for_progression = get_game_session_state(db, session_code)
+    if not game_state_for_progression:
+        game_progression = {"error": "Game state not found"}
+    elif game_state_for_progression.current_question_id != authoritative_question_id:
+        game_progression = {
+            "waiting_for_players": False,
+            "current_question_index": game_state_for_progression.current_question_index,
+            "total_questions": game_state_for_progression.total_questions,
+            "game_state": (
+                "active" if game_state_for_progression.isstarted else "waiting"
+            ),
+            "currentQuestion": game_state_for_progression.current_question_index + 1,
+            "totalQuestions": game_state_for_progression.total_questions,
+            "isstarted": game_state_for_progression.isstarted,
+            "is_active": game_state_for_progression.is_active,
+            "stale_question": True,
+        }
+    else:
+        game_progression = check_progression_readiness_without_lock(
+            db,
+            session_code,
+            authoritative_question_id,
+            game_state_for_progression,
         )
+
+        if game_progression.get("ready_for_progression"):
+            game_progression = check_and_advance_game(
+                db, session_code, authoritative_question_id
+            )
 
     if "error" in game_progression:
         db.rollback()
         logger.warning(
-            "ANSWER SUBMIT ROLLED BACK session=%s player=%s question=%s reason=%s",
+            "ANSWER RECORDED BUT PROGRESSION FAILED session=%s player=%s question=%s reason=%s",
             session_code,
             player_id,
             authoritative_question_id,
             game_progression["error"],
         )
-        return {
-            "error": game_progression["error"],
-            "question_id": authoritative_question_id,
-        }
-
-    db.commit()
+    elif game_progression.get("ready_for_progression") or game_progression.get(
+        "action"
+    ):
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.exception(
+                "ANSWER PROGRESSION COMMIT FAILED session=%s player=%s question=%s",
+                session_code,
+                player_id,
+                authoritative_question_id,
+            )
+            game_progression = {"error": str(exc)}
 
     # Restore the original answering-player context for anything else this request does.
     set_rls_current_player(db, player_id)

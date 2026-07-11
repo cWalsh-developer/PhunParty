@@ -1,0 +1,10 @@
+[
+  {
+    "player_id": "PLAYER001",
+    "token": "replace-with-player-jwt"
+  },
+  {
+    "player_id": "PLAYER002",
+    "token": "replace-with-player-jwt"
+  }
+]

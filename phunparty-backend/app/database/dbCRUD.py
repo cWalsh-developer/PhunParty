@@ -911,6 +911,25 @@ def ensure_session_assignment(
     session_end: datetime | None = None,
 ) -> SessionAssignment:
     """Ensure a player/session membership row exists."""
+    assignment, _inserted = ensure_session_assignment_with_status(
+        db,
+        session_code,
+        player_id,
+        session_start=session_start,
+        session_end=session_end,
+    )
+    return assignment
+
+
+def ensure_session_assignment_with_status(
+    db: Session,
+    session_code: str,
+    player_id: str,
+    *,
+    session_start: datetime | None = None,
+    session_end: datetime | None = None,
+) -> tuple[SessionAssignment, bool]:
+    """Ensure a membership row exists and report whether this call inserted it."""
     session_start = session_start or utc_now()
 
     if _is_postgresql_session(db):
@@ -931,7 +950,7 @@ def ensure_session_assignment(
             )
             .returning(SessionAssignment.assignment_id)
         )
-        db.execute(stmt).scalar_one_or_none()
+        inserted_id = db.execute(stmt).scalar_one_or_none()
         assignment = (
             db.query(SessionAssignment)
             .filter(SessionAssignment.player_id == player_id)
@@ -939,7 +958,7 @@ def ensure_session_assignment(
             .first()
         )
         if assignment:
-            return assignment
+            return assignment, inserted_id is not None
         raise ValueError("Unable to ensure session assignment")
 
     existing_assignment = (
@@ -950,7 +969,7 @@ def ensure_session_assignment(
     )
 
     if existing_assignment:
-        return existing_assignment
+        return existing_assignment, False
 
     assignment = SessionAssignment(
         assignment_id=generate_assignment_id(),
@@ -961,14 +980,19 @@ def ensure_session_assignment(
     )
     db.add(assignment)
     db.flush()
-    return assignment
+    return assignment, True
 
 
 def assign_player_to_session(db: Session, player_id: str, session_code: str) -> None:
     """Assign a player to a game session."""
-    assignment = ensure_session_assignment(db, session_code, player_id)
+    assignment, inserted = ensure_session_assignment_with_status(
+        db,
+        session_code,
+        player_id,
+    )
+    if inserted or assignment.session_end is not None:
+        assignment.session_start = utc_now()
     assignment.session_end = None
-    assignment.session_start = utc_now()
     db.flush()
 
     # Session Questions Assignment CRUD operations --------------------------------------------------------------------------------------------------------------
@@ -1257,6 +1281,28 @@ def get_scores_by_session(db: Session, session_code: str) -> list[Scores]:
     if not scores:
         raise ValueError("No scores found for this session")
     return scores
+
+
+def get_session_score_leaderboard(db: Session, session_code: str) -> list[dict]:
+    """Return a session leaderboard from score snapshots in one query."""
+    scores = (
+        db.query(Scores)
+        .filter(Scores.session_code == session_code)
+        .order_by(Scores.score.desc(), Scores.player_display_name.asc())
+        .all()
+    )
+    leaderboard = []
+    for index, score in enumerate(scores, start=1):
+        leaderboard.append(
+            {
+                "rank": index,
+                "player_id": score.player_id,
+                "display_name": score.player_display_name or "Player",
+                "player_photo_url": score.player_photo_url,
+                "score": score.score,
+            }
+        )
+    return leaderboard
 
 
 def calculate_game_results(db: Session, session_code: str):
@@ -1982,6 +2028,24 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
     Also calculates final game results.
     """
     try:
+        ended_at = utc_now()
+        claimed_rows = (
+            db.query(GameSessionState)
+            .filter(
+                GameSessionState.session_code == session_code,
+                GameSessionState.is_active.is_(True),
+            )
+            .update(
+                {
+                    GameSessionState.ended_at: ended_at,
+                    GameSessionState.is_active: False,
+                    GameSessionState.isstarted: False,
+                    GameSessionState.is_waiting_for_players: False,
+                },
+                synchronize_session=False,
+            )
+        )
+
         game_state = (
             db.query(GameSessionState)
             .filter(GameSessionState.session_code == session_code)
@@ -1992,12 +2056,12 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
             logger.warning("Game session state not found for %s", session_code)
             return False
 
-        if not game_state.ended_at:
-            game_state.ended_at = utc_now()
-
-        game_state.is_active = False
-        game_state.isstarted = False
-        game_state.is_waiting_for_players = False
+        if claimed_rows == 0:
+            logger.info(
+                "Game session %s was already ended or not active; skipping finalizer claim",
+                session_code,
+            )
+            return False
 
         assigned_player_ids = (
             db.query(SessionAssignment.player_id)

@@ -1,4 +1,5 @@
 import glob
+import logging
 import os
 import re
 from urllib.parse import quote
@@ -49,6 +50,7 @@ MAX_IMAGE_PIXELS = 25_000_000
 MAX_IMAGE_DIMENSION = 8192
 
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+logger = logging.getLogger(__name__)
 
 # DiceBear avatar styles for generated avatars
 DICEBEAR_STYLES = [
@@ -342,11 +344,12 @@ async def upload_player_photo(
         }
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         # Clean up file if database update fails
         if "file_path" in locals() and file_path.exists():
             file_path.unlink()
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.exception("Photo upload failed for player=%s", player_id)
+        raise HTTPException(status_code=400, detail="Photo upload failed")
 
 
 @router.delete("/{player_id}/photo", tags=["Photos"])
@@ -383,8 +386,9 @@ async def delete_player_photo(
         return {"message": "Photo deleted successfully"}
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Photo deletion failed for player=%s", player_id)
+        raise HTTPException(status_code=400, detail="Photo deletion failed")
 
 
 @router.post("/avatar/{player_id}", tags=["Photos"])
@@ -445,8 +449,9 @@ async def set_player_avatar(
         }
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Avatar update failed for player=%s", player_id)
+        raise HTTPException(status_code=400, detail="Avatar update failed")
 
 
 @router.get("/avatars", tags=["Photos"])
@@ -481,8 +486,9 @@ async def get_available_avatars():
         }
         cache.set(cache_key, response, ttl_seconds=86400)
         return response
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Available avatar lookup failed")
+        raise HTTPException(status_code=400, detail="Unable to load avatars")
 
 
 @router.get("/avatars/styles", tags=["Photos"])
@@ -508,8 +514,9 @@ async def get_avatar_styles():
         }
         cache.set(cache_key, response, ttl_seconds=86400)
         return response
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Avatar style lookup failed")
+        raise HTTPException(status_code=400, detail="Unable to load avatar styles")
 
 
 @router.get("/avatars/generate/{style}", tags=["Photos"])
@@ -545,8 +552,9 @@ async def generate_avatar_preview(
         return {"style": style, "seed": seed, "size": size, "url": avatar_url}
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Avatar preview generation failed")
+        raise HTTPException(status_code=400, detail="Unable to generate avatar")
 
 
 @router.get("/{filename}", tags=["Photos"])
@@ -567,8 +575,9 @@ async def get_photo(filename: str):
         )
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Photo retrieval failed")
+        raise HTTPException(status_code=400, detail="Unable to retrieve photo")
 
 
 @router.delete("/maintenance/cleanup-orphaned", tags=["Photos"])
@@ -615,8 +624,9 @@ async def cleanup_orphaned_photos(
             "orphaned_files_deleted": deleted_count,
             "storage_saved": f"~{deleted_count * 0.5}MB (estimated)",
         }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Orphaned photo cleanup failed")
+        raise HTTPException(status_code=400, detail="Photo cleanup failed")
 
 
 @router.get("/maintenance/storage-info", tags=["Photos"])
@@ -637,5 +647,6 @@ async def get_storage_info(_: str = Depends(require_admin_api_key)):
                 round((total_size / len(all_files)) / 1024, 2) if all_files else 0
             ),
         }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Photo storage info lookup failed")
+        raise HTTPException(status_code=400, detail="Unable to load storage info")

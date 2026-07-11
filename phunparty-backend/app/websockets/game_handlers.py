@@ -17,6 +17,7 @@ from app.database.dbCRUD import (
     get_player_by_ID,
     get_question_by_id,
     get_scores_by_session_and_player,
+    get_session_score_leaderboard,
     get_session_by_code,
     get_session_questions_ordered,
     update_scores,
@@ -36,7 +37,7 @@ from app.security.question_payload import sanitize_question_for_client
 from app.security.roster_identity import make_roster_player_id
 from app.websockets.game_lifecycle import handle_game_end
 from app.websockets.game_modes import BEAT_THE_CLOCK_GAME_TYPE
-from app.websockets.manager import SessionPhase, manager
+from app.websockets.manager import BeatClockFinishClaim, SessionPhase, manager
 from app.websockets.scheduler import (
     NEXT_QUESTION_REVEAL_DELAY_MS,
     advance_or_end_current_question,
@@ -157,6 +158,23 @@ class TriviaGameHandler(GameEventHandler):
         db = SessionLocal()
         try:
             set_rls_current_player(db, player_id)
+            if is_player_kicked(db, self.session_code, player_id) or (
+                manager.is_player_frozen_for_question(
+                    self.session_code,
+                    player_id,
+                    question_id,
+                )
+                or is_player_frozen_for_question(
+                    db,
+                    self.session_code,
+                    player_id,
+                    question_id,
+                )
+            ):
+                player = get_player_by_ID(db, player_id)
+                player_name = player.player_name if player else "Unknown Player"
+                return {"error": "fair_play_restriction"}, player_name
+
             result = submit_player_answer(
                 db,
                 self.session_code,
@@ -172,7 +190,7 @@ class TriviaGameHandler(GameEventHandler):
             db.close()
 
     async def handle_player_answer(
-        self, player_id: str, answer: str, question_id: str, db: Session
+        self, player_id: str, answer: str, question_id: str, db: Optional[Session] = None
     ):
         """Handle trivia answer submission."""
         try:
@@ -191,6 +209,18 @@ class TriviaGameHandler(GameEventHandler):
                     question_id,
                     result["error"],
                 )
+                if result["error"] == "fair_play_restriction":
+                    await manager.send_message_to_player(
+                        session_code=self.session_code,
+                        player_id=player_id,
+                        message={
+                            "type": "answer_rejected",
+                            "data": {
+                                "reason": "fair_play_restriction",
+                                "question_id": question_id,
+                            },
+                        },
+                    )
                 return
 
             logger.info(
@@ -245,26 +275,23 @@ class TriviaGameHandler(GameEventHandler):
             )
 
             if action == "next_question":
-                try:
-                    db.expire_all()
-                except Exception:
-                    logger.exception(
-                        "Could not refresh DB session before trivia reveal session=%s",
-                        self.session_code,
-                    )
-
                 manager.clear_question_queue(self.session_code)
 
                 question_start_at = utc_now() + timedelta(
                     milliseconds=NEXT_QUESTION_REVEAL_DELAY_MS
                 )
 
-                revealed = await reveal_current_question(
-                    self.session_code,
-                    db,
-                    iso_utc(question_start_at),
-                    acting_player_id=player_id,
-                )
+                with SessionLocal() as action_db:
+                    try:
+                        set_rls_current_player(action_db, player_id)
+                        revealed = await reveal_current_question(
+                            self.session_code,
+                            action_db,
+                            iso_utc(question_start_at),
+                            acting_player_id=player_id,
+                        )
+                    finally:
+                        clear_rls_context(action_db)
 
                 logger.warning(
                     "TRIVIA NEXT QUESTION REVEAL session=%s old_question=%s revealed=%s",
@@ -274,11 +301,16 @@ class TriviaGameHandler(GameEventHandler):
                 )
 
             elif action == "game_ended":
-                await handle_game_end(
-                    self.session_code,
-                    db,
-                    acting_player_id=player_id,
-                )
+                with SessionLocal() as action_db:
+                    try:
+                        set_rls_current_player(action_db, player_id)
+                        await handle_game_end(
+                            self.session_code,
+                            action_db,
+                            acting_player_id=player_id,
+                        )
+                    finally:
+                        clear_rls_context(action_db)
 
             else:
                 logger.info(
@@ -356,6 +388,10 @@ class TriviaGameHandler(GameEventHandler):
 class BeatTheClockGameHandler(GameEventHandler):
     """Handler for Beat the Clock game mode."""
 
+    _state_broadcast_tasks: dict[str, asyncio.Task] = {}
+    _state_broadcast_dirty: set[str] = set()
+    STATE_BROADCAST_DEBOUNCE_SECONDS = 0.35
+
     def __init__(self, session_code: str):
         super().__init__(session_code, BEAT_THE_CLOCK_GAME_TYPE)
 
@@ -377,31 +413,16 @@ class BeatTheClockGameHandler(GameEventHandler):
         ]
 
     def _leaderboard(self, db: Session) -> list[dict]:
-        players = manager.get_mobile_players(self.session_code)
-        leaderboard = []
-        for player in players:
-            player_id = player.get("player_id")
-            if not player_id:
-                continue
-            score_row = get_scores_by_session_and_player(
-                db, self.session_code, player_id
-            )
-            leaderboard.append(
-                {
-                    "player_id": player_id,
-                    "roster_player_id": make_roster_player_id(
-                        self.session_code, player_id
-                    ),
-                    "display_name": player.get("player_name") or "Player",
-                    "player_photo_url": player.get("player_photo"),
-                    "score": score_row.score if score_row else 0,
-                }
-            )
-
-        leaderboard.sort(key=lambda item: (-item["score"], item["display_name"]))
-        for index, item in enumerate(leaderboard, start=1):
-            item["rank"] = index
-        return leaderboard
+        return [
+            {
+                **entry,
+                "roster_player_id": make_roster_player_id(
+                    self.session_code,
+                    entry["player_id"],
+                ),
+            }
+            for entry in get_session_score_leaderboard(db, self.session_code)
+        ]
 
     def _ensure_player_state(
         self,
@@ -522,11 +543,51 @@ class BeatTheClockGameHandler(GameEventHandler):
 
     async def _send_question_to_player(
         self,
-        db: Session,
+        db: Optional[Session],
         player_id: str,
         state: Optional[dict] = None,
     ) -> bool:
-        state = state or manager.get_beat_clock_state_for_player(
+        if db is None:
+            state = state or await manager.get_beat_clock_state_for_player_async(
+                self.session_code,
+                player_id,
+            )
+            if not state.get("active"):
+                return False
+            ends_at_dt = state.get("ends_at_dt")
+            if ends_at_dt and utc_now() >= ends_at_dt:
+                state["active"] = False
+                state["finished"] = True
+                await self._finish_now(None, acting_player_id=player_id)
+                return False
+
+            result = await asyncio.to_thread(
+                self._build_next_question_payload_in_thread,
+                player_id,
+                state,
+            )
+            payload = result.get("payload")
+            if not payload:
+                return False
+
+            updated_player_state = result.get("player_state")
+            if updated_player_state:
+                if not await manager.update_beat_clock_player_state_async(
+                    self.session_code,
+                    player_id,
+                    updated_player_state,
+                ):
+                    return False
+            await manager.send_message_to_player(
+                session_code=self.session_code,
+                player_id=player_id,
+                message={"type": "beat_clock_question", "data": payload},
+                critical=True,
+            )
+            manager.update_beat_clock_local_state(self.session_code, result["state"])
+            return True
+
+        state = state or await manager.get_beat_clock_state_for_player_async(
             self.session_code,
             player_id,
         )
@@ -547,20 +608,48 @@ class BeatTheClockGameHandler(GameEventHandler):
         if not payload:
             return False
 
+        player_state = state.get("players", {}).get(player_id)
+        if player_state:
+            if not await manager.update_beat_clock_player_state_async(
+                self.session_code,
+                player_id,
+                player_state,
+            ):
+                return False
         await manager.send_message_to_player(
             session_code=self.session_code,
             player_id=player_id,
             message={"type": "beat_clock_question", "data": payload},
+            critical=True,
         )
-        player_state = state.get("players", {}).get(player_id)
-        if player_state:
-            manager.update_beat_clock_player_state(
-                self.session_code,
-                player_id,
-                player_state,
-            )
-        manager.set_beat_clock_state(self.session_code, state)
+        manager.update_beat_clock_local_state(self.session_code, state)
         return True
+
+    def _build_next_question_payload_in_thread(
+        self,
+        player_id: str,
+        state: dict,
+    ) -> dict:
+        db = SessionLocal()
+        try:
+            set_rls_current_player(db, player_id)
+            question_id = self._next_question_id(state, player_id)
+            if not question_id:
+                return {"payload": None, "state": state, "player_state": None}
+
+            payload = self._question_payload(db, question_id, player_id, state)
+            if not payload:
+                return {"payload": None, "state": state, "player_state": None}
+
+            player_state = state.get("players", {}).get(player_id)
+            return {
+                "payload": payload,
+                "state": state,
+                "player_state": dict(player_state or {}),
+            }
+        finally:
+            clear_rls_context(db)
+            db.close()
 
     async def handle_fair_play_skip(
         self,
@@ -594,10 +683,10 @@ class BeatTheClockGameHandler(GameEventHandler):
             question_id,
         )
         await self._send_question_to_player(db, player_id, state)
-        await self._broadcast_state(db)
+        self.schedule_state_broadcast()
 
     async def _broadcast_state(self, db: Session) -> dict:
-        state = manager.get_beat_clock_state(self.session_code)
+        state = manager.get_beat_clock_meta_state(self.session_code)
         leaderboard = self._leaderboard(db)
         state["leaderboard"] = leaderboard
         manager.set_beat_clock_state(self.session_code, state)
@@ -616,13 +705,90 @@ class BeatTheClockGameHandler(GameEventHandler):
         )
         return payload
 
+    def _build_state_broadcast_payload_in_thread(self) -> dict:
+        with SessionLocal() as broadcast_db:
+            try:
+                session = get_session_by_code(broadcast_db, self.session_code)
+                owner_player_id = getattr(session, "owner_player_id", None)
+                if owner_player_id:
+                    set_rls_current_player(broadcast_db, owner_player_id)
+
+                state = manager.get_beat_clock_meta_state(self.session_code)
+                leaderboard = self._leaderboard(broadcast_db)
+                state["leaderboard"] = leaderboard
+                manager.set_beat_clock_state(self.session_code, state)
+                return {
+                    "game_type": self.game_type,
+                    "duration_seconds": state.get("duration_seconds"),
+                    "started_at": state.get("started_at"),
+                    "ends_at": state.get("ends_at"),
+                    "server_time_ms": manager._utc_now_ms(),
+                    "leaderboard": leaderboard,
+                }
+            finally:
+                clear_rls_context(broadcast_db)
+
+    async def _broadcast_state_from_thread(self) -> dict:
+        payload = await asyncio.to_thread(self._build_state_broadcast_payload_in_thread)
+        await manager.broadcast_to_session(
+            self.session_code,
+            {"type": "beat_clock_state", "data": payload},
+            critical=True,
+        )
+        return payload
+
+    def schedule_state_broadcast(
+        self,
+        delay_seconds: Optional[float] = None,
+    ) -> asyncio.Task:
+        delay = (
+            self.STATE_BROADCAST_DEBOUNCE_SECONDS
+            if delay_seconds is None
+            else delay_seconds
+        )
+        self._state_broadcast_dirty.add(self.session_code)
+        existing_task = self._state_broadcast_tasks.get(self.session_code)
+        if existing_task and not existing_task.done():
+            return existing_task
+
+        async def _throttled_broadcast_loop() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(delay)
+                    if self.session_code not in self._state_broadcast_dirty:
+                        return
+
+                    self._state_broadcast_dirty.discard(self.session_code)
+                    await self._broadcast_state_from_thread()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to broadcast throttled Beat the Clock state for %s",
+                    self.session_code,
+                )
+            finally:
+                current_task = self._state_broadcast_tasks.get(self.session_code)
+                if current_task is asyncio.current_task():
+                    self._state_broadcast_tasks.pop(self.session_code, None)
+                    self._state_broadcast_dirty.discard(self.session_code)
+
+        task = asyncio.create_task(
+            _throttled_broadcast_loop(),
+            name=f"beat-clock-state-broadcast-{self.session_code}",
+        )
+        self._state_broadcast_tasks[self.session_code] = task
+        return task
+
     async def handle_game_start(self, db: Session):
         try:
             session = get_session_by_code(db, self.session_code)
             if session and session.owner_player_id:
                 set_rls_current_player(db, session.owner_player_id)
 
-            phase_state = manager.get_session_phase_state(self.session_code)
+            phase_state = await manager.get_session_phase_state_async(
+                self.session_code
+            )
             if phase_state.get("phase") == SessionPhase.ENDED.value:
                 logger.info(
                     "Ignoring Beat the Clock start for ended session %s",
@@ -824,7 +990,7 @@ class BeatTheClockGameHandler(GameEventHandler):
     ) -> None:
         if not player_id:
             return
-        state = manager.get_beat_clock_state_for_player(
+        state = await manager.get_beat_clock_state_for_player_async(
             self.session_code,
             player_id,
         )
@@ -856,6 +1022,7 @@ class BeatTheClockGameHandler(GameEventHandler):
                     "type": "beat_clock_question",
                     "data": payload,
                 },
+                critical=True,
             )
 
     async def _send_beat_clock_result_and_current_question(
@@ -871,6 +1038,7 @@ class BeatTheClockGameHandler(GameEventHandler):
                 "type": "beat_clock_answer_result",
                 "data": result_payload,
             },
+            critical=True,
         )
         if current_payload:
             await manager.send_message_to_player(
@@ -880,6 +1048,7 @@ class BeatTheClockGameHandler(GameEventHandler):
                     "type": "beat_clock_question",
                     "data": current_payload,
                 },
+                critical=True,
             )
 
     async def _send_beat_clock_rejection(
@@ -898,12 +1067,170 @@ class BeatTheClockGameHandler(GameEventHandler):
                     "message": message,
                 },
             },
+            critical=True,
         )
 
+    def _process_beat_clock_answer_in_thread(
+        self,
+        player_id: str,
+        answer: str,
+        question_id: str,
+        player_state: dict,
+        state_context: dict,
+    ) -> dict:
+        db = SessionLocal()
+        try:
+            set_rls_current_player(db, player_id)
+            score_row = get_scores_by_session_and_player(
+                db,
+                self.session_code,
+                player_id,
+            )
+
+            if is_player_kicked(db, self.session_code, player_id) or (
+                manager.is_player_frozen_for_question(
+                    self.session_code,
+                    player_id,
+                    question_id,
+                )
+                or is_player_frozen_for_question(
+                    db,
+                    self.session_code,
+                    player_id,
+                    question_id,
+                )
+            ):
+                return {
+                    "status": "rejected",
+                    "payload": {
+                        "game_type": self.game_type,
+                        "question_id": question_id,
+                        "ignored": True,
+                        "reason": "fair_play_restriction",
+                        "message": "You are frozen for this question because of Fair Play Mode.",
+                        "score": score_row.score if score_row else 0,
+                        "answered_count": player_state.get("answered_count", 0),
+                        "correct_count": player_state.get("correct_count", 0),
+                        "duration_seconds": state_context.get("duration_seconds"),
+                        "ends_at": state_context.get("ends_at"),
+                        "server_time_ms": manager._utc_now_ms(),
+                    },
+                }
+
+            question = get_question_by_id(question_id, db)
+            if not question:
+                return {"status": "missing_question"}
+
+            validation = validate_answer_against_question(
+                answer,
+                question,
+                allow_fuzzy=question_allows_fuzzy_validation(question),
+            )
+            is_correct = validation.is_correct
+            create_player_response(
+                db,
+                self.session_code,
+                player_id,
+                question_id,
+                answer,
+                is_correct,
+            )
+            updated_player_state = dict(player_state)
+
+            if is_correct:
+                update_scores(db, self.session_code, player_id)
+                updated_player_state["correct_count"] = (
+                    updated_player_state.get("correct_count", 0) + 1
+                )
+
+            updated_player_state["answered_count"] = (
+                updated_player_state.get("answered_count", 0) + 1
+            )
+            db.commit()
+
+            score_row = get_scores_by_session_and_player(
+                db,
+                self.session_code,
+                player_id,
+            )
+            return {
+                "status": "accepted",
+                "updated_player_state": updated_player_state,
+                "payload": {
+                    "game_type": self.game_type,
+                    "question_id": question_id,
+                    "is_correct": is_correct,
+                    "score": score_row.score if score_row else 0,
+                    "answered_count": updated_player_state["answered_count"],
+                    "correct_count": updated_player_state["correct_count"],
+                    "duration_seconds": state_context.get("duration_seconds"),
+                    "ends_at": state_context.get("ends_at"),
+                    "server_time_ms": manager._utc_now_ms(),
+                    "answer_match": {
+                        "method": validation.method,
+                        "score": validation.score,
+                    },
+                },
+            }
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            clear_rls_context(db)
+            db.close()
+
+    def _build_stale_beat_clock_payload_in_thread(
+        self,
+        player_id: str,
+        question_id: str,
+        current_question_id: Optional[str],
+        player_state: dict,
+        state: dict,
+    ) -> dict:
+        db = SessionLocal()
+        try:
+            set_rls_current_player(db, player_id)
+            score_row = get_scores_by_session_and_player(
+                db,
+                self.session_code,
+                player_id,
+            )
+            duplicate_payload = {
+                "game_type": self.game_type,
+                "question_id": question_id,
+                "ignored": True,
+                "reason": "stale_question",
+                "score": score_row.score if score_row else 0,
+                "answered_count": player_state.get("answered_count", 0),
+                "correct_count": player_state.get("correct_count", 0),
+                "duration_seconds": state.get("duration_seconds"),
+                "ends_at": state.get("ends_at"),
+                "server_time_ms": manager._utc_now_ms(),
+            }
+            current_payload = None
+            if current_question_id:
+                current_payload = self._question_payload(
+                    db,
+                    current_question_id,
+                    player_id,
+                    state,
+                )
+            return {
+                "duplicate_payload": duplicate_payload,
+                "current_payload": current_payload,
+            }
+        finally:
+            clear_rls_context(db)
+            db.close()
+
     async def handle_player_answer(
-        self, player_id: str, answer: str, question_id: str, db: Session
+        self,
+        player_id: str,
+        answer: str,
+        question_id: str,
+        db: Optional[Session] = None,
     ):
-        state = manager.get_beat_clock_state_for_player(
+        state = await manager.get_beat_clock_state_for_player_async(
             self.session_code,
             player_id,
         )
@@ -923,31 +1250,16 @@ class BeatTheClockGameHandler(GameEventHandler):
         player_state = state.get("players", {}).get(player_id)
         if not player_state or player_state.get("current_question_id") != question_id:
             current_question_id = (player_state or {}).get("current_question_id")
-            score_row = get_scores_by_session_and_player(
-                db,
-                self.session_code,
+            stale_result = await asyncio.to_thread(
+                self._build_stale_beat_clock_payload_in_thread,
                 player_id,
+                question_id,
+                current_question_id,
+                dict(player_state or {}),
+                state,
             )
-            duplicate_payload = {
-                "game_type": self.game_type,
-                "question_id": question_id,
-                "ignored": True,
-                "reason": "stale_question",
-                "score": score_row.score if score_row else 0,
-                "answered_count": (player_state or {}).get("answered_count", 0),
-                "correct_count": (player_state or {}).get("correct_count", 0),
-                "duration_seconds": state.get("duration_seconds"),
-                "ends_at": state.get("ends_at"),
-                "server_time_ms": manager._utc_now_ms(),
-            }
-            current_payload = None
-            if current_question_id:
-                current_payload = self._question_payload(
-                    db,
-                    current_question_id,
-                    player_id,
-                    state,
-                )
+            duplicate_payload = stale_result["duplicate_payload"]
+            current_payload = stale_result["current_payload"]
 
             await self._send_beat_clock_result_and_current_question(
                 player_id,
@@ -958,99 +1270,53 @@ class BeatTheClockGameHandler(GameEventHandler):
                 await self._send_question_to_player(db, player_id, state)
             return
 
-        if is_player_kicked(db, self.session_code, player_id) or (
-            manager.is_player_frozen_for_question(
-                self.session_code,
-                player_id,
-                question_id,
-            )
-            or is_player_frozen_for_question(
-                db,
-                self.session_code,
-                player_id,
-                question_id,
-            )
-        ):
-            score_row = get_scores_by_session_and_player(
-                db,
-                self.session_code,
-                player_id,
-            )
-            rejection_payload = {
-                "game_type": self.game_type,
-                "question_id": question_id,
-                "ignored": True,
-                "reason": "fair_play_restriction",
-                "message": "You are frozen for this question because of Fair Play Mode.",
-                "score": score_row.score if score_row else 0,
-                "answered_count": player_state.get("answered_count", 0),
-                "correct_count": player_state.get("correct_count", 0),
-                "duration_seconds": state.get("duration_seconds"),
-                "ends_at": state.get("ends_at"),
-                "server_time_ms": manager._utc_now_ms(),
-            }
+        state_context = {
+            "duration_seconds": state.get("duration_seconds"),
+            "ends_at": state.get("ends_at"),
+        }
+        result = await asyncio.to_thread(
+            self._process_beat_clock_answer_in_thread,
+            player_id,
+            answer,
+            question_id,
+            dict(player_state),
+            state_context,
+        )
+
+        if result["status"] == "missing_question":
+            return
+
+        if result["status"] == "rejected":
             await manager.send_message_to_player(
                 session_code=self.session_code,
                 player_id=player_id,
-                message={"type": "beat_clock_answer_result", "data": rejection_payload},
+                message={
+                    "type": "beat_clock_answer_result",
+                    "data": result["payload"],
+                },
+                critical=True,
             )
             return
 
-        question = get_question_by_id(question_id, db)
-        if not question:
+        updated_player_state = result["updated_player_state"]
+        if not await manager.update_beat_clock_player_state_async(
+            self.session_code,
+            player_id,
+            updated_player_state,
+        ):
+            await self._send_beat_clock_rejection(
+                player_id,
+                "state_unavailable",
+                "Game state is temporarily unavailable. Please try again.",
+            )
             return
-
-        validation = validate_answer_against_question(
-            answer,
-            question,
-            allow_fuzzy=question_allows_fuzzy_validation(question),
-        )
-        is_correct = validation.is_correct
-        create_player_response(
-            db,
-            self.session_code,
-            player_id,
-            question_id,
-            answer,
-            is_correct,
-        )
-        if is_correct:
-            update_scores(db, self.session_code, player_id)
-            player_state["correct_count"] = player_state.get("correct_count", 0) + 1
-
-        player_state["answered_count"] = player_state.get("answered_count", 0) + 1
-        manager.update_beat_clock_player_state(
-            self.session_code,
-            player_id,
-            player_state,
-        )
-        score_row = get_scores_by_session_and_player(db, self.session_code, player_id)
-        db.commit()
-
-        session = get_session_by_code(db, self.session_code)
-        if session and session.owner_player_id:
-            set_rls_current_player(db, session.owner_player_id)
-
-        answer_payload = {
-            "game_type": self.game_type,
-            "question_id": question_id,
-            "is_correct": is_correct,
-            "score": score_row.score if score_row else 0,
-            "answered_count": player_state["answered_count"],
-            "correct_count": player_state["correct_count"],
-            "duration_seconds": state.get("duration_seconds"),
-            "ends_at": state.get("ends_at"),
-            "server_time_ms": manager._utc_now_ms(),
-            "answer_match": {
-                "method": validation.method,
-                "score": validation.score,
-            },
-        }
+        state.setdefault("players", {})[player_id] = updated_player_state
 
         await manager.send_message_to_player(
             session_code=self.session_code,
             player_id=player_id,
-            message={"type": "beat_clock_answer_result", "data": answer_payload},
+            message={"type": "beat_clock_answer_result", "data": result["payload"]},
+            critical=True,
         )
 
         if utc_now() >= state.get("ends_at_dt", utc_now()):
@@ -1060,7 +1326,7 @@ class BeatTheClockGameHandler(GameEventHandler):
             return
 
         await self._send_question_to_player(db, player_id, state)
-        await self._broadcast_state(db)
+        self.schedule_state_broadcast()
 
     async def _finish_when_timer_expires(
         self,
@@ -1084,12 +1350,52 @@ class BeatTheClockGameHandler(GameEventHandler):
 
     async def _finish_now(
         self,
+        db: Optional[Session],
+        acting_player_id: Optional[str] = None,
+    ) -> None:
+        finish_claim = manager.claim_beat_clock_finish(self.session_code)
+        if finish_claim == BeatClockFinishClaim.UNAVAILABLE:
+            for retry_delay in (0.05, 0.1, 0.2):
+                await asyncio.sleep(retry_delay)
+                finish_claim = manager.claim_beat_clock_finish(self.session_code)
+                if finish_claim != BeatClockFinishClaim.UNAVAILABLE:
+                    break
+
+        if finish_claim == BeatClockFinishClaim.ALREADY_ACQUIRED:
+            logger.info(
+                "Beat the Clock Redis finish marker already exists for session=%s; "
+                "continuing to DB election for crash recovery",
+                self.session_code,
+            )
+
+        if finish_claim == BeatClockFinishClaim.UNAVAILABLE:
+            logger.warning(
+                "Beat the Clock finish lock unavailable after retries; "
+                "using idempotent DB finalization for session=%s",
+                self.session_code,
+            )
+
+        if db is None:
+            with SessionLocal() as finish_db:
+                try:
+                    if acting_player_id:
+                        set_rls_current_player(finish_db, acting_player_id)
+                    await self._finish_now_after_claim(
+                        finish_db,
+                        acting_player_id=acting_player_id,
+                    )
+                finally:
+                    clear_rls_context(finish_db)
+            return
+
+        await self._finish_now_after_claim(db, acting_player_id=acting_player_id)
+
+    async def _finish_now_after_claim(
+        self,
         db: Session,
         acting_player_id: Optional[str] = None,
     ) -> None:
         state = manager.get_beat_clock_state(self.session_code)
-        if state.get("ending"):
-            return
         state["ending"] = True
         state["active"] = False
         state["finished"] = True
@@ -1102,12 +1408,13 @@ class BeatTheClockGameHandler(GameEventHandler):
         end_actor_id = getattr(session, "owner_player_id", None) or acting_player_id
         if end_actor_id:
             set_rls_current_player(db, end_actor_id)
-        await self._broadcast_state(db)
-        await handle_game_end(
+        ended = await handle_game_end(
             self.session_code,
             db,
             acting_player_id=end_actor_id,
         )
+        if not ended:
+            return
 
 
 class BuzzerGameHandler(GameEventHandler):
@@ -1119,6 +1426,33 @@ class BuzzerGameHandler(GameEventHandler):
     @property
     def buzzer_state(self) -> Dict[str, Any]:
         return manager.get_buzzer_state(self.session_code)
+
+    async def _send_state_unavailable_notice(
+        self,
+        player_id: Optional[str] = None,
+        reason: str = "state_unavailable",
+    ) -> None:
+        message = {
+            "type": "error",
+            "data": {
+                "reason": reason,
+                "message": "Game state is temporarily unavailable. Please retry shortly.",
+            },
+        }
+        if player_id:
+            await manager.send_message_to_player(
+                session_code=self.session_code,
+                player_id=player_id,
+                message=message,
+                critical=True,
+            )
+            return
+
+        await manager.broadcast_to_session(
+            self.session_code,
+            message,
+            critical=True,
+        )
 
     async def reject_fair_play_locked_buzzer(
         self,
@@ -1142,7 +1476,10 @@ class BuzzerGameHandler(GameEventHandler):
         )
         if not is_locked_by_fair_play:
             return False
-        state = self.buzzer_state
+        state = await manager.get_buzzer_state_async(self.session_code)
+        if state.get("unavailable"):
+            await self._send_state_unavailable_notice(player_id)
+            return True
         frozen_players = state.setdefault("frozen_players", set())
         frozen_players.add(player_id)
 
@@ -1153,7 +1490,9 @@ class BuzzerGameHandler(GameEventHandler):
             state["question_active"] = True
             state["transitioning"] = False
             state["accepting_buzzes"] = True
-        manager.save_buzzer_state(self.session_code, state)
+        if not await manager.save_buzzer_state_async(self.session_code, state):
+            await self._send_state_unavailable_notice(player_id)
+            return True
 
         logger.info(
             "Rejected Fair Play locked buzzer press: session=%s player=%s question=%s",
@@ -1185,8 +1524,15 @@ class BuzzerGameHandler(GameEventHandler):
         self, player_id: str, db: Session, incoming_question_id: str = None
     ):
         """Handle player pressing buzzer"""
-        state = self.buzzer_state
-        phase_state = manager.get_session_phase_state(self.session_code)
+        state = await manager.get_buzzer_state_async(self.session_code)
+        if state.get("unavailable"):
+            await self._send_state_unavailable_notice(player_id)
+            return
+
+        phase_state = await manager.get_session_phase_state_async(self.session_code)
+        if phase_state.get("unavailable"):
+            await self._send_state_unavailable_notice(player_id)
+            return
         current_question_id = phase_state.get("current_question_id")
 
         if phase_state.get("phase") != SessionPhase.QUESTION.value:
@@ -1241,22 +1587,26 @@ class BuzzerGameHandler(GameEventHandler):
 
         # This player wins the buzzer.
         # Close buzzing immediately so every non-winner is greyed out.
-        if not manager.claim_buzzer_winner(
+        if not await manager.claim_buzzer_winner_async(
             self.session_code,
             player_id,
             current_question_id,
         ):
-            await manager.broadcast_buzzer_state_update(self.session_code)
-            await self.update_mobile_buzzer_ui(db)
+            await self._send_state_unavailable_notice(player_id)
             return
 
-        state = self.buzzer_state
+        state = await manager.get_buzzer_state_async(self.session_code)
+        if state.get("unavailable"):
+            await self._send_state_unavailable_notice(player_id)
+            return
 
         answer_payload_cache = state.setdefault("answer_payload_cache", {})
 
         if answer_payload_cache.get("question_id") != current_question_id:
             answer_payload_cache.clear()
-        manager.save_buzzer_state(self.session_code, state)
+        if not await manager.save_buzzer_state_async(self.session_code, state):
+            await self._send_state_unavailable_notice(player_id)
+            return
 
         logger.warning(
             "BUZZER WINNER LOCKED session=%s player=%s question=%s accepting_buzzes=%s",
@@ -1295,8 +1645,15 @@ class BuzzerGameHandler(GameEventHandler):
         self, player_id: str, answer: str, question_id: str, db: Session
     ):
         """Handle buzzer game answer submission."""
-        state = self.buzzer_state
-        phase_state = manager.get_session_phase_state(self.session_code)
+        state = await manager.get_buzzer_state_async(self.session_code)
+        if state.get("unavailable"):
+            await self._send_state_unavailable_notice(player_id)
+            return
+
+        phase_state = await manager.get_session_phase_state_async(self.session_code)
+        if phase_state.get("unavailable"):
+            await self._send_state_unavailable_notice(player_id)
+            return
         current_phase_question_id = phase_state.get("current_question_id")
         state_question_id = state.get("current_question_id")
 
@@ -1463,7 +1820,9 @@ class BuzzerGameHandler(GameEventHandler):
                 "timestamp": datetime.now().isoformat(),
             }
         )
-        manager.save_buzzer_state(self.session_code, state)
+        if not await manager.save_buzzer_state_async(self.session_code, state):
+            await self._send_state_unavailable_notice(player_id)
+            return
 
         await manager.broadcast_to_session(
             self.session_code,
@@ -1570,7 +1929,9 @@ class BuzzerGameHandler(GameEventHandler):
         state["question_active"] = True
         state["transitioning"] = False
         state["accepting_buzzes"] = True
-        manager.save_buzzer_state(self.session_code, state)
+        if not await manager.save_buzzer_state_async(self.session_code, state):
+            await self._send_state_unavailable_notice(player_id)
+            return
 
         logger.warning(
             "BUZZER REOPENED AFTER WRONG ANSWER session=%s question=%s frozen_count=%s active_players=%s",
@@ -1599,8 +1960,12 @@ class BuzzerGameHandler(GameEventHandler):
     ):
         """Update mobile UI based on the authoritative buzzer state."""
         mobile_connections = manager.get_session_connections(self.session_code)
-        state = self.buzzer_state
-        phase_state = manager.get_session_phase_state(self.session_code)
+        state = await manager.get_buzzer_state_async(self.session_code)
+        if state.get("unavailable"):
+            return
+        phase_state = await manager.get_session_phase_state_async(self.session_code)
+        if phase_state.get("unavailable"):
+            return
 
         expected_question_id = state.get("current_question_id") or phase_state.get(
             "current_question_id"
