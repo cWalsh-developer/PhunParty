@@ -135,6 +135,30 @@ def websocket_message_is_mutating(message_type: Optional[str]) -> bool:
     return message_type not in WEBSOCKET_READ_ONLY_MESSAGE_TYPES
 
 
+def websocket_focus_return_allowed_during_unknown_authority(
+    websocket: WebSocket,
+    session_code: str,
+    player_id: Optional[str],
+) -> bool:
+    if not player_id:
+        return False
+    if not manager.get_pending_focus_loss(session_code, player_id):
+        return False
+
+    connection_info = manager._connection_info_for_websocket(websocket)
+    if not connection_info:
+        return False
+    if connection_info.get("client_type") != "mobile":
+        return False
+    if connection_info.get("player_id") != player_id:
+        return False
+
+    return any(
+        info is connection_info
+        for info in manager.get_player_connections(session_code, player_id).values()
+    )
+
+
 def get_websocket_client_ip(websocket: WebSocket) -> str:
     trust_proxy = os.getenv("TRUST_PROXY_HEADERS", "false").lower() == "true"
     if trust_proxy:
@@ -939,8 +963,19 @@ async def websocket_endpoint(
                             reason="Connection replaced",
                         )
                         break
-                    if generation_status == "unknown" and websocket_message_is_mutating(
-                        message_type
+                    allow_unknown_focus_return = (
+                        generation_status == "unknown"
+                        and message_type == "fair_play_focus_returned"
+                        and websocket_focus_return_allowed_during_unknown_authority(
+                            websocket,
+                            session_code,
+                            player_id,
+                        )
+                    )
+                    if (
+                        generation_status == "unknown"
+                        and websocket_message_is_mutating(message_type)
+                        and not allow_unknown_focus_return
                     ):
                         await manager.send_personal_message(
                             {
@@ -1473,7 +1508,7 @@ async def handle_websocket_message(
 
             if manager.is_player_frozen_for_question(
                 session_code, player_id, question_id
-            ) or is_player_kicked(db, session_code, player_id):
+            ):
                 await manager.send_personal_message(
                     {
                         "type": "answer_rejected",
@@ -1483,7 +1518,7 @@ async def handle_websocket_message(
                             "is_frozen": manager.is_player_frozen_for_question(
                                 session_code, player_id, question_id
                             ),
-                            "is_kicked": is_player_kicked(db, session_code, player_id),
+                            "is_kicked": False,
                         },
                     },
                     websocket,

@@ -71,6 +71,6 @@ def send_sms(to_number: str, message: str, db: Session) -> bool:
         return True
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("SMS send failed")
-        raise HTTPException(status_code=500, detail="Failed to send SMS: " + str(e))
+        raise HTTPException(status_code=500, detail="Failed to send SMS")

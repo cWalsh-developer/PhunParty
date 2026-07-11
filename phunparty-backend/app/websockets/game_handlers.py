@@ -548,16 +548,43 @@ class BeatTheClockGameHandler(GameEventHandler):
         state: Optional[dict] = None,
     ) -> bool:
         if db is None:
-            with SessionLocal() as owned_db:
-                try:
-                    set_rls_current_player(owned_db, player_id)
-                    return await self._send_question_to_player(
-                        owned_db,
-                        player_id,
-                        state,
-                    )
-                finally:
-                    clear_rls_context(owned_db)
+            state = state or manager.get_beat_clock_state_for_player(
+                self.session_code,
+                player_id,
+            )
+            if not state.get("active"):
+                return False
+            ends_at_dt = state.get("ends_at_dt")
+            if ends_at_dt and utc_now() >= ends_at_dt:
+                state["active"] = False
+                state["finished"] = True
+                await self._finish_now(None, acting_player_id=player_id)
+                return False
+
+            result = await asyncio.to_thread(
+                self._build_next_question_payload_in_thread,
+                player_id,
+                state,
+            )
+            payload = result.get("payload")
+            if not payload:
+                return False
+
+            await manager.send_message_to_player(
+                session_code=self.session_code,
+                player_id=player_id,
+                message={"type": "beat_clock_question", "data": payload},
+                critical=True,
+            )
+            updated_player_state = result.get("player_state")
+            if updated_player_state:
+                manager.update_beat_clock_player_state(
+                    self.session_code,
+                    player_id,
+                    updated_player_state,
+                )
+            manager.set_beat_clock_state(self.session_code, result["state"])
+            return True
 
         state = state or manager.get_beat_clock_state_for_player(
             self.session_code,
@@ -584,6 +611,7 @@ class BeatTheClockGameHandler(GameEventHandler):
             session_code=self.session_code,
             player_id=player_id,
             message={"type": "beat_clock_question", "data": payload},
+            critical=True,
         )
         player_state = state.get("players", {}).get(player_id)
         if player_state:
@@ -594,6 +622,32 @@ class BeatTheClockGameHandler(GameEventHandler):
             )
         manager.set_beat_clock_state(self.session_code, state)
         return True
+
+    def _build_next_question_payload_in_thread(
+        self,
+        player_id: str,
+        state: dict,
+    ) -> dict:
+        db = SessionLocal()
+        try:
+            set_rls_current_player(db, player_id)
+            question_id = self._next_question_id(state, player_id)
+            if not question_id:
+                return {"payload": None, "state": state, "player_state": None}
+
+            payload = self._question_payload(db, question_id, player_id, state)
+            if not payload:
+                return {"payload": None, "state": state, "player_state": None}
+
+            player_state = state.get("players", {}).get(player_id)
+            return {
+                "payload": payload,
+                "state": state,
+                "player_state": dict(player_state or {}),
+            }
+        finally:
+            clear_rls_context(db)
+            db.close()
 
     async def handle_fair_play_skip(
         self,
@@ -964,6 +1018,7 @@ class BeatTheClockGameHandler(GameEventHandler):
                     "type": "beat_clock_question",
                     "data": payload,
                 },
+                critical=True,
             )
 
     async def _send_beat_clock_result_and_current_question(
@@ -979,6 +1034,7 @@ class BeatTheClockGameHandler(GameEventHandler):
                 "type": "beat_clock_answer_result",
                 "data": result_payload,
             },
+            critical=True,
         )
         if current_payload:
             await manager.send_message_to_player(
@@ -988,6 +1044,7 @@ class BeatTheClockGameHandler(GameEventHandler):
                     "type": "beat_clock_question",
                     "data": current_payload,
                 },
+                critical=True,
             )
 
     async def _send_beat_clock_rejection(
@@ -1006,6 +1063,7 @@ class BeatTheClockGameHandler(GameEventHandler):
                     "message": message,
                 },
             },
+            critical=True,
         )
 
     def _process_beat_clock_answer_in_thread(
@@ -1232,6 +1290,7 @@ class BeatTheClockGameHandler(GameEventHandler):
                     "type": "beat_clock_answer_result",
                     "data": result["payload"],
                 },
+                critical=True,
             )
             return
 
@@ -1247,6 +1306,7 @@ class BeatTheClockGameHandler(GameEventHandler):
             session_code=self.session_code,
             player_id=player_id,
             message={"type": "beat_clock_answer_result", "data": result["payload"]},
+            critical=True,
         )
 
         if utc_now() >= state.get("ends_at_dt", utc_now()):
@@ -1293,15 +1353,15 @@ class BeatTheClockGameHandler(GameEventHandler):
 
         if finish_claim == BeatClockFinishClaim.ALREADY_ACQUIRED:
             logger.info(
-                "Skipping duplicate Beat the Clock finish for session=%s",
+                "Beat the Clock Redis finish marker already exists for session=%s; "
+                "continuing to DB election for crash recovery",
                 self.session_code,
             )
-            return
 
         if finish_claim == BeatClockFinishClaim.UNAVAILABLE:
             logger.warning(
                 "Beat the Clock finish lock unavailable after retries; "
-                "falling back to idempotent DB finalization for session=%s",
+                "using idempotent DB finalization for session=%s",
                 self.session_code,
             )
 
@@ -1338,12 +1398,13 @@ class BeatTheClockGameHandler(GameEventHandler):
         end_actor_id = getattr(session, "owner_player_id", None) or acting_player_id
         if end_actor_id:
             set_rls_current_player(db, end_actor_id)
-        await self._broadcast_state(db)
-        await handle_game_end(
+        ended = await handle_game_end(
             self.session_code,
             db,
             acting_player_id=end_actor_id,
         )
+        if not ended:
+            return
 
 
 class BuzzerGameHandler(GameEventHandler):

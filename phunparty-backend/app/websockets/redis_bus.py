@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -27,6 +28,15 @@ ALLOWED_EVENT_KINDS = {
 CONTROL_EVENT_KINDS = {
     "disconnect_player",
     "revoke_connection_generation",
+}
+REPLACEABLE_SESSION_MESSAGE_TYPES = {
+    "beat_clock_state",
+    "buzzer_state_update",
+    "game_status_update",
+    "roster_update",
+    "session_stats",
+    "sync_state",
+    "ui_update",
 }
 ALLOWED_WS_MESSAGE_TYPES = {
     "answer_rejected",
@@ -134,9 +144,10 @@ class RedisWebSocketBus:
         self._dispatcher: EventDispatcher | None = None
         self._dispatch_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self._dispatch_tasks: dict[str, asyncio.Task] = {}
-        self.control_queue_maxsize = int(os.getenv("WS_BUS_CONTROL_QUEUE_MAXSIZE", "1000"))
-        self._control_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
-        self._control_tasks: dict[str, asyncio.Task] = {}
+        self.reliable_backlog_maxsize = int(
+            os.getenv("WS_BUS_RELIABLE_BACKLOG_MAXSIZE", "5000")
+        )
+        self._reliable_backlogs: dict[str, deque[dict[str, Any]]] = {}
         self.dropped_event_count = 0
         self.dropped_control_event_count = 0
         self.control_backpressure_count = 0
@@ -296,15 +307,10 @@ class RedisWebSocketBus:
             encoded,
         )
 
-    async def _enqueue_event(self, event: dict[str, Any]) -> None:
-        if not self._dispatcher:
-            return
-
-        session_code = event["session_code"]
-        if self._is_control_event(event):
-            self._enqueue_control_event(session_code, event)
-            return
-
+    def _ensure_dispatch_queue(
+        self,
+        session_code: str,
+    ) -> asyncio.Queue[dict[str, Any]]:
         queue = self._dispatch_queues.get(session_code)
         if queue is None:
             queue = asyncio.Queue(maxsize=self.dispatch_queue_maxsize)
@@ -313,82 +319,179 @@ class RedisWebSocketBus:
                 self._dispatch_session_events(session_code),
                 name=f"ws-redis-dispatch-{session_code}",
             )
+        return queue
 
-        try:
-            queue.put_nowait(event)
-        except asyncio.QueueFull:
-            self.dropped_event_count += 1
-            logger.warning(
-                "Redis WebSocket dispatch queue full; coalescing event for session=%s size=%s",
-                session_code,
-                queue.qsize(),
+    def _event_coalesce_key(self, event: dict[str, Any]) -> tuple[Any, ...]:
+        kind = event.get("kind")
+        message = event.get("message") if isinstance(event.get("message"), dict) else {}
+        message_type = message.get("type")
+
+        if kind == "session_broadcast":
+            return (
+                kind,
+                message_type,
+                tuple(event.get("only_client_types") or []),
+                tuple(event.get("exclude_client_types") or []),
             )
+        if kind == "player_message":
+            return (kind, event.get("player_id"), message_type)
+        if kind == "disconnect_player":
+            return (kind, event.get("player_id"))
+        if kind == "revoke_connection_generation":
+            return (kind, event.get("player_id"), event.get("generation"))
+        return (kind,)
+
+    def _event_is_replaceable(self, event: dict[str, Any]) -> bool:
+        if self._is_control_event(event):
+            return False
+        if event.get("kind") != "session_broadcast":
+            return False
+
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return False
+
+        return message.get("type") in REPLACEABLE_SESSION_MESSAGE_TYPES
+
+    def _replace_queued_event_with_same_key(
+        self,
+        queue: asyncio.Queue[dict[str, Any]],
+        event: dict[str, Any],
+    ) -> bool:
+        key = self._event_coalesce_key(event)
+        drained = []
+        replaced = False
+
+        while True:
             try:
-                dropped_event = queue.get_nowait()
+                queued_event = queue.get_nowait()
                 queue.task_done()
-                logger.debug(
-                    "Dropped older Redis WebSocket event while coalescing: session=%s kind=%s",
-                    session_code,
-                    dropped_event.get("kind"),
-                )
+                drained.append(queued_event)
             except asyncio.QueueEmpty:
-                pass
+                break
 
+        for queued_event in drained:
+            if (
+                not replaced
+                and self._event_is_replaceable(queued_event)
+                and self._event_coalesce_key(queued_event) == key
+            ):
+                replaced = True
+                continue
+            queue.put_nowait(queued_event)
+
+        if replaced:
+            queue.put_nowait(event)
+        return replaced
+
+    def _evict_replaceable_queued_event(
+        self,
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> bool:
+        drained = []
+        evicted = False
+
+        while True:
             try:
-                queue.put_nowait(event)
-            except asyncio.QueueFull:
-                self.dropped_event_count += 1
-                logger.error(
-                    "Dropped Redis WebSocket event because dispatch queue stayed full: session=%s kind=%s",
-                    session_code,
-                    event.get("kind"),
-                )
+                queued_event = queue.get_nowait()
+                queue.task_done()
+                drained.append(queued_event)
+            except asyncio.QueueEmpty:
+                break
 
-    def _enqueue_control_event(
+        for queued_event in drained:
+            if not evicted and self._event_is_replaceable(queued_event):
+                evicted = True
+                continue
+            queue.put_nowait(queued_event)
+
+        return evicted
+
+    def _enqueue_reliable_backlog(
         self,
         session_code: str,
         event: dict[str, Any],
-    ) -> None:
-        queue = self._control_queues.get(session_code)
-        if queue is None:
-            queue = asyncio.Queue(maxsize=self.control_queue_maxsize)
-            self._control_queues[session_code] = queue
-            self._control_tasks[session_code] = asyncio.create_task(
-                self._dispatch_control_events(session_code),
-                name=f"ws-redis-control-dispatch-{session_code}",
+    ) -> bool:
+        backlog = self._reliable_backlogs.setdefault(session_code, deque())
+        if len(backlog) >= self.reliable_backlog_maxsize:
+            if self._is_control_event(event):
+                self.dropped_control_event_count += 1
+            else:
+                self.dropped_event_count += 1
+            logger.error(
+                "Redis WebSocket reliable backlog full; dropped newest event: session=%s kind=%s",
+                session_code,
+                event.get("kind"),
             )
+            return False
+
+        backlog.append(event)
+        if self._is_control_event(event):
+            self.control_backpressure_count += 1
+        return True
+
+    def _drain_reliable_backlog(self, session_code: str) -> None:
+        backlog = self._reliable_backlogs.get(session_code)
+        if not backlog:
+            self._reliable_backlogs.pop(session_code, None)
+            return
+
+        queue = self._ensure_dispatch_queue(session_code)
+        while backlog and not queue.full():
+            queue.put_nowait(backlog.popleft())
+
+        if not backlog:
+            self._reliable_backlogs.pop(session_code, None)
+
+    async def _enqueue_event(self, event: dict[str, Any]) -> None:
+        if not self._dispatcher:
+            return
+
+        session_code = event["session_code"]
+        queue = self._ensure_dispatch_queue(session_code)
+
+        if self._reliable_backlogs.get(session_code):
+            self._drain_reliable_backlog(session_code)
+            if self._reliable_backlogs.get(session_code):
+                if self._event_is_replaceable(event):
+                    self.dropped_event_count += 1
+                    logger.warning(
+                        "Dropped replaceable Redis WebSocket event behind reliable backlog: session=%s kind=%s",
+                        session_code,
+                        event.get("kind"),
+                    )
+                    return
+                self._enqueue_reliable_backlog(session_code, event)
+                return
 
         try:
             queue.put_nowait(event)
         except asyncio.QueueFull:
-            self.control_backpressure_count += 1
-            logger.warning(
-                "Redis WebSocket control queue full; coalescing control event: session=%s kind=%s size=%s",
-                session_code,
-                event.get("kind"),
-                queue.qsize(),
-            )
-            try:
-                dropped_event = queue.get_nowait()
-                queue.task_done()
-                self.dropped_control_event_count += 1
-                logger.warning(
-                    "Dropped older Redis WebSocket control event while coalescing: session=%s kind=%s",
-                    session_code,
-                    dropped_event.get("kind"),
-                )
-            except asyncio.QueueEmpty:
-                pass
+            if self._event_is_replaceable(event):
+                if self._replace_queued_event_with_same_key(queue, event):
+                    self.dropped_event_count += 1
+                    logger.debug(
+                        "Coalesced replaceable Redis WebSocket event: session=%s kind=%s",
+                        session_code,
+                        event.get("kind"),
+                    )
+                    return
 
-            try:
-                queue.put_nowait(event)
-            except asyncio.QueueFull:
-                self.dropped_control_event_count += 1
-                logger.error(
-                    "Dropped Redis WebSocket control event because control queue stayed full: session=%s kind=%s",
+                self.dropped_event_count += 1
+                logger.warning(
+                    "Dropped replaceable Redis WebSocket event because dispatch queue is full: session=%s kind=%s",
                     session_code,
                     event.get("kind"),
                 )
+                return
+
+            evicted_replaceable = self._evict_replaceable_queued_event(queue)
+            if evicted_replaceable:
+                self.dropped_event_count += 1
+                queue.put_nowait(event)
+                return
+
+            self._enqueue_reliable_backlog(session_code, event)
 
     def _is_control_event(self, event: dict[str, Any]) -> bool:
         if event.get("kind") in CONTROL_EVENT_KINDS:
@@ -400,12 +503,14 @@ class RedisWebSocketBus:
 
         while True:
             try:
+                self._drain_reliable_backlog(session_code)
                 event = await asyncio.wait_for(
                     queue.get(),
                     timeout=self.dispatch_queue_idle_seconds,
                 )
             except asyncio.TimeoutError:
-                if queue.empty():
+                self._drain_reliable_backlog(session_code)
+                if queue.empty() and not self._reliable_backlogs.get(session_code):
                     self._dispatch_queues.pop(session_code, None)
                     self._dispatch_tasks.pop(session_code, None)
                     return
@@ -419,36 +524,6 @@ class RedisWebSocketBus:
             except Exception:
                 logger.exception(
                     "Redis WebSocket event dispatch failed session=%s kind=%s",
-                    session_code,
-                    event.get("kind"),
-                )
-            finally:
-                queue.task_done()
-
-    async def _dispatch_control_events(self, session_code: str) -> None:
-        queue = self._control_queues[session_code]
-
-        while True:
-            try:
-                event = await asyncio.wait_for(
-                    queue.get(),
-                    timeout=self.dispatch_queue_idle_seconds,
-                )
-            except asyncio.TimeoutError:
-                if queue.empty():
-                    self._control_queues.pop(session_code, None)
-                    self._control_tasks.pop(session_code, None)
-                    return
-                continue
-
-            try:
-                if self._dispatcher:
-                    await self._dispatcher(event)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception(
-                    "Redis WebSocket control event dispatch failed session=%s kind=%s",
                     session_code,
                     event.get("kind"),
                 )
@@ -504,12 +579,6 @@ class RedisWebSocketBus:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-        for task in list(self._control_tasks.values()):
-            task.cancel()
-        for task in list(self._control_tasks.values()):
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
         if self._pubsub:
             await self._pubsub.unsubscribe(self.channel)
             await self._pubsub.aclose()
@@ -522,8 +591,7 @@ class RedisWebSocketBus:
         self._reader_task = None
         self._dispatch_queues.clear()
         self._dispatch_tasks.clear()
-        self._control_queues.clear()
-        self._control_tasks.clear()
+        self._reliable_backlogs.clear()
         self._pubsub = None
         self._redis = None
         self._sync_redis = None

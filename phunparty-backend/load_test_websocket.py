@@ -151,6 +151,11 @@ async def connect_one(
 
 async def run_connect(args) -> None:
     credentials = load_player_credentials(args.players_file)
+    if args.mobile and not credentials and args.clients > 1:
+        raise ValueError(
+            "mobile connect capacity tests with more than one client require "
+            "--players-file so each socket uses a distinct authenticated player"
+        )
     client_count = (
         min(args.clients, len(credentials)) if credentials else args.clients
     )
@@ -171,13 +176,15 @@ async def run_connect(args) -> None:
                 )
                 token = credential.token if credential else args.token
                 if not token:
-                    return Sample(
-                        ok=False,
-                        latency_ms=0,
-                        status="missing_token",
-                        error="provide --players-file or --token",
+                    return (
+                        None,
+                        Sample(
+                            ok=False,
+                            latency_ms=0,
+                            status="missing_token",
+                            error="provide --players-file or --token",
+                        ),
                     )
-                    return None, sample
                 url = websocket_url(
                     args.ws_url,
                     token,

@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Union
@@ -69,6 +70,15 @@ class BeatClockFinishClaim(str, Enum):
     ACQUIRED = "acquired"
     ALREADY_ACQUIRED = "already_acquired"
     UNAVAILABLE = "unavailable"
+
+
+@dataclass
+class OutboundQueueItem:
+    payload: str
+    sent_future: Optional[asyncio.Future] = None
+    critical: bool = False
+    replaceable: bool = True
+    coalesce_key: Optional[str] = None
 
 
 class ConnectionManager:
@@ -147,6 +157,8 @@ class ConnectionManager:
         self.roster_update_tasks: Dict[str, asyncio.Task] = {}
         self.outbound_queue_maxsize = 100
         self.outbound_queue_put_timeout = 0.05
+        self.outbound_send_timeout = 5.0
+        self.outbound_send_completion_timeout = 5.0
         self.dropped_outbound_message_count = 0
         # Start heartbeat checker and automatic ping broadcaster
         self._heartbeat_task = None
@@ -195,6 +207,9 @@ class ConnectionManager:
             and sender_task is not asyncio.current_task()
         ):
             sender_task.cancel()
+        outbound_queue = (connection_info or {}).get("outbound_queue")
+        if outbound_queue is not None:
+            self._fail_pending_outbound_queue(outbound_queue)
 
         if (
             session_code
@@ -260,6 +275,83 @@ class ConnectionManager:
 
         return message
 
+    def _resolve_outbound_future(self, queued_item: Any, result: bool) -> None:
+        sent_future = None
+        if isinstance(queued_item, OutboundQueueItem):
+            sent_future = queued_item.sent_future
+        elif isinstance(queued_item, tuple) and len(queued_item) >= 2:
+            sent_future = queued_item[1]
+
+        if sent_future and not sent_future.done():
+            sent_future.set_result(result)
+
+    def _outbound_payload(self, queued_item: Any) -> str:
+        if isinstance(queued_item, OutboundQueueItem):
+            return queued_item.payload
+        if isinstance(queued_item, tuple):
+            return queued_item[0]
+        return queued_item
+
+    def _outbound_item_can_be_evicted(self, queued_item: Any) -> bool:
+        if isinstance(queued_item, OutboundQueueItem):
+            return not queued_item.critical and queued_item.replaceable
+        return True
+
+    def _drop_oldest_replaceable_outbound_item(
+        self, queue: asyncio.Queue[Any]
+    ) -> bool:
+        drained_items = []
+        dropped = False
+
+        while True:
+            try:
+                queued_item = queue.get_nowait()
+                queue.task_done()
+                drained_items.append(queued_item)
+            except asyncio.QueueEmpty:
+                break
+
+        for queued_item in drained_items:
+            if not dropped and self._outbound_item_can_be_evicted(queued_item):
+                self._resolve_outbound_future(queued_item, False)
+                dropped = True
+                continue
+            queue.put_nowait(queued_item)
+
+        return dropped
+
+    def _fail_pending_outbound_queue(self, queue: asyncio.Queue[Any]) -> None:
+        while True:
+            try:
+                queued_item = queue.get_nowait()
+                queue.task_done()
+                self._resolve_outbound_future(queued_item, False)
+            except asyncio.QueueEmpty:
+                return
+
+    async def _await_outbound_send_completion(
+        self,
+        sent_future: asyncio.Future,
+        session_code: str,
+        ws_id: str,
+    ) -> bool:
+        try:
+            return bool(
+                await asyncio.wait_for(
+                    sent_future,
+                    timeout=self.outbound_send_completion_timeout,
+                )
+            )
+        except asyncio.TimeoutError:
+            if not sent_future.done():
+                sent_future.set_result(False)
+            logger.warning(
+                "Timed out waiting for queued websocket send completion: session=%s ws_id=%s",
+                session_code,
+                ws_id,
+            )
+            return False
+
     async def _connection_sender_loop(
         self,
         session_code: str,
@@ -269,38 +361,48 @@ class ConnectionManager:
         websocket = connection_info["websocket"]
         queue = connection_info["outbound_queue"]
 
-        while True:
-            queued_item = await queue.get()
-            if isinstance(queued_item, tuple):
-                payload, sent_future = queued_item
-            else:
-                payload = queued_item
-                sent_future = None
-            try:
-                await websocket.send_text(payload)
-                if sent_future and not sent_future.done():
-                    sent_future.set_result(True)
-            except WebSocketDisconnect:
-                if sent_future and not sent_future.done():
-                    sent_future.set_result(False)
-                logger.warning(
-                    "WebSocket %s disconnected while draining outbound queue",
-                    ws_id,
-                )
-                self.disconnect(websocket)
-                return
-            except Exception:
-                if sent_future and not sent_future.done():
-                    sent_future.set_result(False)
-                logger.exception(
-                    "Failed to send queued websocket message: session=%s ws_id=%s",
-                    session_code,
-                    ws_id,
-                )
-                self.disconnect(websocket)
-                return
-            finally:
-                queue.task_done()
+        try:
+            while True:
+                queued_item = await queue.get()
+                try:
+                    await asyncio.wait_for(
+                        websocket.send_text(self._outbound_payload(queued_item)),
+                        timeout=self.outbound_send_timeout,
+                    )
+                    self._resolve_outbound_future(queued_item, True)
+                except WebSocketDisconnect:
+                    self._resolve_outbound_future(queued_item, False)
+                    logger.warning(
+                        "WebSocket %s disconnected while draining outbound queue",
+                        ws_id,
+                    )
+                    self.disconnect(websocket)
+                    return
+                except asyncio.TimeoutError:
+                    self._resolve_outbound_future(queued_item, False)
+                    logger.warning(
+                        "Timed out sending queued websocket message: session=%s ws_id=%s",
+                        session_code,
+                        ws_id,
+                    )
+                    self.disconnect(websocket)
+                    return
+                except asyncio.CancelledError:
+                    self._resolve_outbound_future(queued_item, False)
+                    raise
+                except Exception:
+                    self._resolve_outbound_future(queued_item, False)
+                    logger.exception(
+                        "Failed to send queued websocket message: session=%s ws_id=%s",
+                        session_code,
+                        ws_id,
+                    )
+                    self.disconnect(websocket)
+                    return
+                finally:
+                    queue.task_done()
+        finally:
+            self._fail_pending_outbound_queue(queue)
 
     def _ensure_outbound_queue(
         self,
@@ -332,35 +434,55 @@ class ConnectionManager:
         *,
         critical: bool = False,
         wait_for_send: bool = False,
+        replaceable: bool = True,
+        coalesce_key: Optional[str] = None,
     ) -> bool:
         queue = self._ensure_outbound_queue(session_code, ws_id, connection_info)
         sent_future = None
         if wait_for_send:
             sent_future = asyncio.get_running_loop().create_future()
-        queued_item = (payload, sent_future)
+        queued_item = OutboundQueueItem(
+            payload=payload,
+            sent_future=sent_future,
+            critical=critical,
+            replaceable=replaceable and not critical,
+            coalesce_key=coalesce_key,
+        )
 
         try:
             queue.put_nowait(queued_item)
             if sent_future:
-                return bool(await sent_future)
+                return await self._await_outbound_send_completion(
+                    sent_future,
+                    session_code,
+                    ws_id,
+                )
             return True
         except asyncio.QueueFull:
             if not critical:
-                try:
-                    dropped_item = queue.get_nowait()
-                    queue.task_done()
-                    if isinstance(dropped_item, tuple):
-                        _payload, dropped_future = dropped_item
-                        if dropped_future and not dropped_future.done():
-                            dropped_future.set_result(False)
-                except asyncio.QueueEmpty:
-                    pass
+                dropped_replaceable = self._drop_oldest_replaceable_outbound_item(
+                    queue
+                )
+                if not dropped_replaceable:
+                    self.dropped_outbound_message_count += 1
+                    logger.warning(
+                        "Dropped noncritical websocket message because outbound queue only contains protected items: session=%s ws_id=%s",
+                        session_code,
+                        ws_id,
+                    )
+                    if sent_future and not sent_future.done():
+                        sent_future.set_result(False)
+                    return False
 
                 try:
                     queue.put_nowait(queued_item)
                     self.dropped_outbound_message_count += 1
                     if sent_future:
-                        return bool(await sent_future)
+                        return await self._await_outbound_send_completion(
+                            sent_future,
+                            session_code,
+                            ws_id,
+                        )
                     return True
                 except asyncio.QueueFull:
                     self.dropped_outbound_message_count += 1
@@ -377,7 +499,11 @@ class ConnectionManager:
                     timeout=self.outbound_queue_put_timeout,
                 )
                 if sent_future:
-                    return bool(await sent_future)
+                    return await self._await_outbound_send_completion(
+                        sent_future,
+                        session_code,
+                        ws_id,
+                    )
                 return True
             except asyncio.TimeoutError:
                 if sent_future and not sent_future.done():
@@ -3653,6 +3779,8 @@ return 0
                                             conn_info,
                                         )
                                     ),
+                                    replaceable=True,
+                                    coalesce_key="ping",
                                 )
                                 if queued:
                                     total_sent += 1

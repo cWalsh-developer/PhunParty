@@ -119,10 +119,9 @@ def create_game_session_route(
     except ValueError as e:
         # Handle specific validation errors (like invalid difficulty or not enough questions)
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to create game session: {str(e)}"
-        )
+    except Exception:
+        logger.exception("Failed to create game session")
+        raise HTTPException(status_code=500, detail="Failed to create game session")
 
 
 @router.get(
@@ -143,13 +142,9 @@ def get_player_game_history(
         return history
     except HTTPException:
         raise
-    except Exception as e:
-        import traceback
-
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500, detail=f"Unable to retrieve game history: {str(e)}"
-        )
+    except Exception:
+        logger.exception("Unable to retrieve game history for player=%s", player_id)
+        raise HTTPException(status_code=500, detail="Unable to retrieve game history")
 
 
 @router.get("/{game_code}", tags=["Game"])
