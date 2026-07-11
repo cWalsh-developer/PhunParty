@@ -4387,6 +4387,7 @@ def test_beat_clock_answer_updates_redis_projection_after_db_commit():
         events.append("redis_update")
         assert player_state["answered_count"] == 1
         assert player_state["correct_count"] == 1
+        return True
 
     def process_answer(player_id, answer, question_id, player_state, state_context):
         events.extend(["response", "score", "commit"])
@@ -4539,6 +4540,10 @@ def test_async_beat_clock_read_does_not_fallback_to_sync_redis():
                 redis_bus.websocket_bus,
                 "_sync_redis",
                 ExplodingSyncRedis(),
+            ), patch.object(
+                redis_bus.websocket_bus,
+                "redis_url",
+                None,
             ):
                 state = await manager.get_beat_clock_state_for_player_async(
                     session_code,
@@ -4549,6 +4554,159 @@ def test_async_beat_clock_read_does_not_fallback_to_sync_redis():
             manager._async_redis_fallback_warnings.discard("beat_clock_player_read")
 
         assert state["players"]["P1"]["current_question_id"] == "Q1"
+
+    asyncio.run(run_test())
+
+
+def test_buzzer_claim_fails_closed_when_async_redis_missing_but_configured():
+    async def run_test():
+        session_code = "ASYNCBUZZ"
+        manager.buzzer_states[session_code] = {
+            "current_buzzer_winner": None,
+            "frozen_players": set(),
+            "question_active": True,
+            "transitioning": False,
+            "accepting_buzzes": True,
+            "current_question_id": "Q1",
+            "attempts": [],
+        }
+
+        try:
+            with patch.object(redis_bus.websocket_bus, "_redis", None), patch.object(
+                redis_bus.websocket_bus,
+                "redis_url",
+                "redis://configured",
+            ):
+                claimed = await manager.claim_buzzer_winner_async(
+                    session_code,
+                    "P1",
+                    "Q1",
+                )
+        finally:
+            state = manager.buzzer_states.pop(session_code, {})
+            manager._async_redis_fallback_warnings.discard("buzzer_winner_claim")
+
+        assert claimed is False
+        assert state.get("current_buzzer_winner") is None
+
+    asyncio.run(run_test())
+
+
+def test_buzzer_save_fails_closed_when_async_redis_missing_but_configured():
+    async def run_test():
+        session_code = "ASYNCBUZZSAVE"
+
+        try:
+            with patch.object(redis_bus.websocket_bus, "_redis", None), patch.object(
+                redis_bus.websocket_bus,
+                "redis_url",
+                "redis://configured",
+            ):
+                saved = await manager.save_buzzer_state_async(
+                    session_code,
+                    {
+                        "current_buzzer_winner": "P1",
+                        "frozen_players": set(),
+                        "question_active": True,
+                        "transitioning": False,
+                        "accepting_buzzes": False,
+                        "current_question_id": "Q1",
+                        "attempts": [],
+                    },
+                )
+        finally:
+            state = manager.buzzer_states.pop(session_code, None)
+            manager._async_redis_fallback_warnings.discard("buzzer_state_write")
+
+        assert saved is False
+        assert state is None
+
+    asyncio.run(run_test())
+
+
+def test_buzzer_read_fails_closed_when_async_redis_missing_but_configured():
+    async def run_test():
+        session_code = "ASYNCBUZZREAD"
+        manager.buzzer_states[session_code] = {
+            "current_buzzer_winner": "P1",
+            "frozen_players": set(),
+            "question_active": True,
+            "transitioning": False,
+            "accepting_buzzes": False,
+            "current_question_id": "Q1",
+            "attempts": [],
+        }
+
+        try:
+            with patch.object(redis_bus.websocket_bus, "_redis", None), patch.object(
+                redis_bus.websocket_bus,
+                "redis_url",
+                "redis://configured",
+            ):
+                state = await manager.get_buzzer_state_async(session_code)
+        finally:
+            manager.buzzer_states.pop(session_code, None)
+            manager._async_redis_fallback_warnings.discard("buzzer_state_read")
+
+        assert state["question_active"] is False
+        assert state["current_buzzer_winner"] is None
+        assert state["unavailable"] is True
+
+    asyncio.run(run_test())
+
+
+def test_beat_clock_player_state_fails_closed_when_async_redis_missing_but_configured():
+    async def run_test():
+        session_code = "ASYNCBCWRITE"
+
+        try:
+            with patch.object(redis_bus.websocket_bus, "_redis", None), patch.object(
+                redis_bus.websocket_bus,
+                "redis_url",
+                "redis://configured",
+            ):
+                saved = await manager.update_beat_clock_player_state_async(
+                    session_code,
+                    "P1",
+                    {"current_question_id": "Q1"},
+                )
+        finally:
+            state = manager.beat_clock_states.pop(session_code, None)
+            manager._async_redis_fallback_warnings.discard("beat_clock_player_write")
+
+        assert saved is False
+        assert state is None
+
+    asyncio.run(run_test())
+
+
+def test_beat_clock_read_fails_closed_when_async_redis_missing_but_configured():
+    async def run_test():
+        session_code = "ASYNCBCREAD"
+        manager.beat_clock_states[session_code] = {
+            "active": True,
+            "players": {"P1": {"current_question_id": "Q1"}},
+            "questions": ["Q1"],
+            "leaderboard": [],
+        }
+
+        try:
+            with patch.object(redis_bus.websocket_bus, "_redis", None), patch.object(
+                redis_bus.websocket_bus,
+                "redis_url",
+                "redis://configured",
+            ):
+                state = await manager.get_beat_clock_state_for_player_async(
+                    session_code,
+                    "P1",
+                )
+        finally:
+            manager.beat_clock_states.pop(session_code, None)
+            manager._async_redis_fallback_warnings.discard("beat_clock_player_read")
+
+        assert state["active"] is False
+        assert state["players"] == {}
+        assert state["unavailable"] is True
 
     asyncio.run(run_test())
 
@@ -5146,3 +5304,36 @@ def test_buzzer_ui_update_sends_answer_data_only_to_winner():
     assert winner_message["display_options"] == ["A", "B", "C", "D"]
     assert waiting_message["is_current_player"] is False
     assert waiting_message["current_buzzer_winner"] == "P1"
+
+
+def test_buzzer_ui_update_does_not_send_when_state_unavailable():
+    handler = game_handlers.BuzzerGameHandler("SESSION123")
+
+    with patch.object(game_handlers, "manager") as mock_manager:
+        mock_manager.get_buzzer_state_async = AsyncMock(
+            return_value={
+                "current_buzzer_winner": None,
+                "frozen_players": set(),
+                "question_active": False,
+                "transitioning": False,
+                "accepting_buzzes": False,
+                "current_question_id": None,
+                "attempts": [],
+                "unavailable": True,
+            }
+        )
+        mock_manager.get_session_connections.return_value = {
+            "ws1": {
+                "client_type": "mobile",
+                "player_id": "P1",
+                "websocket": MagicMock(),
+            },
+        }
+        mock_manager.send_personal_message = AsyncMock()
+        mock_manager.get_session_phase_state.side_effect = AssertionError(
+            "unavailable buzzer state must not drive UI"
+        )
+
+        asyncio.run(handler.update_mobile_buzzer_ui(MagicMock()))
+
+    mock_manager.send_personal_message.assert_not_awaited()

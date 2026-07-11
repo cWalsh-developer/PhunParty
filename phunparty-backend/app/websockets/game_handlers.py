@@ -570,19 +570,20 @@ class BeatTheClockGameHandler(GameEventHandler):
             if not payload:
                 return False
 
+            updated_player_state = result.get("player_state")
+            if updated_player_state:
+                if not await manager.update_beat_clock_player_state_async(
+                    self.session_code,
+                    player_id,
+                    updated_player_state,
+                ):
+                    return False
             await manager.send_message_to_player(
                 session_code=self.session_code,
                 player_id=player_id,
                 message={"type": "beat_clock_question", "data": payload},
                 critical=True,
             )
-            updated_player_state = result.get("player_state")
-            if updated_player_state:
-                await manager.update_beat_clock_player_state_async(
-                    self.session_code,
-                    player_id,
-                    updated_player_state,
-                )
             manager.update_beat_clock_local_state(self.session_code, result["state"])
             return True
 
@@ -607,19 +608,20 @@ class BeatTheClockGameHandler(GameEventHandler):
         if not payload:
             return False
 
+        player_state = state.get("players", {}).get(player_id)
+        if player_state:
+            if not await manager.update_beat_clock_player_state_async(
+                self.session_code,
+                player_id,
+                player_state,
+            ):
+                return False
         await manager.send_message_to_player(
             session_code=self.session_code,
             player_id=player_id,
             message={"type": "beat_clock_question", "data": payload},
             critical=True,
         )
-        player_state = state.get("players", {}).get(player_id)
-        if player_state:
-            await manager.update_beat_clock_player_state_async(
-                self.session_code,
-                player_id,
-                player_state,
-            )
         manager.update_beat_clock_local_state(self.session_code, state)
         return True
 
@@ -1295,12 +1297,18 @@ class BeatTheClockGameHandler(GameEventHandler):
             return
 
         updated_player_state = result["updated_player_state"]
-        state.setdefault("players", {})[player_id] = updated_player_state
-        await manager.update_beat_clock_player_state_async(
+        if not await manager.update_beat_clock_player_state_async(
             self.session_code,
             player_id,
             updated_player_state,
-        )
+        ):
+            await self._send_beat_clock_rejection(
+                player_id,
+                "state_unavailable",
+                "Game state is temporarily unavailable. Please try again.",
+            )
+            return
+        state.setdefault("players", {})[player_id] = updated_player_state
 
         await manager.send_message_to_player(
             session_code=self.session_code,
@@ -1450,7 +1458,8 @@ class BuzzerGameHandler(GameEventHandler):
             state["question_active"] = True
             state["transitioning"] = False
             state["accepting_buzzes"] = True
-        await manager.save_buzzer_state_async(self.session_code, state)
+        if not await manager.save_buzzer_state_async(self.session_code, state):
+            return True
 
         logger.info(
             "Rejected Fair Play locked buzzer press: session=%s player=%s question=%s",
@@ -1553,7 +1562,8 @@ class BuzzerGameHandler(GameEventHandler):
 
         if answer_payload_cache.get("question_id") != current_question_id:
             answer_payload_cache.clear()
-        await manager.save_buzzer_state_async(self.session_code, state)
+        if not await manager.save_buzzer_state_async(self.session_code, state):
+            return
 
         logger.warning(
             "BUZZER WINNER LOCKED session=%s player=%s question=%s accepting_buzzes=%s",
@@ -1760,7 +1770,8 @@ class BuzzerGameHandler(GameEventHandler):
                 "timestamp": datetime.now().isoformat(),
             }
         )
-        await manager.save_buzzer_state_async(self.session_code, state)
+        if not await manager.save_buzzer_state_async(self.session_code, state):
+            return
 
         await manager.broadcast_to_session(
             self.session_code,
@@ -1867,7 +1878,8 @@ class BuzzerGameHandler(GameEventHandler):
         state["question_active"] = True
         state["transitioning"] = False
         state["accepting_buzzes"] = True
-        await manager.save_buzzer_state_async(self.session_code, state)
+        if not await manager.save_buzzer_state_async(self.session_code, state):
+            return
 
         logger.warning(
             "BUZZER REOPENED AFTER WRONG ANSWER session=%s question=%s frozen_count=%s active_players=%s",
@@ -1897,6 +1909,8 @@ class BuzzerGameHandler(GameEventHandler):
         """Update mobile UI based on the authoritative buzzer state."""
         mobile_connections = manager.get_session_connections(self.session_code)
         state = await manager.get_buzzer_state_async(self.session_code)
+        if state.get("unavailable"):
+            return
         phase_state = manager.get_session_phase_state(self.session_code)
 
         expected_question_id = state.get("current_question_id") or phase_state.get(

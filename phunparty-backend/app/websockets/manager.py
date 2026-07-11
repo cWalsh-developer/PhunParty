@@ -1381,6 +1381,14 @@ return 0
                 operation,
             )
 
+    def _async_redis_required_unavailable(self, operation: str) -> bool:
+        if websocket_bus.async_client:
+            return False
+        if not websocket_bus.redis_url:
+            return False
+        self._warn_missing_async_redis(operation)
+        return True
+
     def _redis_hash_get(self, key: str, field: str) -> Optional[str]:
         client = websocket_bus.sync_client
         if not client:
@@ -1461,12 +1469,15 @@ return 0
 
     async def save_buzzer_state_async(
         self, session_code: str, state: Dict[str, Any]
-    ) -> None:
+    ) -> bool:
+        if self._async_redis_required_unavailable("buzzer_state_write"):
+            return False
         self.buzzer_states[session_code] = state
         await self._redis_json_set_async(
             self._shared_state_key(session_code, "buzzer"),
             self._serialize_buzzer_state(state),
         )
+        return True
 
     def claim_buzzer_winner(
         self,
@@ -1525,6 +1536,9 @@ return 0
         player_id: str,
         question_id: str,
     ) -> bool:
+        if self._async_redis_required_unavailable("buzzer_winner_claim"):
+            return False
+
         client = websocket_bus.async_client
         state = await self.get_buzzer_state_async(session_code)
 
@@ -1541,8 +1555,7 @@ return 0
             state["question_active"] = True
             state["transitioning"] = False
             state["accepting_buzzes"] = False
-            await self.save_buzzer_state_async(session_code, state)
-            return True
+            return await self.save_buzzer_state_async(session_code, state)
 
         try:
             won = await client.eval(
@@ -4306,6 +4319,18 @@ return 0
 
     async def get_buzzer_state_async(self, session_code: str) -> Dict[str, Any]:
         """Return shared buzzer state without sync Redis work in async handlers."""
+        if self._async_redis_required_unavailable("buzzer_state_read"):
+            return {
+                "current_buzzer_winner": None,
+                "frozen_players": set(),
+                "question_active": False,
+                "transitioning": False,
+                "accepting_buzzes": False,
+                "current_question_id": None,
+                "attempts": [],
+                "unavailable": True,
+            }
+
         shared_state = await self._redis_json_get_async(
             self._shared_state_key(session_code, "buzzer")
         )
@@ -4679,6 +4704,16 @@ return 0
         self, session_code: str, player_id: str
     ) -> Dict[str, Any]:
         """Async Beat the Clock meta/player read for WebSocket hot paths."""
+        unavailable_state = {
+            "active": False,
+            "players": {},
+            "questions": [],
+            "leaderboard": [],
+            "unavailable": True,
+        }
+        if self._async_redis_required_unavailable("beat_clock_player_read"):
+            return unavailable_state
+
         if not websocket_bus.async_client:
             self._warn_missing_async_redis("beat_clock_player_read")
             state = self.beat_clock_states.setdefault(
@@ -4797,7 +4832,9 @@ return 0
 
     async def update_beat_clock_player_state_async(
         self, session_code: str, player_id: str, player_state: Dict[str, Any]
-    ) -> None:
+    ) -> bool:
+        if self._async_redis_required_unavailable("beat_clock_player_write"):
+            return False
         state = self.beat_clock_states.setdefault(session_code, {})
         state.setdefault("players", {})[player_id] = player_state
         _meta_key, players_key = self._beat_clock_keys(session_code)
@@ -4806,6 +4843,7 @@ return 0
             player_id,
             self._json_safe_state(player_state),
         )
+        return True
 
     def claim_beat_clock_finish(
         self, session_code: str, ttl_seconds: int = 900
