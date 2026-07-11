@@ -927,6 +927,40 @@ def test_join_game_rejects_inactive_sessions_before_membership_changes():
     mock_db.commit.assert_not_called()
 
 
+def test_end_game_score_finalizer_does_not_reinsert_session_assignments():
+    state_query = MagicMock()
+    state_query.filter.return_value = state_query
+    state_query.update.return_value = 1
+    state_query.first.return_value = SimpleNamespace(ended_at=datetime(2026, 7, 11))
+
+    assignment_query = MagicMock()
+    assignment_query.filter.return_value = assignment_query
+    assignment_query.distinct.return_value = assignment_query
+    assignment_query.all.return_value = [("P1",), ("P2",)]
+
+    mock_db = MagicMock()
+    mock_db.query.side_effect = [state_query, state_query, assignment_query]
+
+    with patch.object(dbCRUD, "create_score") as create_score:
+        with patch.object(dbCRUD, "calculate_game_results"):
+            result = dbCRUD.update_game_session_ended(mock_db, "SESSION123")
+
+    assert result is True
+    create_score.assert_any_call(
+        mock_db,
+        "SESSION123",
+        "P1",
+        ensure_assignment=False,
+    )
+    create_score.assert_any_call(
+        mock_db,
+        "SESSION123",
+        "P2",
+        ensure_assignment=False,
+    )
+    mock_db.commit.assert_called_once()
+
+
 def test_assign_player_to_session_does_not_rewrite_active_session_start():
     mock_db = MagicMock()
     original_start = datetime(2026, 6, 1, 12, 0, 0)
@@ -1532,9 +1566,22 @@ def test_game_lifecycle_repairs_incomplete_end_state_before_broadcast():
         isstarted=True,
         is_waiting_for_players=True,
     )
+    update_values = {}
+
+    def repair_update(values, synchronize_session=False):
+        update_values.update(values)
+        game_state.ended_at = values[game_lifecycle.GameSessionState.ended_at]
+        game_state.is_active = values[game_lifecycle.GameSessionState.is_active]
+        game_state.isstarted = values[game_lifecycle.GameSessionState.isstarted]
+        game_state.is_waiting_for_players = values[
+            game_lifecycle.GameSessionState.is_waiting_for_players
+        ]
+        return 1
+
     query_result = MagicMock()
     query_result.filter.return_value = query_result
     query_result.first.return_value = game_state
+    query_result.update.side_effect = repair_update
     query_result.all.return_value = []
     mock_db = MagicMock()
     mock_db.query.return_value = query_result
@@ -1558,7 +1605,9 @@ def test_game_lifecycle_repairs_incomplete_end_state_before_broadcast():
     assert game_state.is_active is False
     assert game_state.isstarted is False
     assert game_state.is_waiting_for_players is False
+    assert update_values
     mock_db.commit.assert_called_once()
+    mock_db.expire_all.assert_called_once()
     mock_manager.broadcast_to_session.assert_awaited_once()
 
 

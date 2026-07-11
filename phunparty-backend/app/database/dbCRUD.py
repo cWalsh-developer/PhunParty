@@ -1209,9 +1209,16 @@ def update_scores(db: Session, session_code: str, player_id: str) -> Scores:
     return existing_score
 
 
-def create_score(db: Session, session_code: str, player_id: str) -> Scores:
+def create_score(
+    db: Session,
+    session_code: str,
+    player_id: str,
+    *,
+    ensure_assignment: bool = True,
+) -> Scores:
     """Create a new score entry for a player in a game session."""
-    ensure_session_assignment(db, session_code, player_id)
+    if ensure_assignment:
+        ensure_session_assignment(db, session_code, player_id)
 
     player = get_player_by_ID(db, player_id)
     player_display_name = (
@@ -2070,7 +2077,12 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
             .all()
         )
         for (assigned_player_id,) in assigned_player_ids:
-            create_score(db, session_code, assigned_player_id)
+            create_score(
+                db,
+                session_code,
+                assigned_player_id,
+                ensure_assignment=False,
+            )
 
         try:
             calculate_game_results(db, session_code)

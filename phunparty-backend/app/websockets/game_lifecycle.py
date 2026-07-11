@@ -73,16 +73,45 @@ async def handle_game_end(
                     "Repairing incomplete ended state for session %s after end claim returned false",
                     session_code,
                 )
-                game_state.ended_at = datetime.now()
-                game_state.is_active = False
-                game_state.isstarted = False
-                game_state.is_waiting_for_players = False
+                repaired_ended_at = datetime.now()
                 try:
+                    repaired_rows = (
+                        db.query(GameSessionState)
+                        .filter(GameSessionState.session_code == session_code)
+                        .update(
+                            {
+                                GameSessionState.ended_at: repaired_ended_at,
+                                GameSessionState.is_active: False,
+                                GameSessionState.isstarted: False,
+                                GameSessionState.is_waiting_for_players: False,
+                            },
+                            synchronize_session=False,
+                        )
+                    )
+                    if repaired_rows == 0:
+                        logger.error(
+                            "Failed to repair incomplete ended state for session %s; no rows matched",
+                            session_code,
+                        )
+                        db.rollback()
+                        return False
                     db.commit()
                 except Exception:
                     db.rollback()
                     logger.exception(
                         "Failed to repair incomplete ended state for session %s",
+                        session_code,
+                    )
+                    return False
+                db.expire_all()
+                game_state = (
+                    db.query(GameSessionState)
+                    .filter(GameSessionState.session_code == session_code)
+                    .first()
+                )
+                if not game_state:
+                    logger.error(
+                        "Failed to reload repaired ended state for session %s",
                         session_code,
                     )
                     return False
