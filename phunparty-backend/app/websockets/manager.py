@@ -1682,6 +1682,37 @@ return 0
             "server_time_ms": now_ms,
         }
 
+    async def get_session_phase_state_async(self, session_code: str) -> Dict[str, Any]:
+        """Return the phase snapshot without sync Redis work in async handlers."""
+        if self._async_redis_required_unavailable("session_phase_read"):
+            return {
+                "session_code": session_code,
+                "phase": "unavailable",
+                "server_time_ms": self._utc_now_ms(),
+                "unavailable": True,
+            }
+
+        shared_state = await self._redis_json_get_async(
+            self._shared_state_key(session_code, "phase")
+        )
+        if shared_state:
+            self.session_phase_state[session_code] = shared_state
+            return {**shared_state, "server_time_ms": self._utc_now_ms()}
+
+        state = self.session_phase_state.get(session_code)
+        if state:
+            return {**state, "server_time_ms": self._utc_now_ms()}
+
+        now_iso = self._utc_now_iso()
+        now_ms = self._utc_now_ms()
+        return {
+            "session_code": session_code,
+            "phase": SessionPhase.LOBBY.value,
+            "phase_started_at": now_iso,
+            "phase_started_at_ms": now_ms,
+            "server_time_ms": now_ms,
+        }
+
     def get_session_sync_state(self, session_code: str) -> Dict[str, Any]:
         """Build a reconnect-safe snapshot from server-owned WebSocket state."""
         phase_state = self.get_session_phase_state(session_code)
@@ -4285,6 +4316,34 @@ return 0
         )
         return latest_question[1]["question_data"]
 
+    async def get_current_question_async(
+        self, session_code: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the queued question without sync Redis work in async handlers."""
+        if self._async_redis_required_unavailable("current_question_read"):
+            return None
+
+        shared_question = await self._redis_json_get_async(
+            self._shared_state_key(session_code, "current-question")
+        )
+        if shared_question and shared_question.get("question_data"):
+            return shared_question["question_data"]
+
+        if session_code not in self.question_queue:
+            return None
+
+        questions = self.question_queue[session_code]
+        if not questions:
+            return None
+
+        latest_question = max(questions.items(), key=lambda x: x[1]["queued_at"])
+        logger.info(
+            "Retrieving queued question %s for session %s",
+            latest_question[0],
+            session_code,
+        )
+        return latest_question[1]["question_data"]
+
     def clear_question_queue(self, session_code: str) -> None:
         """Clear all queued questions for a session (e.g., when game ends)"""
         if session_code in self.question_queue:
@@ -4403,6 +4462,11 @@ return 0
 
     def format_buzzer_state_update(self, session_code: str) -> Dict[str, Any]:
         state = self.get_buzzer_state(session_code)
+        return self._format_buzzer_state_update_from_state(session_code, state)
+
+    def _format_buzzer_state_update_from_state(
+        self, session_code: str, state: Dict[str, Any]
+    ) -> Dict[str, Any]:
         current_winner = state.get("current_buzzer_winner")
         frozen_players = list(state.get("frozen_players", set()))
         return {
@@ -4432,12 +4496,24 @@ return 0
             "server_time_ms": self._utc_now_ms(),
         }
 
+    async def format_buzzer_state_update_async(
+        self, session_code: str
+    ) -> Optional[Dict[str, Any]]:
+        state = await self.get_buzzer_state_async(session_code)
+        if state.get("unavailable"):
+            return None
+        return self._format_buzzer_state_update_from_state(session_code, state)
+
     async def broadcast_buzzer_state_update(self, session_code: str) -> None:
+        payload = await self.format_buzzer_state_update_async(session_code)
+        if payload is None:
+            return
+
         await self.broadcast_to_session(
             session_code,
             {
                 "type": "buzzer_state_update",
-                "data": self.format_buzzer_state_update(session_code),
+                "data": payload,
             },
             only_client_types=["mobile"],
             critical=True,
@@ -4456,6 +4532,21 @@ return 0
     def get_session_game_type(self, session_code: str) -> Optional[str]:
         """Return the resolved game type for a session if known."""
         shared_game_type = self._redis_json_get(
+            self._shared_state_key(session_code, "game-type")
+        )
+        if shared_game_type and shared_game_type.get("game_type"):
+            game_type = str(shared_game_type["game_type"])
+            self.session_game_types[session_code] = game_type
+            return game_type
+
+        return self.session_game_types.get(session_code)
+
+    async def get_session_game_type_async(self, session_code: str) -> Optional[str]:
+        """Return the resolved game type without sync Redis work in async handlers."""
+        if self._async_redis_required_unavailable("session_game_type_read"):
+            return None
+
+        shared_game_type = await self._redis_json_get_async(
             self._shared_state_key(session_code, "game-type")
         )
         if shared_game_type and shared_game_type.get("game_type"):

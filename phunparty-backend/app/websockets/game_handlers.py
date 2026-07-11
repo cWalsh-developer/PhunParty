@@ -786,7 +786,9 @@ class BeatTheClockGameHandler(GameEventHandler):
             if session and session.owner_player_id:
                 set_rls_current_player(db, session.owner_player_id)
 
-            phase_state = manager.get_session_phase_state(self.session_code)
+            phase_state = await manager.get_session_phase_state_async(
+                self.session_code
+            )
             if phase_state.get("phase") == SessionPhase.ENDED.value:
                 logger.info(
                     "Ignoring Beat the Clock start for ended session %s",
@@ -1425,6 +1427,33 @@ class BuzzerGameHandler(GameEventHandler):
     def buzzer_state(self) -> Dict[str, Any]:
         return manager.get_buzzer_state(self.session_code)
 
+    async def _send_state_unavailable_notice(
+        self,
+        player_id: Optional[str] = None,
+        reason: str = "state_unavailable",
+    ) -> None:
+        message = {
+            "type": "error",
+            "data": {
+                "reason": reason,
+                "message": "Game state is temporarily unavailable. Please retry shortly.",
+            },
+        }
+        if player_id:
+            await manager.send_message_to_player(
+                session_code=self.session_code,
+                player_id=player_id,
+                message=message,
+                critical=True,
+            )
+            return
+
+        await manager.broadcast_to_session(
+            self.session_code,
+            message,
+            critical=True,
+        )
+
     async def reject_fair_play_locked_buzzer(
         self,
         player_id: str,
@@ -1448,6 +1477,9 @@ class BuzzerGameHandler(GameEventHandler):
         if not is_locked_by_fair_play:
             return False
         state = await manager.get_buzzer_state_async(self.session_code)
+        if state.get("unavailable"):
+            await self._send_state_unavailable_notice(player_id)
+            return True
         frozen_players = state.setdefault("frozen_players", set())
         frozen_players.add(player_id)
 
@@ -1459,6 +1491,7 @@ class BuzzerGameHandler(GameEventHandler):
             state["transitioning"] = False
             state["accepting_buzzes"] = True
         if not await manager.save_buzzer_state_async(self.session_code, state):
+            await self._send_state_unavailable_notice(player_id)
             return True
 
         logger.info(
@@ -1492,7 +1525,14 @@ class BuzzerGameHandler(GameEventHandler):
     ):
         """Handle player pressing buzzer"""
         state = await manager.get_buzzer_state_async(self.session_code)
-        phase_state = manager.get_session_phase_state(self.session_code)
+        if state.get("unavailable"):
+            await self._send_state_unavailable_notice(player_id)
+            return
+
+        phase_state = await manager.get_session_phase_state_async(self.session_code)
+        if phase_state.get("unavailable"):
+            await self._send_state_unavailable_notice(player_id)
+            return
         current_question_id = phase_state.get("current_question_id")
 
         if phase_state.get("phase") != SessionPhase.QUESTION.value:
@@ -1552,17 +1592,20 @@ class BuzzerGameHandler(GameEventHandler):
             player_id,
             current_question_id,
         ):
-            await manager.broadcast_buzzer_state_update(self.session_code)
-            await self.update_mobile_buzzer_ui(db)
+            await self._send_state_unavailable_notice(player_id)
             return
 
         state = await manager.get_buzzer_state_async(self.session_code)
+        if state.get("unavailable"):
+            await self._send_state_unavailable_notice(player_id)
+            return
 
         answer_payload_cache = state.setdefault("answer_payload_cache", {})
 
         if answer_payload_cache.get("question_id") != current_question_id:
             answer_payload_cache.clear()
         if not await manager.save_buzzer_state_async(self.session_code, state):
+            await self._send_state_unavailable_notice(player_id)
             return
 
         logger.warning(
@@ -1603,7 +1646,14 @@ class BuzzerGameHandler(GameEventHandler):
     ):
         """Handle buzzer game answer submission."""
         state = await manager.get_buzzer_state_async(self.session_code)
-        phase_state = manager.get_session_phase_state(self.session_code)
+        if state.get("unavailable"):
+            await self._send_state_unavailable_notice(player_id)
+            return
+
+        phase_state = await manager.get_session_phase_state_async(self.session_code)
+        if phase_state.get("unavailable"):
+            await self._send_state_unavailable_notice(player_id)
+            return
         current_phase_question_id = phase_state.get("current_question_id")
         state_question_id = state.get("current_question_id")
 
@@ -1771,6 +1821,7 @@ class BuzzerGameHandler(GameEventHandler):
             }
         )
         if not await manager.save_buzzer_state_async(self.session_code, state):
+            await self._send_state_unavailable_notice(player_id)
             return
 
         await manager.broadcast_to_session(
@@ -1879,6 +1930,7 @@ class BuzzerGameHandler(GameEventHandler):
         state["transitioning"] = False
         state["accepting_buzzes"] = True
         if not await manager.save_buzzer_state_async(self.session_code, state):
+            await self._send_state_unavailable_notice(player_id)
             return
 
         logger.warning(
@@ -1911,7 +1963,9 @@ class BuzzerGameHandler(GameEventHandler):
         state = await manager.get_buzzer_state_async(self.session_code)
         if state.get("unavailable"):
             return
-        phase_state = manager.get_session_phase_state(self.session_code)
+        phase_state = await manager.get_session_phase_state_async(self.session_code)
+        if phase_state.get("unavailable"):
+            return
 
         expected_question_id = state.get("current_question_id") or phase_state.get(
             "current_question_id"

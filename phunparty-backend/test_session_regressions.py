@@ -1677,7 +1677,7 @@ def test_buzzer_state_update_broadcast_uses_authoritative_state():
 
     with patch.object(
         manager, "broadcast_to_session", new_callable=AsyncMock
-    ) as broadcast:
+    ) as broadcast, patch.object(redis_bus.websocket_bus, "redis_url", None):
         try:
             asyncio.run(manager.broadcast_buzzer_state_update(session_code))
         finally:
@@ -1695,6 +1695,70 @@ def test_buzzer_state_update_broadcast_uses_authoritative_state():
     assert message["data"]["button_state"] == "waiting"
     assert broadcast.await_args.kwargs["only_client_types"] == ["mobile"]
     assert broadcast.await_args.kwargs["require_ack"] is True
+
+
+def test_buzzer_state_update_broadcast_uses_async_state_formatter():
+    session_code = "BUZZERASYNCSTATE"
+    state = {
+        "current_buzzer_winner": "P1",
+        "frozen_players": {"P2"},
+        "question_active": True,
+        "transitioning": False,
+        "accepting_buzzes": False,
+        "current_question_id": "Q1",
+        "attempts": [],
+    }
+
+    async def run_test():
+        with patch.object(
+            manager,
+            "get_buzzer_state_async",
+            AsyncMock(return_value=state),
+        ), patch.object(
+            manager,
+            "get_buzzer_state",
+            side_effect=AssertionError("sync buzzer state read should not be used"),
+        ), patch.object(
+            manager,
+            "broadcast_to_session",
+            AsyncMock(),
+        ) as broadcast:
+            await manager.broadcast_buzzer_state_update(session_code)
+
+        broadcast.assert_awaited_once()
+        message = broadcast.await_args.args[1]
+        assert message["type"] == "buzzer_state_update"
+        assert message["data"]["current_buzzer_winner"] == "P1"
+        assert message["data"]["frozen_players"] == ["P2"]
+
+    asyncio.run(run_test())
+
+
+def test_buzzer_state_update_broadcast_skips_unavailable_state():
+    async def run_test():
+        with patch.object(
+            manager,
+            "get_buzzer_state_async",
+            AsyncMock(return_value={
+                "current_buzzer_winner": None,
+                "frozen_players": set(),
+                "question_active": False,
+                "transitioning": False,
+                "accepting_buzzes": False,
+                "current_question_id": None,
+                "attempts": [],
+                "unavailable": True,
+            }),
+        ), patch.object(
+            manager,
+            "broadcast_to_session",
+            AsyncMock(),
+        ) as broadcast:
+            await manager.broadcast_buzzer_state_update("BUZZERUNAVAILABLE")
+
+        broadcast.assert_not_awaited()
+
+    asyncio.run(run_test())
 
 
 def test_buzzer_press_uses_async_claim_path():
@@ -1716,11 +1780,11 @@ def test_buzzer_press_uses_async_claim_path():
             AsyncMock(return_value=state),
         ), patch.object(
             manager,
-            "get_session_phase_state",
-            return_value={
+            "get_session_phase_state_async",
+            AsyncMock(return_value={
                 "phase": SessionPhase.QUESTION.value,
                 "current_question_id": "Q1",
-            },
+            }),
         ), patch.object(
             handler,
             "reject_fair_play_locked_buzzer",
@@ -1735,7 +1799,7 @@ def test_buzzer_press_uses_async_claim_path():
             side_effect=AssertionError("sync buzzer claim should not be used"),
         ), patch.object(
             manager,
-            "broadcast_buzzer_state_update",
+            "send_message_to_player",
             AsyncMock(),
         ), patch.object(
             handler,
@@ -1744,6 +1808,82 @@ def test_buzzer_press_uses_async_claim_path():
         ):
             await handler.handle_buzzer_press("P1", MagicMock(), "Q1")
             claim_async.assert_awaited_once_with("SESSION123", "P1", "Q1")
+
+    asyncio.run(run_test())
+
+
+def test_buzzer_press_reports_state_unavailable_when_claim_fails():
+    handler = game_handlers.BuzzerGameHandler("SESSION123")
+    state = {
+        "current_buzzer_winner": None,
+        "frozen_players": set(),
+        "question_active": True,
+        "transitioning": False,
+        "accepting_buzzes": True,
+        "current_question_id": "Q1",
+        "attempts": [],
+    }
+
+    async def run_test():
+        with patch.object(
+            manager,
+            "get_buzzer_state_async",
+            AsyncMock(return_value=state),
+        ), patch.object(
+            manager,
+            "get_session_phase_state_async",
+            AsyncMock(return_value={
+                "phase": SessionPhase.QUESTION.value,
+                "current_question_id": "Q1",
+            }),
+        ), patch.object(
+            handler,
+            "reject_fair_play_locked_buzzer",
+            AsyncMock(return_value=False),
+        ), patch.object(
+            manager,
+            "claim_buzzer_winner_async",
+            AsyncMock(return_value=False),
+        ), patch.object(
+            manager,
+            "send_message_to_player",
+            AsyncMock(),
+        ) as send_notice:
+            await handler.handle_buzzer_press("P1", MagicMock(), "Q1")
+
+        send_notice.assert_awaited_once()
+        message = send_notice.await_args.kwargs["message"]
+        assert message["type"] == "error"
+        assert message["data"]["reason"] == "state_unavailable"
+
+    asyncio.run(run_test())
+
+
+def test_websocket_route_db_decision_uses_async_game_type_cache():
+    handler = SimpleNamespace(game_type="buzzer")
+
+    async def run_test():
+        with patch.object(
+            routes.manager,
+            "get_session_game_type_async",
+            AsyncMock(return_value=game_modes.BEAT_THE_CLOCK_GAME_TYPE),
+        ) as get_game_type, patch.object(
+            routes.manager,
+            "get_session_game_type",
+            side_effect=AssertionError("sync game type read should not be used"),
+        ):
+            needs_db = await routes.websocket_message_needs_route_db_async(
+                {
+                    "type": "submit_answer",
+                    "data": {"question_id": "Q1", "answer": "A"},
+                },
+                "mobile",
+                handler,
+                "SESSION123",
+            )
+
+        get_game_type.assert_awaited_once_with("SESSION123")
+        assert needs_db is False
 
     asyncio.run(run_test())
 
@@ -2349,6 +2489,9 @@ def test_mobile_disconnect_during_fair_play_starts_focus_loss_grace():
                     "phase": "question",
                     "current_question_id": "Q1",
                 }
+                mock_manager.get_session_phase_state_async = AsyncMock(
+                    return_value=mock_manager.get_session_phase_state.return_value
+                )
                 mock_manager.get_pending_focus_loss.return_value = None
                 mock_manager.record_pending_focus_loss.return_value = {
                     "session_code": "SESSION123",
@@ -2433,6 +2576,9 @@ def test_focus_violation_records_strike_and_freezes_player():
                         "phase": "question",
                         "current_question_id": "Q1",
                     }
+                    mock_manager.get_session_phase_state_async = AsyncMock(
+                        return_value=mock_manager.get_session_phase_state.return_value
+                    )
                     mock_manager.get_player_name_from_websocket.return_value = "Player"
                     mock_manager.get_player_connections.return_value = {
                         "ws1": {"websocket": player_socket}
@@ -2520,6 +2666,9 @@ def test_focus_violation_delays_progression_after_fair_play_kick():
                     "phase": "question",
                     "current_question_id": "Q1",
                 }
+                mock_manager.get_session_phase_state_async = AsyncMock(
+                    return_value=mock_manager.get_session_phase_state.return_value
+                )
                 mock_manager.get_player_name_from_websocket.return_value = "Player"
                 mock_manager.get_player_connections.return_value = {}
                 mock_manager.broadcast_to_session = AsyncMock()
@@ -2568,6 +2717,9 @@ def test_fair_play_focus_lost_starts_backend_grace_period():
                 "phase": "question",
                 "current_question_id": "Q1",
             }
+            mock_manager.get_session_phase_state_async = AsyncMock(
+                return_value=mock_manager.get_session_phase_state.return_value
+            )
             mock_manager.record_pending_focus_loss.return_value = {
                 "session_code": "SESSION123",
                 "player_id": "P1",
@@ -2679,6 +2831,9 @@ def test_fair_play_immediate_reasons_bypass_grace_period():
                     "phase": "question",
                     "current_question_id": "Q1",
                 }
+                mock_manager.get_session_phase_state_async = AsyncMock(
+                    return_value=mock_manager.get_session_phase_state.return_value
+                )
                 mock_manager.record_pending_focus_loss = MagicMock()
                 mock_manager.send_personal_message = AsyncMock()
                 with patch.object(
@@ -4146,6 +4301,13 @@ def test_beat_clock_submit_answer_with_no_route_db_reaches_handler():
             }),
         ), patch.object(
             routes.manager,
+            "get_session_phase_state_async",
+            AsyncMock(return_value={
+                "phase": SessionPhase.QUESTION.value,
+                "current_question_id": "BTC001",
+            }),
+        ), patch.object(
+            routes.manager,
             "is_player_frozen_for_question",
             return_value=False,
         ), patch.object(
@@ -5260,6 +5422,12 @@ def test_buzzer_ui_update_sends_answer_data_only_to_winner():
         }
         mock_manager.get_buzzer_state_async = AsyncMock(
             return_value=mock_manager.get_buzzer_state.return_value
+        )
+        mock_manager.get_session_phase_state_async = AsyncMock(
+            return_value={
+                "phase": "question",
+                "current_question_id": "Q1",
+            }
         )
         mock_manager.get_session_connections.return_value = {
             "ws1": {
