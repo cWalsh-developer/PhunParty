@@ -583,7 +583,7 @@ class BeatTheClockGameHandler(GameEventHandler):
                     player_id,
                     updated_player_state,
                 )
-            manager.set_beat_clock_state(self.session_code, result["state"])
+            manager.update_beat_clock_local_state(self.session_code, result["state"])
             return True
 
         state = state or await manager.get_beat_clock_state_for_player_async(
@@ -620,7 +620,7 @@ class BeatTheClockGameHandler(GameEventHandler):
                 player_id,
                 player_state,
             )
-        manager.set_beat_clock_state(self.session_code, state)
+        manager.update_beat_clock_local_state(self.session_code, state)
         return True
 
     def _build_next_question_payload_in_thread(
@@ -1439,7 +1439,7 @@ class BuzzerGameHandler(GameEventHandler):
         )
         if not is_locked_by_fair_play:
             return False
-        state = self.buzzer_state
+        state = await manager.get_buzzer_state_async(self.session_code)
         frozen_players = state.setdefault("frozen_players", set())
         frozen_players.add(player_id)
 
@@ -1450,7 +1450,7 @@ class BuzzerGameHandler(GameEventHandler):
             state["question_active"] = True
             state["transitioning"] = False
             state["accepting_buzzes"] = True
-        manager.save_buzzer_state(self.session_code, state)
+        await manager.save_buzzer_state_async(self.session_code, state)
 
         logger.info(
             "Rejected Fair Play locked buzzer press: session=%s player=%s question=%s",
@@ -1482,7 +1482,7 @@ class BuzzerGameHandler(GameEventHandler):
         self, player_id: str, db: Session, incoming_question_id: str = None
     ):
         """Handle player pressing buzzer"""
-        state = self.buzzer_state
+        state = await manager.get_buzzer_state_async(self.session_code)
         phase_state = manager.get_session_phase_state(self.session_code)
         current_question_id = phase_state.get("current_question_id")
 
@@ -1538,7 +1538,7 @@ class BuzzerGameHandler(GameEventHandler):
 
         # This player wins the buzzer.
         # Close buzzing immediately so every non-winner is greyed out.
-        if not manager.claim_buzzer_winner(
+        if not await manager.claim_buzzer_winner_async(
             self.session_code,
             player_id,
             current_question_id,
@@ -1547,13 +1547,13 @@ class BuzzerGameHandler(GameEventHandler):
             await self.update_mobile_buzzer_ui(db)
             return
 
-        state = self.buzzer_state
+        state = await manager.get_buzzer_state_async(self.session_code)
 
         answer_payload_cache = state.setdefault("answer_payload_cache", {})
 
         if answer_payload_cache.get("question_id") != current_question_id:
             answer_payload_cache.clear()
-        manager.save_buzzer_state(self.session_code, state)
+        await manager.save_buzzer_state_async(self.session_code, state)
 
         logger.warning(
             "BUZZER WINNER LOCKED session=%s player=%s question=%s accepting_buzzes=%s",
@@ -1592,7 +1592,7 @@ class BuzzerGameHandler(GameEventHandler):
         self, player_id: str, answer: str, question_id: str, db: Session
     ):
         """Handle buzzer game answer submission."""
-        state = self.buzzer_state
+        state = await manager.get_buzzer_state_async(self.session_code)
         phase_state = manager.get_session_phase_state(self.session_code)
         current_phase_question_id = phase_state.get("current_question_id")
         state_question_id = state.get("current_question_id")
@@ -1760,7 +1760,7 @@ class BuzzerGameHandler(GameEventHandler):
                 "timestamp": datetime.now().isoformat(),
             }
         )
-        manager.save_buzzer_state(self.session_code, state)
+        await manager.save_buzzer_state_async(self.session_code, state)
 
         await manager.broadcast_to_session(
             self.session_code,
@@ -1867,7 +1867,7 @@ class BuzzerGameHandler(GameEventHandler):
         state["question_active"] = True
         state["transitioning"] = False
         state["accepting_buzzes"] = True
-        manager.save_buzzer_state(self.session_code, state)
+        await manager.save_buzzer_state_async(self.session_code, state)
 
         logger.warning(
             "BUZZER REOPENED AFTER WRONG ANSWER session=%s question=%s frozen_count=%s active_players=%s",
@@ -1896,7 +1896,7 @@ class BuzzerGameHandler(GameEventHandler):
     ):
         """Update mobile UI based on the authoritative buzzer state."""
         mobile_connections = manager.get_session_connections(self.session_code)
-        state = self.buzzer_state
+        state = await manager.get_buzzer_state_async(self.session_code)
         phase_state = manager.get_session_phase_state(self.session_code)
 
         expected_question_id = state.get("current_question_id") or phase_state.get(

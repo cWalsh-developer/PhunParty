@@ -1697,6 +1697,57 @@ def test_buzzer_state_update_broadcast_uses_authoritative_state():
     assert broadcast.await_args.kwargs["require_ack"] is True
 
 
+def test_buzzer_press_uses_async_claim_path():
+    handler = game_handlers.BuzzerGameHandler("SESSION123")
+    state = {
+        "current_buzzer_winner": None,
+        "frozen_players": set(),
+        "question_active": True,
+        "transitioning": False,
+        "accepting_buzzes": True,
+        "current_question_id": "Q1",
+        "attempts": [],
+    }
+
+    async def run_test():
+        with patch.object(
+            manager,
+            "get_buzzer_state_async",
+            AsyncMock(return_value=state),
+        ), patch.object(
+            manager,
+            "get_session_phase_state",
+            return_value={
+                "phase": SessionPhase.QUESTION.value,
+                "current_question_id": "Q1",
+            },
+        ), patch.object(
+            handler,
+            "reject_fair_play_locked_buzzer",
+            AsyncMock(return_value=False),
+        ), patch.object(
+            manager,
+            "claim_buzzer_winner_async",
+            AsyncMock(return_value=False),
+        ) as claim_async, patch.object(
+            manager,
+            "claim_buzzer_winner",
+            side_effect=AssertionError("sync buzzer claim should not be used"),
+        ), patch.object(
+            manager,
+            "broadcast_buzzer_state_update",
+            AsyncMock(),
+        ), patch.object(
+            handler,
+            "update_mobile_buzzer_ui",
+            AsyncMock(),
+        ):
+            await handler.handle_buzzer_press("P1", MagicMock(), "Q1")
+            claim_async.assert_awaited_once_with("SESSION123", "P1", "Q1")
+
+    asyncio.run(run_test())
+
+
 def test_advance_or_end_current_question_reveals_next_question():
     with patch.object(
         scheduler,
@@ -3925,6 +3976,50 @@ def test_ack_retry_uses_per_target_personalized_payload():
     asyncio.run(run_test())
 
 
+def test_ack_retry_missing_connection_removes_legacy_alias():
+    async def run_test():
+        session_code = "ACKP09"
+        event_id = "ACKP09:question_started:Q1:ws_p1:d1"
+        ws_id = "ws_p1"
+        legacy_message_id = "ACKP09:question_started:Q1"
+        manager.active_connections[session_code] = {
+            ws_id: {
+                "websocket": MagicMock(),
+                "client_type": "mobile",
+                "ws_id": ws_id,
+                "player_id": "P1",
+            }
+        }
+        manager._track_ack_target(
+            event_id,
+            session_code,
+            {
+                "type": "question_started",
+                "message_id": legacy_message_id,
+                "event_id": event_id,
+                "requires_ack": True,
+                "data": {"question_id": "Q1"},
+            },
+            ws_id,
+            manager.active_connections[session_code][ws_id],
+        )
+
+        assert manager.ack_alias_index[(ws_id, legacy_message_id)] == {event_id}
+        manager.active_connections[session_code].pop(ws_id)
+
+        try:
+            with patch("app.websockets.manager.asyncio.sleep", new=AsyncMock()):
+                await manager._retry_unacked_event(event_id)
+
+            assert event_id not in manager.pending_acks
+            assert (ws_id, legacy_message_id) not in manager.ack_alias_index
+        finally:
+            manager._discard_pending_ack_event(event_id)
+            manager.active_connections.pop(session_code, None)
+
+    asyncio.run(run_test())
+
+
 def test_ack_retry_task_is_deduplicated_per_event_id():
     async def run_test():
         event_id = "dedup-event"
@@ -4044,11 +4139,11 @@ def test_beat_clock_submit_answer_with_no_route_db_reaches_handler():
 
         with patch.object(
             routes.manager,
-            "get_beat_clock_state_for_player",
-            return_value={
+            "get_beat_clock_state_for_player_async",
+            AsyncMock(return_value={
                 "active": True,
                 "ends_at_dt": routes.utc_now() + timedelta(seconds=30),
-            },
+            }),
         ), patch.object(
             routes.manager,
             "is_player_frozen_for_question",
@@ -4356,6 +4451,106 @@ def test_beat_clock_answer_updates_redis_projection_after_db_commit():
     asyncio.run(run_test())
 
     assert events == ["response", "score", "commit", "redis_update"]
+
+
+def test_beat_clock_next_question_does_not_rewrite_sync_meta_state():
+    handler = game_handlers.BeatTheClockGameHandler("SESSION123")
+    state = {
+        "active": True,
+        "duration_seconds": 60,
+        "ends_at": "2026-07-10T12:00:00",
+        "ends_at_dt": datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=1),
+        "questions": ["Q1"],
+        "players": {
+            "P1": {
+                "current_question_id": None,
+                "answered_count": 0,
+                "correct_count": 0,
+            }
+        },
+        "leaderboard": [],
+    }
+    result_state = {
+        **state,
+        "players": {
+            "P1": {
+                "current_question_id": "Q1",
+                "answered_count": 0,
+                "correct_count": 0,
+            }
+        },
+    }
+
+    async def run_test():
+        with patch.object(
+            manager,
+            "get_beat_clock_state_for_player_async",
+            AsyncMock(return_value=state),
+        ), patch.object(
+            handler,
+            "_build_next_question_payload_in_thread",
+            return_value={
+                "payload": {"question_id": "Q1", "question": "Ready?"},
+                "player_state": result_state["players"]["P1"],
+                "state": result_state,
+            },
+        ), patch.object(
+            manager,
+            "send_message_to_player",
+            AsyncMock(),
+        ), patch.object(
+            manager,
+            "update_beat_clock_player_state_async",
+            AsyncMock(),
+        ) as update_player_state, patch.object(
+            manager,
+            "set_beat_clock_state",
+            side_effect=AssertionError("sync meta write should not be used"),
+        ), patch.object(
+            manager,
+            "update_beat_clock_local_state",
+        ) as update_local_state:
+            assert await handler._send_question_to_player(None, "P1") is True
+            update_player_state.assert_awaited_once()
+            update_local_state.assert_called_once_with("SESSION123", result_state)
+
+    asyncio.run(run_test())
+
+
+def test_async_beat_clock_read_does_not_fallback_to_sync_redis():
+    class ExplodingSyncRedis:
+        def get(self, *args, **kwargs):
+            raise AssertionError("sync Redis GET should not be used")
+
+        def hget(self, *args, **kwargs):
+            raise AssertionError("sync Redis HGET should not be used")
+
+    async def run_test():
+        session_code = "ASYNCBC"
+        manager.beat_clock_states[session_code] = {
+            "active": True,
+            "players": {"P1": {"current_question_id": "Q1"}},
+            "questions": ["Q1"],
+            "leaderboard": [],
+        }
+
+        try:
+            with patch.object(redis_bus.websocket_bus, "_redis", None), patch.object(
+                redis_bus.websocket_bus,
+                "_sync_redis",
+                ExplodingSyncRedis(),
+            ):
+                state = await manager.get_beat_clock_state_for_player_async(
+                    session_code,
+                    "P1",
+                )
+        finally:
+            manager.beat_clock_states.pop(session_code, None)
+            manager._async_redis_fallback_warnings.discard("beat_clock_player_read")
+
+        assert state["players"]["P1"]["current_question_id"] == "Q1"
+
+    asyncio.run(run_test())
 
 
 def test_beat_clock_state_broadcast_is_debounced_per_session():
@@ -4905,6 +5100,9 @@ def test_buzzer_ui_update_sends_answer_data_only_to_winner():
             "attempts": [],
             "accepting_buzzes": True,
         }
+        mock_manager.get_buzzer_state_async = AsyncMock(
+            return_value=mock_manager.get_buzzer_state.return_value
+        )
         mock_manager.get_session_connections.return_value = {
             "ws1": {
                 "client_type": "mobile",

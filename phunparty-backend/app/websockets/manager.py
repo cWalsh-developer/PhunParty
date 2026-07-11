@@ -163,6 +163,7 @@ class ConnectionManager:
         self.ack_alias_index: Dict[tuple[str, str], Set[str]] = {}
         self.ack_retry_tasks: Dict[str, asyncio.Task] = {}
         self._ack_delivery_sequences: Dict[str, int] = {}
+        self._async_redis_fallback_warnings: Set[str] = set()
         self._missing_connection_warning_at: Dict[str, float] = {}
         # session_code:player_id values for players who explicitly left.
         self.intentional_leaves: Set[str] = set()
@@ -1313,7 +1314,8 @@ return 0
     async def _redis_json_get_async(self, key: str) -> Optional[Dict[str, Any]]:
         client = websocket_bus.async_client
         if not client:
-            return self._redis_json_get(key)
+            self._warn_missing_async_redis("json_get")
+            return None
         try:
             raw_value = await client.get(key)
             return json.loads(raw_value) if raw_value else None
@@ -1324,7 +1326,7 @@ return 0
     async def _redis_json_set_async(self, key: str, value: Dict[str, Any]) -> None:
         client = websocket_bus.async_client
         if not client:
-            self._redis_json_set(key, value)
+            self._warn_missing_async_redis("json_set")
             return
         try:
             await client.set(
@@ -1342,7 +1344,8 @@ return 0
     ) -> Optional[Dict[str, Any]]:
         client = websocket_bus.async_client
         if not client:
-            return self._redis_hash_json_get(key, field)
+            self._warn_missing_async_redis("hash_json_get")
+            return None
         try:
             raw_value = await client.hget(key, field)
             return json.loads(raw_value) if raw_value else None
@@ -1358,7 +1361,7 @@ return 0
     ) -> None:
         client = websocket_bus.async_client
         if not client:
-            self._redis_hash_json_set(key, field, value)
+            self._warn_missing_async_redis("hash_json_set")
             return
         try:
             pipe = client.pipeline()
@@ -1367,6 +1370,16 @@ return 0
             await pipe.execute()
         except Exception:
             logger.exception("Failed to write shared hash field %s/%s", key, field)
+
+    def _warn_missing_async_redis(self, operation: str) -> None:
+        if operation in self._async_redis_fallback_warnings:
+            return
+        self._async_redis_fallback_warnings.add(operation)
+        if websocket_bus.redis_url:
+            logger.error(
+                "Async Redis client unavailable for hot-path %s; skipped Redis operation to avoid blocking the event loop",
+                operation,
+            )
 
     def _redis_hash_get(self, key: str, field: str) -> Optional[str]:
         client = websocket_bus.sync_client
@@ -1446,6 +1459,15 @@ return 0
             self._serialize_buzzer_state(state),
         )
 
+    async def save_buzzer_state_async(
+        self, session_code: str, state: Dict[str, Any]
+    ) -> None:
+        self.buzzer_states[session_code] = state
+        await self._redis_json_set_async(
+            self._shared_state_key(session_code, "buzzer"),
+            self._serialize_buzzer_state(state),
+        )
+
     def claim_buzzer_winner(
         self,
         session_code: str,
@@ -1489,6 +1511,57 @@ return 0
             return False
 
         shared_state = self._redis_json_get(
+            self._shared_state_key(session_code, "buzzer")
+        )
+        if shared_state:
+            self.buzzer_states[session_code] = self._deserialize_buzzer_state(
+                shared_state
+            )
+        return True
+
+    async def claim_buzzer_winner_async(
+        self,
+        session_code: str,
+        player_id: str,
+        question_id: str,
+    ) -> bool:
+        client = websocket_bus.async_client
+        state = await self.get_buzzer_state_async(session_code)
+
+        if not client:
+            if (
+                not state.get("accepting_buzzes")
+                or not state.get("question_active")
+                or state.get("transitioning")
+                or state.get("current_question_id") != question_id
+                or state.get("current_buzzer_winner")
+            ):
+                return False
+            state["current_buzzer_winner"] = player_id
+            state["question_active"] = True
+            state["transitioning"] = False
+            state["accepting_buzzes"] = False
+            await self.save_buzzer_state_async(session_code, state)
+            return True
+
+        try:
+            won = await client.eval(
+                BUZZER_CLAIM_SCRIPT,
+                1,
+                self._shared_state_key(session_code, "buzzer"),
+                player_id,
+                question_id,
+                self._utc_now_iso(),
+                self.SHARED_STATE_TTL_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to claim buzzer winner in Redis")
+            return False
+
+        if int(won or 0) != 1:
+            return False
+
+        shared_state = await self._redis_json_get_async(
             self._shared_state_key(session_code, "buzzer")
         )
         if shared_state:
@@ -1859,7 +1932,7 @@ return 0
                         ws_id
                     )
                     if not connection_info:
-                        event_state["targets"].pop(ws_id, None)
+                        self._remove_ack_target(event_id, ws_id)
                         continue
 
                     target_message = target.get("message") or event_state["message"]
@@ -4231,6 +4304,31 @@ return 0
         self.save_buzzer_state(session_code, state)
         return state
 
+    async def get_buzzer_state_async(self, session_code: str) -> Dict[str, Any]:
+        """Return shared buzzer state without sync Redis work in async handlers."""
+        shared_state = await self._redis_json_get_async(
+            self._shared_state_key(session_code, "buzzer")
+        )
+        if shared_state:
+            state = self._deserialize_buzzer_state(shared_state)
+            self.buzzer_states[session_code] = state
+            return state
+
+        state = self.buzzer_states.setdefault(
+            session_code,
+            {
+                "current_buzzer_winner": None,
+                "frozen_players": set(),
+                "question_active": False,
+                "transitioning": False,
+                "accepting_buzzes": False,
+                "current_question_id": None,
+                "attempts": [],
+            },
+        )
+        await self.save_buzzer_state_async(session_code, state)
+        return state
+
     def start_buzzer_question(self, session_code: str, question_id: Optional[str]):
         """Mark a buzzer question active for all connections in the session."""
         state = self.get_buzzer_state(session_code)
@@ -4356,6 +4454,12 @@ return 0
                     "Failed to refresh Beat the Clock player state TTL for %s",
                     session_code,
                 )
+
+    def update_beat_clock_local_state(
+        self, session_code: str, state: Dict[str, Any]
+    ) -> None:
+        """Update local Beat the Clock projection without rewriting Redis metadata."""
+        self.beat_clock_states[session_code] = state
 
     def get_beat_clock_state(self, session_code: str) -> Dict[str, Any]:
         meta_key, players_key = self._beat_clock_keys(session_code)
@@ -4576,7 +4680,17 @@ return 0
     ) -> Dict[str, Any]:
         """Async Beat the Clock meta/player read for WebSocket hot paths."""
         if not websocket_bus.async_client:
-            return self.get_beat_clock_state_for_player(session_code, player_id)
+            self._warn_missing_async_redis("beat_clock_player_read")
+            state = self.beat_clock_states.setdefault(
+                session_code,
+                {
+                    "active": False,
+                    "players": {},
+                    "questions": [],
+                    "leaderboard": [],
+                },
+            )
+            return state
 
         meta_key, players_key = self._beat_clock_keys(session_code)
         shared_state = await self._redis_json_get_async(meta_key)

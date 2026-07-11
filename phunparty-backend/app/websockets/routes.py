@@ -2322,7 +2322,7 @@ async def resync_buzzer_ui_after_fair_play_return(
         # update_mobile_buzzer_ui is the authoritative per-player state:
         # winner -> answer_mode, others -> waiting/frozen/active as appropriate.
         if hasattr(buzzer_handler, "update_mobile_buzzer_ui"):
-            state = manager.get_buzzer_state(session_code)
+            state = await manager.get_buzzer_state_async(session_code)
 
             logger.warning(
                 "FAIR PLAY RETURN BUZZER RESYNC session=%s player=%s question=%s current_winner=%s accepting_buzzes=%s transitioning=%s",
@@ -2839,7 +2839,7 @@ async def apply_buzzer_fair_play_freeze(
         if game_type != BUZZER_GAME_TYPE:
             return
 
-        state = manager.get_buzzer_state(session_code)
+        state = await manager.get_buzzer_state_async(session_code)
 
         if state.get("current_question_id") != question_id:
             logger.info(
@@ -2891,7 +2891,7 @@ async def apply_buzzer_fair_play_freeze(
                 question_id,
             )
 
-        manager.save_buzzer_state(session_code, state)
+        await manager.save_buzzer_state_async(session_code, state)
         await manager.broadcast_buzzer_state_update(session_code)
 
         buzzer_handler = create_game_handler(session_code, BUZZER_GAME_TYPE)
