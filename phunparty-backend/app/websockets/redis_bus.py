@@ -9,7 +9,7 @@ import re
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Optional
 
 import redis.asyncio as redis
 import redis as sync_redis
@@ -444,9 +444,7 @@ class RedisWebSocketBus:
             return False
 
         backlog.append((event, event_bytes))
-        self._reliable_backlog_session_bytes[session_code] = (
-            session_bytes + event_bytes
-        )
+        self._reliable_backlog_session_bytes[session_code] = session_bytes + event_bytes
         self._reliable_backlog_total_bytes += event_bytes
         self.reliable_backlog_peak_bytes = max(
             self.reliable_backlog_peak_bytes,
