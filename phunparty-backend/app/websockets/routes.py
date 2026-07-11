@@ -1420,7 +1420,7 @@ async def handle_websocket_message(
             resolved_submit_game_type == BEAT_THE_CLOCK_GAME_TYPE
             or question_looks_like_beat_clock
         ):
-            beat_clock_state = manager.get_beat_clock_state_for_player(
+            beat_clock_state = await manager.get_beat_clock_state_for_player_async(
                 session_code,
                 player_id or "",
             )

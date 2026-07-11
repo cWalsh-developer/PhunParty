@@ -160,7 +160,9 @@ class ConnectionManager:
         # session_code -> terminal/final session snapshot kept after game end
         self.terminal_sessions: Dict[str, Dict[str, Any]] = {}
         self.pending_acks: Dict[str, Dict[str, Any]] = {}
+        self.ack_alias_index: Dict[tuple[str, str], Set[str]] = {}
         self.ack_retry_tasks: Dict[str, asyncio.Task] = {}
+        self._ack_delivery_sequences: Dict[str, int] = {}
         self._missing_connection_warning_at: Dict[str, float] = {}
         # session_code:player_id values for players who explicitly left.
         self.intentional_leaves: Set[str] = set()
@@ -212,6 +214,7 @@ class ConnectionManager:
             websocket = self.websocket_registry[ws_id].get("websocket")
         if websocket:
             self.websocket_to_ws_id.pop(self._websocket_lookup_key(websocket), None)
+        self._ack_delivery_sequences.pop(ws_id, None)
 
         sender_task = (connection_info or {}).get("outbound_sender_task")
         if (
@@ -588,19 +591,37 @@ class ConnectionManager:
         max_attempts = 3 if critical else 1
 
         for attempt in range(max_attempts):
+            registered_event_id = None
             try:
-                outbound_message = self._outbound_message_for_connection(
-                    message_with_timestamp,
-                    connection_info,
-                )
+                target_message = message_with_timestamp
                 if should_require_ack:
+                    target_suffix = (
+                        connection_info.get("connection_generation")
+                        or ws_id
+                        or connection_info.get("player_id")
+                        or "target"
+                    )
+                    target_message = {
+                        **message_with_timestamp,
+                        "event_id": self.make_ack_delivery_event_id(
+                            message_with_timestamp["message_id"],
+                            ws_id,
+                            target_suffix,
+                        ),
+                        "requires_ack": True,
+                    }
+                    registered_event_id = target_message["event_id"]
                     self._track_ack_target(
-                        message_with_timestamp["event_id"],
+                        registered_event_id,
                         session_code,
-                        message_with_timestamp,
+                        target_message,
                         ws_id,
                         connection_info,
                     )
+                outbound_message = self._outbound_message_for_connection(
+                    target_message,
+                    connection_info,
+                )
                 enqueued = await self._enqueue_broadcast_payload(
                     session_code,
                     ws_id,
@@ -608,23 +629,25 @@ class ConnectionManager:
                     json.dumps(outbound_message),
                     critical=critical or should_require_ack,
                     replaceable=self._message_is_replaceable(
-                        message_with_timestamp
+                        target_message
                     ),
-                    coalesce_key=self._message_coalesce_key(message_with_timestamp),
+                    coalesce_key=self._message_coalesce_key(target_message),
                 )
                 if not enqueued:
-                    if should_require_ack:
+                    if registered_event_id:
                         self._remove_ack_target(
-                            message_with_timestamp["event_id"],
+                            registered_event_id,
                             ws_id,
                         )
                     raise RuntimeError("outbound queue full")
+                if registered_event_id:
+                    self._schedule_ack_retry(registered_event_id)
                 logger.debug("Queued successfully to %s %s", client_type, ws_id)
                 return websocket, client_type, True
             except WebSocketDisconnect:
-                if should_require_ack:
+                if registered_event_id:
                     self._remove_ack_target(
-                        message_with_timestamp["event_id"],
+                        registered_event_id,
                         ws_id,
                     )
                 logger.warning(
@@ -634,9 +657,9 @@ class ConnectionManager:
                 )
                 return websocket, client_type, False
             except Exception as exc:
-                if should_require_ack:
+                if registered_event_id:
                     self._remove_ack_target(
-                        message_with_timestamp["event_id"],
+                        registered_event_id,
                         ws_id,
                     )
                 if attempt < max_attempts - 1:
@@ -1287,6 +1310,64 @@ return 0
         except Exception:
             logger.exception("Failed to write shared hash field %s/%s", key, field)
 
+    async def _redis_json_get_async(self, key: str) -> Optional[Dict[str, Any]]:
+        client = websocket_bus.async_client
+        if not client:
+            return self._redis_json_get(key)
+        try:
+            raw_value = await client.get(key)
+            return json.loads(raw_value) if raw_value else None
+        except Exception:
+            logger.exception("Failed to read shared state key %s", key)
+            return None
+
+    async def _redis_json_set_async(self, key: str, value: Dict[str, Any]) -> None:
+        client = websocket_bus.async_client
+        if not client:
+            self._redis_json_set(key, value)
+            return
+        try:
+            await client.set(
+                key,
+                json.dumps(value, separators=(",", ":")),
+                ex=self.SHARED_STATE_TTL_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to write shared state key %s", key)
+
+    async def _redis_hash_json_get_async(
+        self,
+        key: str,
+        field: str,
+    ) -> Optional[Dict[str, Any]]:
+        client = websocket_bus.async_client
+        if not client:
+            return self._redis_hash_json_get(key, field)
+        try:
+            raw_value = await client.hget(key, field)
+            return json.loads(raw_value) if raw_value else None
+        except Exception:
+            logger.exception("Failed to read shared hash field %s/%s", key, field)
+            return None
+
+    async def _redis_hash_json_set_async(
+        self,
+        key: str,
+        field: str,
+        value: Dict[str, Any],
+    ) -> None:
+        client = websocket_bus.async_client
+        if not client:
+            self._redis_hash_json_set(key, field, value)
+            return
+        try:
+            pipe = client.pipeline()
+            pipe.hset(key, field, json.dumps(value, separators=(",", ":")))
+            pipe.expire(key, self.SHARED_STATE_TTL_SECONDS)
+            await pipe.execute()
+        except Exception:
+            logger.exception("Failed to write shared hash field %s/%s", key, field)
+
     def _redis_hash_get(self, key: str, field: str) -> Optional[str]:
         client = websocket_bus.sync_client
         if not client:
@@ -1439,6 +1520,18 @@ return 0
 
         return ":".join(parts)
 
+    def make_ack_delivery_event_id(
+        self,
+        message_id: str,
+        ws_id: str,
+        target_suffix: str,
+    ) -> str:
+        """Build a unique delivery id for one ACK-required send instance."""
+        sequence_key = ws_id or target_suffix
+        next_sequence = self._ack_delivery_sequences.get(sequence_key, 0) + 1
+        self._ack_delivery_sequences[sequence_key] = next_sequence
+        return f"{message_id}:{target_suffix}:d{next_sequence}"
+
     def set_session_phase(
         self, session_code: str, phase: Union[SessionPhase, str], **updates: Any
     ) -> Dict[str, Any]:
@@ -1545,14 +1638,7 @@ return 0
 
         if all(target.get("acked") for target in event_state["targets"].values()):
             logger.debug(f"All targets acknowledged {event_id}")
-            self.pending_acks.pop(event_id, None)
-            retry_task = self.ack_retry_tasks.pop(event_id, None)
-            if (
-                retry_task
-                and not retry_task.done()
-                and retry_task is not asyncio.current_task()
-            ):
-                retry_task.cancel()
+            self._discard_pending_ack_event(event_id)
 
         return True
 
@@ -1562,20 +1648,94 @@ return 0
         ws_id: str,
     ) -> tuple[str, Optional[Dict[str, Any]]]:
         """Resolve legacy message_id ACKs to this socket's target-specific event."""
-        for pending_event_id, event_state in self.pending_acks.items():
-            target_state = event_state.get("targets", {}).get(ws_id)
-            if not target_state:
-                continue
+        alias_key = (ws_id, ack_id)
+        event_ids = self.ack_alias_index.get(alias_key)
+        if not event_ids:
+            return ack_id, None
 
-            event_message = event_state.get("message") or {}
-            target_message = target_state.get("message") or {}
-            if ack_id in {
-                event_message.get("message_id"),
-                target_message.get("message_id"),
-            }:
-                return pending_event_id, event_state
+        live_event_ids = {
+            pending_event_id
+            for pending_event_id in event_ids
+            if pending_event_id in self.pending_acks
+            and ws_id in self.pending_acks[pending_event_id].get("targets", {})
+        }
+        if live_event_ids != event_ids:
+            if live_event_ids:
+                self.ack_alias_index[alias_key] = live_event_ids
+            else:
+                self.ack_alias_index.pop(alias_key, None)
+
+        if len(live_event_ids) == 1:
+            pending_event_id = next(iter(live_event_ids))
+            return pending_event_id, self.pending_acks.get(pending_event_id)
+
+        if len(live_event_ids) > 1:
+            logger.warning(
+                "Rejected ambiguous legacy ACK %s from %s; matching deliveries=%s",
+                ack_id,
+                ws_id,
+                sorted(live_event_ids),
+            )
 
         return ack_id, None
+
+    def _ack_aliases_for_message(self, message: Dict[str, Any]) -> Set[str]:
+        aliases = set()
+        message_id = message.get("message_id")
+        if isinstance(message_id, str) and message_id:
+            aliases.add(message_id)
+        data = message.get("data")
+        if isinstance(data, dict):
+            data_message_id = data.get("message_id")
+            if isinstance(data_message_id, str) and data_message_id:
+                aliases.add(data_message_id)
+        aliases.discard(message.get("event_id"))
+        return aliases
+
+    def _register_ack_aliases(
+        self,
+        event_id: str,
+        ws_id: str,
+        target_state: Dict[str, Any],
+        message: Dict[str, Any],
+    ) -> None:
+        aliases = self._ack_aliases_for_message(message)
+        target_state["ack_aliases"] = aliases
+        for alias in aliases:
+            self.ack_alias_index.setdefault((ws_id, alias), set()).add(event_id)
+
+    def _unregister_ack_aliases(
+        self,
+        event_id: str,
+        ws_id: str,
+        target_state: Dict[str, Any],
+    ) -> None:
+        for alias in target_state.get("ack_aliases") or set():
+            alias_key = (ws_id, alias)
+            event_ids = self.ack_alias_index.get(alias_key)
+            if not event_ids:
+                continue
+            event_ids.discard(event_id)
+            if event_ids:
+                self.ack_alias_index[alias_key] = event_ids
+            else:
+                self.ack_alias_index.pop(alias_key, None)
+
+    def _discard_pending_ack_event(self, event_id: str) -> None:
+        event_state = self.pending_acks.pop(event_id, None)
+        if not event_state:
+            return
+
+        for ws_id, target_state in list(event_state.get("targets", {}).items()):
+            self._unregister_ack_aliases(event_id, ws_id, target_state)
+
+        retry_task = self.ack_retry_tasks.pop(event_id, None)
+        if (
+            retry_task
+            and not retry_task.done()
+            and retry_task is not asyncio.current_task()
+        ):
+            retry_task.cancel()
 
     def get_pending_ack_summary(
         self, session_code: Optional[str] = None
@@ -1615,6 +1775,10 @@ return 0
                 "targets": {},
             },
         )
+        old_target_state = event_state["targets"].get(ws_id)
+        if old_target_state:
+            self._unregister_ack_aliases(event_id, ws_id, old_target_state)
+
         event_state["targets"][ws_id] = {
             "acked": False,
             "client_type": connection_info.get("client_type"),
@@ -1623,22 +1787,23 @@ return 0
             "message": message,
             "sent_at": self._utc_now_iso(),
         }
+        self._register_ack_aliases(
+            event_id,
+            ws_id,
+            event_state["targets"][ws_id],
+            message,
+        )
 
     def _remove_ack_target(self, event_id: str, ws_id: str) -> None:
         event_state = self.pending_acks.get(event_id)
         if not event_state:
             return
 
-        event_state.get("targets", {}).pop(ws_id, None)
+        target_state = event_state.get("targets", {}).pop(ws_id, None)
+        if target_state:
+            self._unregister_ack_aliases(event_id, ws_id, target_state)
         if not event_state.get("targets"):
-            self.pending_acks.pop(event_id, None)
-            retry_task = self.ack_retry_tasks.pop(event_id, None)
-            if (
-                retry_task
-                and not retry_task.done()
-                and retry_task is not asyncio.current_task()
-            ):
-                retry_task.cancel()
+            self._discard_pending_ack_event(event_id)
 
     def _schedule_ack_retry(self, event_id: str) -> None:
         if event_id not in self.pending_acks:
@@ -1668,7 +1833,7 @@ return 0
                     target.get("acked")
                     for target in event_state["targets"].values()
                 ):
-                    self.pending_acks.pop(event_id, None)
+                    self._discard_pending_ack_event(event_id)
                     return
 
                 resend_count = event_state.get("resend_count", 0)
@@ -1681,7 +1846,7 @@ return 0
                     logger.warning(
                         f"ACK timeout for {event_id}; missing {len(missing)} target(s): {missing}"
                     )
-                    self.pending_acks.pop(event_id, None)
+                    self._discard_pending_ack_event(event_id)
                     return
 
                 session_code = event_state["session_code"]
@@ -2150,10 +2315,7 @@ return 0
 
         for event_id, event_state in list(self.pending_acks.items()):
             if event_state.get("session_code") == session_code:
-                self.pending_acks.pop(event_id, None)
-                retry_task = self.ack_retry_tasks.pop(event_id, None)
-                if retry_task and not retry_task.done():
-                    retry_task.cancel()
+                self._discard_pending_ack_event(event_id)
 
         logger.info(f"Cleaned in-memory websocket state for session {session_code}")
 
@@ -2255,7 +2417,11 @@ return 0
             or connection_info.get("player_id")
             or "target"
         )
-        event_id = message.get("event_id") or f"{base_message_id}:{target_suffix}"
+        event_id = self.make_ack_delivery_event_id(
+            base_message_id,
+            ws_id,
+            target_suffix,
+        )
         message_with_metadata = {
             **message,
             "message_id": base_message_id,
@@ -2545,7 +2711,6 @@ return 0
         message_with_timestamp["message_id"] = message_id
         should_require_ack = require_ack or message.get("type") in self.ACK_EVENT_TYPES
         if should_require_ack:
-            message_with_timestamp["event_id"] = message.get("event_id") or message_id
             message_with_timestamp["requires_ack"] = True
 
         disconnected_websockets = []
@@ -2625,9 +2790,6 @@ return 0
         # Clean up disconnected websockets
         for ws in disconnected_websockets:
             self.disconnect(ws)
-
-        if should_require_ack and success_count > 0:
-            self._schedule_ack_retry(message_with_timestamp["event_id"])
 
     async def broadcast_to_session(
         self,
@@ -4409,6 +4571,87 @@ return 0
         self.set_beat_clock_state(session_code, state)
         return state
 
+    async def get_beat_clock_state_for_player_async(
+        self, session_code: str, player_id: str
+    ) -> Dict[str, Any]:
+        """Async Beat the Clock meta/player read for WebSocket hot paths."""
+        if not websocket_bus.async_client:
+            return self.get_beat_clock_state_for_player(session_code, player_id)
+
+        meta_key, players_key = self._beat_clock_keys(session_code)
+        shared_state = await self._redis_json_get_async(meta_key)
+        player_state = None
+
+        if shared_state is None:
+            legacy_state = await self._redis_json_get_async(
+                self._shared_state_key(session_code, "beat-clock")
+            )
+            if legacy_state is not None:
+                shared_state = {
+                    key: value
+                    for key, value in legacy_state.items()
+                    if key != "players"
+                }
+                await self._redis_json_set_async(
+                    meta_key,
+                    self._json_safe_state(shared_state),
+                )
+                player_state = (legacy_state.get("players") or {}).get(player_id)
+                if player_state is not None:
+                    await self._redis_hash_json_set_async(
+                        players_key,
+                        player_id,
+                        self._json_safe_state(player_state),
+                    )
+
+        if shared_state is not None:
+            if player_state is None:
+                player_state = await self._redis_hash_json_get_async(
+                    players_key,
+                    player_id,
+                )
+
+            local_state = self.beat_clock_states.get(session_code, {})
+            merged_state = {**local_state, **shared_state}
+            ends_at_raw = merged_state.get("ends_at")
+            if ends_at_raw and not merged_state.get("ends_at_dt"):
+                try:
+                    merged_state["ends_at_dt"] = datetime.fromisoformat(
+                        str(ends_at_raw).replace("Z", "")
+                    )
+                except ValueError:
+                    pass
+
+            players = dict(local_state.get("players") or {})
+            if player_state is not None:
+                players[player_id] = player_state
+            merged_state["players"] = players
+            self.beat_clock_states[session_code] = merged_state
+            return merged_state
+
+        state = self.beat_clock_states.setdefault(
+            session_code,
+            {
+                "active": False,
+                "players": {},
+                "questions": [],
+                "leaderboard": [],
+            },
+        )
+        meta_key, players_key = self._beat_clock_keys(session_code)
+        meta_state = {key: value for key, value in state.items() if key != "players"}
+        await self._redis_json_set_async(meta_key, self._json_safe_state(meta_state))
+        client = websocket_bus.async_client
+        if client:
+            try:
+                await client.expire(players_key, self.SHARED_STATE_TTL_SECONDS)
+            except Exception:
+                logger.exception(
+                    "Failed to refresh Beat the Clock player state TTL for %s",
+                    session_code,
+                )
+        return state
+
     def update_beat_clock_player_state(
         self, session_code: str, player_id: str, player_state: Dict[str, Any]
     ) -> None:
@@ -4437,6 +4680,18 @@ return 0
                 session_code,
                 safe_player_ref(player_id),
             )
+
+    async def update_beat_clock_player_state_async(
+        self, session_code: str, player_id: str, player_state: Dict[str, Any]
+    ) -> None:
+        state = self.beat_clock_states.setdefault(session_code, {})
+        state.setdefault("players", {})[player_id] = player_state
+        _meta_key, players_key = self._beat_clock_keys(session_code)
+        await self._redis_hash_json_set_async(
+            players_key,
+            player_id,
+            self._json_safe_state(player_state),
+        )
 
     def claim_beat_clock_finish(
         self, session_code: str, ttl_seconds: int = 900

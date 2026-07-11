@@ -548,7 +548,7 @@ class BeatTheClockGameHandler(GameEventHandler):
         state: Optional[dict] = None,
     ) -> bool:
         if db is None:
-            state = state or manager.get_beat_clock_state_for_player(
+            state = state or await manager.get_beat_clock_state_for_player_async(
                 self.session_code,
                 player_id,
             )
@@ -578,7 +578,7 @@ class BeatTheClockGameHandler(GameEventHandler):
             )
             updated_player_state = result.get("player_state")
             if updated_player_state:
-                manager.update_beat_clock_player_state(
+                await manager.update_beat_clock_player_state_async(
                     self.session_code,
                     player_id,
                     updated_player_state,
@@ -586,7 +586,7 @@ class BeatTheClockGameHandler(GameEventHandler):
             manager.set_beat_clock_state(self.session_code, result["state"])
             return True
 
-        state = state or manager.get_beat_clock_state_for_player(
+        state = state or await manager.get_beat_clock_state_for_player_async(
             self.session_code,
             player_id,
         )
@@ -615,7 +615,7 @@ class BeatTheClockGameHandler(GameEventHandler):
         )
         player_state = state.get("players", {}).get(player_id)
         if player_state:
-            manager.update_beat_clock_player_state(
+            await manager.update_beat_clock_player_state_async(
                 self.session_code,
                 player_id,
                 player_state,
@@ -986,7 +986,7 @@ class BeatTheClockGameHandler(GameEventHandler):
     ) -> None:
         if not player_id:
             return
-        state = manager.get_beat_clock_state_for_player(
+        state = await manager.get_beat_clock_state_for_player_async(
             self.session_code,
             player_id,
         )
@@ -1226,7 +1226,7 @@ class BeatTheClockGameHandler(GameEventHandler):
         question_id: str,
         db: Optional[Session] = None,
     ):
-        state = manager.get_beat_clock_state_for_player(
+        state = await manager.get_beat_clock_state_for_player_async(
             self.session_code,
             player_id,
         )
@@ -1296,7 +1296,7 @@ class BeatTheClockGameHandler(GameEventHandler):
 
         updated_player_state = result["updated_player_state"]
         state.setdefault("players", {})[player_id] = updated_player_state
-        manager.update_beat_clock_player_state(
+        await manager.update_beat_clock_player_state_async(
             self.session_code,
             player_id,
             updated_player_state,
