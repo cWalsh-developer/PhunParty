@@ -79,6 +79,7 @@ class OutboundQueueItem:
     critical: bool = False
     replaceable: bool = True
     coalesce_key: Optional[str] = None
+    expired: bool = False
 
 
 class ConnectionManager:
@@ -115,6 +116,17 @@ class ConnectionManager:
         "current_buzzer_winner",
         "frozen_players",
     }
+    REPLACEABLE_OUTBOUND_MESSAGE_TYPES = {
+        "beat_clock_state",
+        "buzzer_state_update",
+        "game_status_update",
+        "ping",
+        "pong",
+        "roster_update",
+        "session_stats",
+        "sync_state",
+        "ui_update",
+    }
 
     def __init__(self):
         # session_code -> {websocket_id: {websocket, client_type, player_info}}
@@ -148,6 +160,7 @@ class ConnectionManager:
         # session_code -> terminal/final session snapshot kept after game end
         self.terminal_sessions: Dict[str, Dict[str, Any]] = {}
         self.pending_acks: Dict[str, Dict[str, Any]] = {}
+        self.ack_retry_tasks: Dict[str, asyncio.Task] = {}
         self._missing_connection_warning_at: Dict[str, float] = {}
         # session_code:player_id values for players who explicitly left.
         self.intentional_leaves: Set[str] = set()
@@ -292,6 +305,21 @@ class ConnectionManager:
             return queued_item[0]
         return queued_item
 
+    def _message_is_replaceable(self, message: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(message, dict):
+            return False
+        return message.get("type") in self.REPLACEABLE_OUTBOUND_MESSAGE_TYPES
+
+    def _message_coalesce_key(self, message: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not isinstance(message, dict):
+            return None
+        message_type = message.get("type")
+        if not message_type:
+            return None
+        data = message.get("data")
+        question_id = data.get("question_id") if isinstance(data, dict) else None
+        return ":".join(str(part) for part in (message_type, question_id) if part)
+
     def _outbound_item_can_be_evicted(self, queued_item: Any) -> bool:
         if isinstance(queued_item, OutboundQueueItem):
             return not queued_item.critical and queued_item.replaceable
@@ -332,6 +360,7 @@ class ConnectionManager:
     async def _await_outbound_send_completion(
         self,
         sent_future: asyncio.Future,
+        queued_item: OutboundQueueItem,
         session_code: str,
         ws_id: str,
     ) -> bool:
@@ -343,6 +372,7 @@ class ConnectionManager:
                 )
             )
         except asyncio.TimeoutError:
+            queued_item.expired = True
             if not sent_future.done():
                 sent_future.set_result(False)
             logger.warning(
@@ -365,6 +395,12 @@ class ConnectionManager:
             while True:
                 queued_item = await queue.get()
                 try:
+                    if (
+                        isinstance(queued_item, OutboundQueueItem)
+                        and queued_item.expired
+                    ):
+                        self._resolve_outbound_future(queued_item, False)
+                        continue
                     await asyncio.wait_for(
                         websocket.send_text(self._outbound_payload(queued_item)),
                         timeout=self.outbound_send_timeout,
@@ -434,7 +470,7 @@ class ConnectionManager:
         *,
         critical: bool = False,
         wait_for_send: bool = False,
-        replaceable: bool = True,
+        replaceable: bool = False,
         coalesce_key: Optional[str] = None,
     ) -> bool:
         queue = self._ensure_outbound_queue(session_code, ws_id, connection_info)
@@ -448,12 +484,12 @@ class ConnectionManager:
             replaceable=replaceable and not critical,
             coalesce_key=coalesce_key,
         )
-
         try:
             queue.put_nowait(queued_item)
             if sent_future:
                 return await self._await_outbound_send_completion(
                     sent_future,
+                    queued_item,
                     session_code,
                     ws_id,
                 )
@@ -480,6 +516,7 @@ class ConnectionManager:
                     if sent_future:
                         return await self._await_outbound_send_completion(
                             sent_future,
+                            queued_item,
                             session_code,
                             ws_id,
                         )
@@ -501,6 +538,7 @@ class ConnectionManager:
                 if sent_future:
                     return await self._await_outbound_send_completion(
                         sent_future,
+                        queued_item,
                         session_code,
                         ws_id,
                     )
@@ -542,6 +580,10 @@ class ConnectionManager:
                     connection_info,
                     json.dumps(outbound_message),
                     critical=critical or should_require_ack,
+                    replaceable=self._message_is_replaceable(
+                        message_with_timestamp
+                    ),
+                    coalesce_key=self._message_coalesce_key(message_with_timestamp),
                 )
                 if not enqueued:
                     raise RuntimeError("outbound queue full")
@@ -1465,6 +1507,13 @@ return 0
         if all(target.get("acked") for target in event_state["targets"].values()):
             logger.debug(f"All targets acknowledged {event_id}")
             self.pending_acks.pop(event_id, None)
+            retry_task = self.ack_retry_tasks.pop(event_id, None)
+            if (
+                retry_task
+                and not retry_task.done()
+                and retry_task is not asyncio.current_task()
+            ):
+                retry_task.cancel()
 
         return True
 
@@ -1511,65 +1560,84 @@ return 0
             "client_type": connection_info.get("client_type"),
             "player_id": connection_info.get("player_id"),
             "player_name": connection_info.get("player_name"),
+            "message": message,
             "sent_at": self._utc_now_iso(),
         }
 
     def _schedule_ack_retry(self, event_id: str) -> None:
+        existing_task = self.ack_retry_tasks.get(event_id)
+        if existing_task and not existing_task.done():
+            return
+
         try:
-            asyncio.create_task(self._retry_unacked_event(event_id))
+            self.ack_retry_tasks[event_id] = asyncio.create_task(
+                self._retry_unacked_event(event_id),
+                name=f"ws-ack-retry-{event_id}",
+            )
         except RuntimeError:
             logger.debug(f"Could not schedule ACK retry for {event_id}; no event loop")
 
     async def _retry_unacked_event(self, event_id: str) -> None:
-        while event_id in self.pending_acks:
-            await asyncio.sleep(self.ACK_RETRY_DELAY_SECONDS)
-            event_state = self.pending_acks.get(event_id)
-            if not event_state:
-                return
+        try:
+            while event_id in self.pending_acks:
+                await asyncio.sleep(self.ACK_RETRY_DELAY_SECONDS)
+                event_state = self.pending_acks.get(event_id)
+                if not event_state:
+                    return
 
-            if all(target.get("acked") for target in event_state["targets"].values()):
-                self.pending_acks.pop(event_id, None)
-                return
+                if all(
+                    target.get("acked")
+                    for target in event_state["targets"].values()
+                ):
+                    self.pending_acks.pop(event_id, None)
+                    return
 
-            resend_count = event_state.get("resend_count", 0)
-            if resend_count >= self.ACK_MAX_RESENDS:
-                missing = [
-                    ws_id
-                    for ws_id, target in event_state["targets"].items()
-                    if not target.get("acked")
-                ]
-                logger.warning(
-                    f"ACK timeout for {event_id}; missing {len(missing)} target(s): {missing}"
-                )
-                self.pending_acks.pop(event_id, None)
-                return
+                resend_count = event_state.get("resend_count", 0)
+                if resend_count >= self.ACK_MAX_RESENDS:
+                    missing = [
+                        ws_id
+                        for ws_id, target in event_state["targets"].items()
+                        if not target.get("acked")
+                    ]
+                    logger.warning(
+                        f"ACK timeout for {event_id}; missing {len(missing)} target(s): {missing}"
+                    )
+                    self.pending_acks.pop(event_id, None)
+                    return
 
-            session_code = event_state["session_code"]
-            message = {
-                **event_state["message"],
-                "retry_count": resend_count + 1,
-            }
+                session_code = event_state["session_code"]
 
-            for ws_id, target in list(event_state["targets"].items()):
-                if target.get("acked"):
-                    continue
+                for ws_id, target in list(event_state["targets"].items()):
+                    if target.get("acked"):
+                        continue
 
-                connection_info = self.active_connections.get(session_code, {}).get(
-                    ws_id
-                )
-                if not connection_info:
-                    event_state["targets"].pop(ws_id, None)
-                    continue
+                    connection_info = self.active_connections.get(session_code, {}).get(
+                        ws_id
+                    )
+                    if not connection_info:
+                        event_state["targets"].pop(ws_id, None)
+                        continue
 
-                sent = await self.send_personal_message(
-                    message,
-                    connection_info["websocket"],
-                    retries=0,
-                )
-                if sent:
-                    target["resent_at"] = self._utc_now_iso()
+                    target_message = target.get("message") or event_state["message"]
+                    message = {
+                        **target_message,
+                        "retry_count": resend_count + 1,
+                    }
+                    sent = await self.send_personal_message(
+                        message,
+                        connection_info["websocket"],
+                        retries=0,
+                        wait_for_send=False,
+                        critical=True,
+                    )
+                    if sent:
+                        target["resent_at"] = self._utc_now_iso()
 
-            event_state["resend_count"] = resend_count + 1
+                event_state["resend_count"] = resend_count + 1
+        finally:
+            current_task = self.ack_retry_tasks.get(event_id)
+            if current_task is asyncio.current_task():
+                self.ack_retry_tasks.pop(event_id, None)
 
     async def connect(
         self,
@@ -2004,6 +2072,9 @@ return 0
         for event_id, event_state in list(self.pending_acks.items()):
             if event_state.get("session_code") == session_code:
                 self.pending_acks.pop(event_id, None)
+                retry_task = self.ack_retry_tasks.pop(event_id, None)
+                if retry_task and not retry_task.done():
+                    retry_task.cancel()
 
         logger.info(f"Cleaned in-memory websocket state for session {session_code}")
 
@@ -2014,7 +2085,13 @@ return 0
         self.cleanup_session(session_code)
 
     async def send_personal_message(
-        self, message: dict, websocket: WebSocket, retries: int = 2
+        self,
+        message: dict,
+        websocket: WebSocket,
+        retries: int = 2,
+        *,
+        wait_for_send: bool = True,
+        critical: bool = True,
     ):
         """Send message to specific WebSocket with retry logic"""
         for attempt in range(retries + 1):
@@ -2039,8 +2116,10 @@ return 0
                     ws_id,
                     connection_info,
                     json.dumps(outbound_message),
-                    critical=True,
-                    wait_for_send=True,
+                    critical=critical,
+                    wait_for_send=wait_for_send,
+                    replaceable=self._message_is_replaceable(outbound_message),
+                    coalesce_key=self._message_coalesce_key(outbound_message),
                 )
                 if sent:
                     return True
@@ -2072,30 +2151,47 @@ return 0
             logger.error(f"Error sending personal message by ID: {e}")
 
     async def send_personal_critical_message(
-        self, session_code: str, message: dict, websocket: WebSocket
+        self,
+        session_code: str,
+        message: dict,
+        websocket: WebSocket,
+        *,
+        wait_for_send: bool = True,
     ) -> bool:
         """Send one critical event with normal event_id/ACK tracking metadata."""
+        ws_id = self._ws_id_for_websocket(websocket)
+        connection_info = self.active_connections.get(session_code, {}).get(ws_id)
+        if not ws_id or not connection_info:
+            return False
+
         data = message.get("data", {})
-        message_id = message.get("message_id") or self.make_event_id(
+        base_message_id = message.get("message_id") or self.make_event_id(
             session_code,
             message.get("type", "event"),
             data if isinstance(data, dict) else {},
         )
+        target_suffix = (
+            connection_info.get("connection_generation")
+            or ws_id
+            or connection_info.get("player_id")
+            or "target"
+        )
+        event_id = message.get("event_id") or f"{base_message_id}:{target_suffix}"
         message_with_metadata = {
             **message,
-            "message_id": message_id,
-            "event_id": message.get("event_id") or message_id,
+            "message_id": base_message_id,
+            "event_id": event_id,
             "requires_ack": True,
         }
 
-        sent = await self.send_personal_message(message_with_metadata, websocket)
-        if not sent:
+        enqueued_or_sent = await self.send_personal_message(
+            message_with_metadata,
+            websocket,
+            wait_for_send=wait_for_send,
+            critical=True,
+        )
+        if not enqueued_or_sent:
             return False
-
-        ws_id = self._ws_id_for_websocket(websocket)
-        connection_info = self.active_connections.get(session_code, {}).get(ws_id)
-        if not connection_info:
-            return sent
 
         self._track_ack_target(
             message_with_metadata["event_id"],
@@ -2106,7 +2202,7 @@ return 0
         )
         self._schedule_ack_retry(message_with_metadata["event_id"])
 
-        return sent
+        return enqueued_or_sent
 
     async def _send_local_message_to_player(
         self,
@@ -2114,6 +2210,7 @@ return 0
         player_id: str,
         message: dict,
         critical: bool = False,
+        wait_for_send: bool = True,
     ) -> None:
         for connection_info in self.get_player_connections(
             session_code,
@@ -2128,9 +2225,15 @@ return 0
                     session_code,
                     message,
                     websocket,
+                    wait_for_send=wait_for_send,
                 )
             else:
-                await self.send_personal_message(message, websocket)
+                await self.send_personal_message(
+                    message,
+                    websocket,
+                    wait_for_send=wait_for_send,
+                    critical=False,
+                )
 
     async def send_message_to_player(
         self,
@@ -2499,6 +2602,7 @@ return 0
                 player_id=event["player_id"],
                 message=event["message"],
                 critical=bool(event.get("critical")),
+                wait_for_send=False,
             )
             return
 

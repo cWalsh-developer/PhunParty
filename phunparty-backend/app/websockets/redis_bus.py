@@ -147,7 +147,16 @@ class RedisWebSocketBus:
         self.reliable_backlog_maxsize = int(
             os.getenv("WS_BUS_RELIABLE_BACKLOG_MAXSIZE", "5000")
         )
-        self._reliable_backlogs: dict[str, deque[dict[str, Any]]] = {}
+        self.reliable_backlog_session_max_bytes = int(
+            os.getenv("WS_BUS_RELIABLE_BACKLOG_SESSION_MAX_BYTES", "8388608")
+        )
+        self.reliable_backlog_total_max_bytes = int(
+            os.getenv("WS_BUS_RELIABLE_BACKLOG_TOTAL_MAX_BYTES", "33554432")
+        )
+        self._reliable_backlogs: dict[str, deque[tuple[dict[str, Any], int]]] = {}
+        self._reliable_backlog_session_bytes: dict[str, int] = {}
+        self._reliable_backlog_total_bytes = 0
+        self.reliable_backlog_peak_bytes = 0
         self.dropped_event_count = 0
         self.dropped_control_event_count = 0
         self.control_backpressure_count = 0
@@ -413,35 +422,79 @@ class RedisWebSocketBus:
         event: dict[str, Any],
     ) -> bool:
         backlog = self._reliable_backlogs.setdefault(session_code, deque())
-        if len(backlog) >= self.reliable_backlog_maxsize:
+        event_bytes = len(json.dumps(event, separators=(",", ":")).encode("utf-8"))
+        session_bytes = self._reliable_backlog_session_bytes.get(session_code, 0)
+        if (
+            len(backlog) >= self.reliable_backlog_maxsize
+            or session_bytes + event_bytes > self.reliable_backlog_session_max_bytes
+            or self._reliable_backlog_total_bytes + event_bytes
+            > self.reliable_backlog_total_max_bytes
+        ):
             if self._is_control_event(event):
                 self.dropped_control_event_count += 1
             else:
                 self.dropped_event_count += 1
             logger.error(
-                "Redis WebSocket reliable backlog full; dropped newest event: session=%s kind=%s",
+                "Redis WebSocket reliable backlog full; dropped newest event: session=%s kind=%s session_bytes=%s total_bytes=%s",
                 session_code,
                 event.get("kind"),
+                session_bytes,
+                self._reliable_backlog_total_bytes,
             )
             return False
 
-        backlog.append(event)
+        backlog.append((event, event_bytes))
+        self._reliable_backlog_session_bytes[session_code] = (
+            session_bytes + event_bytes
+        )
+        self._reliable_backlog_total_bytes += event_bytes
+        self.reliable_backlog_peak_bytes = max(
+            self.reliable_backlog_peak_bytes,
+            self._reliable_backlog_total_bytes,
+        )
         if self._is_control_event(event):
             self.control_backpressure_count += 1
         return True
+
+    def _pop_reliable_backlog_event(
+        self,
+        session_code: str,
+    ) -> Optional[dict[str, Any]]:
+        backlog = self._reliable_backlogs.get(session_code)
+        if not backlog:
+            return None
+
+        event, event_bytes = backlog.popleft()
+        next_session_bytes = max(
+            0,
+            self._reliable_backlog_session_bytes.get(session_code, 0) - event_bytes,
+        )
+        if next_session_bytes:
+            self._reliable_backlog_session_bytes[session_code] = next_session_bytes
+        else:
+            self._reliable_backlog_session_bytes.pop(session_code, None)
+        self._reliable_backlog_total_bytes = max(
+            0,
+            self._reliable_backlog_total_bytes - event_bytes,
+        )
+        return event
 
     def _drain_reliable_backlog(self, session_code: str) -> None:
         backlog = self._reliable_backlogs.get(session_code)
         if not backlog:
             self._reliable_backlogs.pop(session_code, None)
+            self._reliable_backlog_session_bytes.pop(session_code, None)
             return
 
         queue = self._ensure_dispatch_queue(session_code)
         while backlog and not queue.full():
-            queue.put_nowait(backlog.popleft())
+            event = self._pop_reliable_backlog_event(session_code)
+            if event is not None:
+                queue.put_nowait(event)
 
         if not backlog:
             self._reliable_backlogs.pop(session_code, None)
+            self._reliable_backlog_session_bytes.pop(session_code, None)
 
     async def _enqueue_event(self, event: dict[str, Any]) -> None:
         if not self._dispatcher:
@@ -592,6 +645,8 @@ class RedisWebSocketBus:
         self._dispatch_queues.clear()
         self._dispatch_tasks.clear()
         self._reliable_backlogs.clear()
+        self._reliable_backlog_session_bytes.clear()
+        self._reliable_backlog_total_bytes = 0
         self._pubsub = None
         self._redis = None
         self._sync_redis = None
