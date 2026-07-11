@@ -69,17 +69,28 @@ async def handle_game_end(
                 return False
 
             if not game_state.ended_at:
-                logger.error(
-                    "Failed to end game session %s; game state exists but ended_at is missing",
+                logger.warning(
+                    "Repairing incomplete ended state for session %s after end claim returned false",
                     session_code,
                 )
-                return False
+                game_state.ended_at = datetime.now()
+                game_state.is_active = False
+                game_state.isstarted = False
+                game_state.is_waiting_for_players = False
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Failed to repair incomplete ended state for session %s",
+                        session_code,
+                    )
+                    return False
 
-            logger.info(
-                "Game session %s was already ended; skipping duplicate end broadcast",
+            logger.warning(
+                "Game session %s was already ended or partially ended; rebroadcasting terminal state",
                 session_code,
             )
-            return False
 
         final_scores = get_final_scores(db, session_code)
         score_player_ids = [
