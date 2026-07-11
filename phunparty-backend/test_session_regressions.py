@@ -2974,6 +2974,59 @@ def test_fair_play_window_violation_defaults_to_multi_window_reason():
     assert focus_lost.await_args.kwargs["data"]["reason"] == "multi_window_mode"
 
 
+def test_websocket_end_game_passes_authenticated_owner_context():
+    websocket = MagicMock()
+    game_handler = MagicMock()
+
+    with patch.object(routes, "handle_game_end", new_callable=AsyncMock) as end_game:
+        end_game.return_value = True
+        asyncio.run(
+            routes.handle_websocket_message(
+                {"type": "end_game", "data": {}},
+                websocket,
+                "SESSION123",
+                "web",
+                None,
+                "HOST1",
+                game_handler,
+                MagicMock(),
+            )
+        )
+
+    end_game.assert_awaited_once_with(
+        "SESSION123",
+        end_game.await_args.args[1],
+        acting_player_id="HOST1",
+    )
+
+
+def test_websocket_end_game_reports_failure_to_host():
+    websocket = MagicMock()
+    game_handler = MagicMock()
+
+    with patch.object(routes, "handle_game_end", new_callable=AsyncMock) as end_game:
+        end_game.return_value = False
+        with patch.object(routes, "manager") as mock_manager:
+            mock_manager.send_personal_message = AsyncMock()
+            asyncio.run(
+                routes.handle_websocket_message(
+                    {"type": "end_game", "data": {}},
+                    websocket,
+                    "SESSION123",
+                    "web",
+                    None,
+                    "HOST1",
+                    game_handler,
+                    MagicMock(),
+                )
+            )
+
+    mock_manager.send_personal_message.assert_awaited_once()
+    message = mock_manager.send_personal_message.await_args.args[0]
+    assert message["type"] == "error"
+    assert message["data"]["reason"] == "end_game_failed"
+
+
 def test_kick_player_for_fair_play_sends_status_before_closing_socket():
     db = MagicMock()
 

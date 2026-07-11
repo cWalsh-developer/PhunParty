@@ -2010,7 +2010,22 @@ async def handle_websocket_message(
 
     elif message_type == "end_game" and client_type == "web":
         # Web client ending the game
-        await handle_game_end(session_code, db)
+        ended = await handle_game_end(
+            session_code,
+            db,
+            acting_player_id=authenticated_player_id,
+        )
+        if not ended:
+            await manager.send_personal_message(
+                {
+                    "type": "error",
+                    "data": {
+                        "reason": "end_game_failed",
+                        "message": "The game could not be ended. Please retry shortly.",
+                    },
+                },
+                websocket,
+            )
 
     elif message_type == "get_session_stats":
         # Request for current session statistics
