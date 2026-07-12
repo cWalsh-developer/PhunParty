@@ -1611,6 +1611,45 @@ def test_game_lifecycle_repairs_incomplete_end_state_before_broadcast():
     mock_manager.broadcast_to_session.assert_awaited_once()
 
 
+def test_game_lifecycle_broadcasts_terminal_state_when_repair_matches_no_rows():
+    game_state = SimpleNamespace(
+        ended_at=None,
+        is_active=False,
+        isstarted=True,
+        is_waiting_for_players=False,
+    )
+    query_result = MagicMock()
+    query_result.filter.return_value = query_result
+    query_result.first.return_value = game_state
+    query_result.update.return_value = 0
+    query_result.all.return_value = []
+    mock_db = MagicMock()
+    mock_db.query.return_value = query_result
+
+    with patch.object(game_lifecycle, "update_game_session_ended", return_value=False):
+        with patch.object(game_lifecycle, "get_final_scores", return_value=[]):
+            with patch.object(game_lifecycle, "manager") as mock_manager:
+                mock_manager.set_session_phase.return_value = {
+                    "phase": "ended",
+                    "phase_started_at": "2026-06-01T12:00:00",
+                    "server_time_ms": 123,
+                }
+                mock_manager.broadcast_to_session = AsyncMock()
+
+                result = asyncio.run(
+                    game_lifecycle.handle_game_end("SESSION123", mock_db)
+                )
+
+    assert result is True
+    mock_db.rollback.assert_called_once()
+    mock_db.expire_all.assert_not_called()
+    mock_manager.set_session_phase.assert_called_once()
+    mock_manager.broadcast_to_session.assert_awaited_once()
+    message = mock_manager.broadcast_to_session.await_args.args[1]
+    assert message["type"] == "game_ended"
+    assert message["data"]["ended_at"]
+
+
 def test_game_lifecycle_terminal_snapshot_uses_shared_fair_play_statuses():
     ended_at = datetime(2026, 6, 1, 12, 0, 0)
     game_state = SimpleNamespace(ended_at=ended_at)

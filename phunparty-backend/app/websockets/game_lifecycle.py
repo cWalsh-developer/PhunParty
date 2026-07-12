@@ -3,7 +3,7 @@
 import asyncio
 import inspect
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.database.dbCRUD import (
     get_final_scores,
@@ -27,6 +27,8 @@ async def handle_game_end(
 ) -> bool:
     """Finalize a game session and broadcast the authoritative end state."""
     try:
+        terminal_ended_at: datetime | None = None
+
         # Ending a game mutates session-owner state, so always prefer the session owner
         # for RLS. The acting player may simply be the last player who answered.
         session = get_session_by_code(db, session_code)
@@ -73,7 +75,8 @@ async def handle_game_end(
                     "Repairing incomplete ended state for session %s after end claim returned false",
                     session_code,
                 )
-                repaired_ended_at = datetime.now()
+                repaired_ended_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                repair_succeeded = False
                 try:
                     repaired_rows = (
                         db.query(GameSessionState)
@@ -90,31 +93,37 @@ async def handle_game_end(
                     )
                     if repaired_rows == 0:
                         logger.error(
-                            "Failed to repair incomplete ended state for session %s; no rows matched",
+                            "Failed to repair incomplete ended state for session %s; no rows matched. "
+                            "Proceeding with terminal broadcast so connected clients can leave the stale game.",
                             session_code,
                         )
                         db.rollback()
-                        return False
-                    db.commit()
+                        terminal_ended_at = repaired_ended_at
+                    else:
+                        db.commit()
+                        repair_succeeded = True
                 except Exception:
                     db.rollback()
                     logger.exception(
                         "Failed to repair incomplete ended state for session %s",
                         session_code,
                     )
-                    return False
-                db.expire_all()
-                game_state = (
-                    db.query(GameSessionState)
-                    .filter(GameSessionState.session_code == session_code)
-                    .first()
-                )
-                if not game_state:
-                    logger.error(
-                        "Failed to reload repaired ended state for session %s",
-                        session_code,
+                    terminal_ended_at = repaired_ended_at
+
+                if repair_succeeded:
+                    db.expire_all()
+                    game_state = (
+                        db.query(GameSessionState)
+                        .filter(GameSessionState.session_code == session_code)
+                        .first()
                     )
-                    return False
+                    if not game_state:
+                        logger.error(
+                            "Failed to reload repaired ended state for session %s. "
+                            "Proceeding with terminal broadcast using repaired timestamp.",
+                            session_code,
+                        )
+                        terminal_ended_at = repaired_ended_at
 
             logger.warning(
                 "Game session %s was already ended or partially ended; rebroadcasting terminal state",
@@ -143,11 +152,12 @@ async def handle_game_end(
             if status.get("is_kicked") is True
         ]
 
-        ended_at = (
-            game_state.ended_at.isoformat()
-            if game_state and game_state.ended_at
-            else datetime.now().isoformat()
+        resolved_ended_at = (
+            terminal_ended_at
+            or (game_state.ended_at if game_state and game_state.ended_at else None)
+            or datetime.now(timezone.utc).replace(tzinfo=None)
         )
+        ended_at = resolved_ended_at.isoformat()
 
         terminal_snapshot = {
             "phase": SessionPhase.ENDED.value,
