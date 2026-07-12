@@ -6,7 +6,7 @@ import sys
 import types
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 import sqlalchemy
@@ -641,7 +641,7 @@ def test_submit_player_answer_skips_locked_progression_when_still_waiting():
 
     precheck.assert_called_once_with(mock_db, "SESSION123", "Q1", game_state)
     locked_progression.assert_not_called()
-    mock_db.commit.assert_called_once()
+    assert mock_db.commit.call_count == 1
     assert result["game_state"]["progression_lock_skipped"] is True
     assert result["game_state"]["waiting_for_players"] is True
 
@@ -919,6 +919,35 @@ def test_join_game_checks_active_session_without_locking_host_row():
     mock_db.commit.assert_called_once()
 
 
+def test_end_game_terminal_state_commit_survives_score_finalizer_failure():
+    state_query = MagicMock()
+    state_query.filter.return_value = state_query
+    state_query.update.return_value = 1
+    state_query.first.return_value = SimpleNamespace(ended_at=datetime(2026, 7, 11))
+
+    assignment_query = MagicMock()
+    assignment_query.filter.return_value = assignment_query
+    assignment_query.distinct.return_value = assignment_query
+    assignment_query.all.return_value = [("P1",)]
+
+    mock_db = MagicMock()
+    mock_db.query.side_effect = [state_query, state_query, assignment_query]
+
+    with patch.object(
+        dbCRUD,
+        "create_score",
+        side_effect=RuntimeError("score finalizer failed"),
+    ):
+        result = dbCRUD.update_game_session_ended(mock_db, "SESSION123")
+
+    assert result is False
+    mock_db.commit.assert_called_once()
+    mock_db.rollback.assert_called_once()
+    assert mock_db.mock_calls.index(call.commit()) < mock_db.mock_calls.index(
+        call.rollback()
+    )
+
+
 def test_join_game_rejects_inactive_sessions_before_membership_changes():
     mock_db = MagicMock()
     game_query = MagicMock()
@@ -969,7 +998,7 @@ def test_end_game_score_finalizer_does_not_reinsert_session_assignments():
         "P2",
         ensure_assignment=False,
     )
-    mock_db.commit.assert_called_once()
+    assert mock_db.commit.call_count == 2
 
 
 def test_assign_player_to_session_does_not_rewrite_active_session_start():

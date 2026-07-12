@@ -29,6 +29,7 @@ from app.schemas.questions_model import Questions
 from app.schemas.scores_model import Scores
 from app.schemas.session_player_assignment_model import SessionAssignment
 from app.schemas.session_question_assignment import SessionQuestionAssignment
+from app.security.loggingUtils import safe_session_ref
 from app.utils.friend_codes import generate_friend_code
 from app.utils.hash_password import hash_password
 from app.utils.generateJWT import SECRET_KEY
@@ -278,6 +279,7 @@ def get_session_by_code(db: Session, session_code: str) -> GameSession:
         )
         .filter(GameSession.session_code == session_code)
         .filter(GameSessionState.is_active.is_(True))
+        .filter(GameSessionState.ended_at.is_(None))
         .first()
     )
 
@@ -313,6 +315,7 @@ def join_game(db: Session, session_code: str, player_id: str) -> GameSession:
         )
         .filter(GameSession.session_code == session_code)
         .filter(GameSessionState.is_active.is_(True))
+        .filter(GameSessionState.ended_at.is_(None))
         .first()
     )
     if not gameSession:
@@ -1378,6 +1381,7 @@ def get_game_session_state(db: Session, session_code: str) -> GameSessionState:
         db.query(GameSessionState)
         .filter(GameSessionState.session_code == session_code)
         .filter(GameSessionState.is_active == True)
+        .filter(GameSessionState.ended_at.is_(None))
         .first()
     )
 
@@ -1390,6 +1394,7 @@ def lock_game_session_state_for_update(
         db.query(GameSessionState)
         .filter(GameSessionState.session_code == session_code)
         .filter(GameSessionState.is_active == True)
+        .filter(GameSessionState.ended_at.is_(None))
         .with_for_update()
         .first()
     )
@@ -1475,6 +1480,7 @@ def get_all_public_sessions(db: Session) -> list:
         )
         .filter(GameSessionState.ispublic == True)
         .filter(GameSessionState.is_active == True)
+        .filter(GameSessionState.ended_at.is_(None))
         .all()
     )
 
@@ -1521,6 +1527,7 @@ def get_player_private_sessions(db: Session, player_id: str) -> list:
         .filter(GameSession.owner_player_id == player_id)
         .filter(GameSessionState.ispublic == False)
         .filter(GameSessionState.is_active == True)
+        .filter(GameSessionState.ended_at.is_(None))
         .all()
     )
 
@@ -1567,6 +1574,7 @@ def get_all_sessions_from_player(db: Session, player_id: str) -> list:
         )
         .filter(GameSession.owner_player_id == player_id)
         .filter(GameSessionState.is_active == True)
+        .filter(GameSessionState.ended_at.is_(None))
         .all()
     )
 
@@ -2035,6 +2043,7 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
     Also calculates final game results.
     """
     try:
+        session_ref = safe_session_ref(session_code)
         ended_at = utc_now()
         claimed_rows = (
             db.query(GameSessionState)
@@ -2060,15 +2069,20 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
         )
 
         if not game_state:
-            logger.warning("Game session state not found for %s", session_code)
+            logger.warning("Game session state not found for %s", session_ref)
             return False
 
         if claimed_rows == 0:
             logger.info(
                 "Game session %s was already ended or not active; skipping finalizer claim",
-                session_code,
+                session_ref,
             )
             return False
+
+        # Commit the terminal state before score/result finalization. Finalization
+        # touches additional RLS-protected tables, and any later rollback must not
+        # put a completed game back into active-session listings.
+        db.commit()
 
         assigned_player_ids = (
             db.query(SessionAssignment.player_id)
@@ -2089,17 +2103,21 @@ def update_game_session_ended(db: Session, session_code: str) -> bool:
         except ValueError as e:
             logger.warning(
                 "Could not calculate game results for %s: %s",
-                session_code,
+                session_ref,
                 e,
             )
 
         db.commit()
 
-        logger.info("Game session %s ended at %s", session_code, game_state.ended_at)
+        logger.info("Game session %s ended at %s", session_ref, game_state.ended_at)
         return True
 
     except Exception as e:
-        logger.error("Error ending game session %s: %s", session_code, e)
+        logger.error(
+            "Error ending game session %s: %s",
+            safe_session_ref(session_code),
+            e,
+        )
         db.rollback()
         return False
 
