@@ -51,7 +51,7 @@ from app.logic import answer_validation, game_logic
 from app.routes import game as game_routes
 from app.routes import players as player_routes
 from app.schemas.game_state_models import GameSessionState
-from app.security import game_phase, rate_limit
+from app.security import game_phase, loggingUtils, rate_limit
 from app.websockets import (
     game_handlers,
     game_lifecycle,
@@ -64,6 +64,17 @@ from app.websockets.manager import OutboundQueueItem, SessionPhase, manager
 import load_test_websocket
 
 sqlalchemy.create_engine = _real_create_engine
+
+
+def test_safe_session_ref_hashes_control_character_input():
+    raw_session_code = "ABC123\r\nERROR forged=true"
+
+    safe_ref = loggingUtils.safe_session_ref(raw_session_code)
+
+    assert safe_ref.startswith("session_")
+    assert raw_session_code not in safe_ref
+    assert "\r" not in safe_ref
+    assert "\n" not in safe_ref
 
 
 class _FakeRedisPipeline:

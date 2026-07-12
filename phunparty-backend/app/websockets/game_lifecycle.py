@@ -13,6 +13,7 @@ from app.database.dbCRUD import (
 from app.schemas.game_state_models import GameSessionState
 from app.schemas.scores_model import Scores
 from app.security.cache import cache, invalidate_profile_cache
+from app.security.loggingUtils import safe_player_ref, safe_session_ref
 from app.security.rls import set_rls_current_player
 from app.websockets.manager import SessionPhase, manager
 from sqlalchemy.orm import Session
@@ -28,6 +29,7 @@ async def handle_game_end(
     """Finalize a game session and broadcast the authoritative end state."""
     try:
         terminal_ended_at: datetime | None = None
+        session_ref = safe_session_ref(session_code)
 
         # Ending a game mutates session-owner state, so always prefer the session owner
         # for RLS. The acting player may simply be the last player who answered.
@@ -39,17 +41,17 @@ async def handle_game_end(
         if end_actor_id:
             logger.warning(
                 "GAME END RLS CONTEXT session=%s acting_player=%s owner=%s using=%s",
-                session_code,
-                acting_player_id,
-                owner_player_id,
-                end_actor_id,
+                session_ref,
+                safe_player_ref(acting_player_id),
+                safe_player_ref(owner_player_id),
+                safe_player_ref(end_actor_id),
             )
             set_rls_current_player(db, end_actor_id)
         else:
             logger.warning(
                 "Could not resolve RLS context while ending session=%s acting_player=%s",
-                session_code,
-                acting_player_id,
+                session_ref,
+                safe_player_ref(acting_player_id),
             )
 
         success = update_game_session_ended(db, session_code)
@@ -66,14 +68,14 @@ async def handle_game_end(
         if not success:
             if not game_state:
                 logger.error(
-                    "Failed to end game session %s; no game state found", session_code
+                    "Failed to end game session %s; no game state found", session_ref
                 )
                 return False
 
             if not game_state.ended_at:
                 logger.warning(
                     "Repairing incomplete ended state for session %s after end claim returned false",
-                    session_code,
+                    session_ref,
                 )
                 repaired_ended_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 repair_succeeded = False
@@ -95,7 +97,7 @@ async def handle_game_end(
                         logger.error(
                             "Failed to repair incomplete ended state for session %s; no rows matched. "
                             "Proceeding with terminal broadcast so connected clients can leave the stale game.",
-                            session_code,
+                            session_ref,
                         )
                         db.rollback()
                         terminal_ended_at = repaired_ended_at
@@ -106,7 +108,7 @@ async def handle_game_end(
                     db.rollback()
                     logger.exception(
                         "Failed to repair incomplete ended state for session %s",
-                        session_code,
+                        session_ref,
                     )
                     terminal_ended_at = repaired_ended_at
 
@@ -121,13 +123,13 @@ async def handle_game_end(
                         logger.error(
                             "Failed to reload repaired ended state for session %s. "
                             "Proceeding with terminal broadcast using repaired timestamp.",
-                            session_code,
+                            session_ref,
                         )
                         terminal_ended_at = repaired_ended_at
 
             logger.warning(
                 "Game session %s was already ended or partially ended; rebroadcasting terminal state",
-                session_code,
+                session_ref,
             )
 
         final_scores = get_final_scores(db, session_code)
@@ -192,7 +194,7 @@ async def handle_game_end(
 
         logger.info(
             "Game ended for session %s with %s final scores",
-            session_code,
+            session_ref,
             len(final_scores),
         )
 
@@ -215,7 +217,7 @@ async def handle_game_end(
             require_ack=True,
         )
 
-        logger.info("Game end broadcast complete for session %s", session_code)
+        logger.info("Game end broadcast complete for session %s", session_ref)
 
         cleanup_task = manager.cleanup_session_later(session_code, delay_seconds=60)
         if inspect.isawaitable(cleanup_task):
@@ -231,5 +233,8 @@ async def handle_game_end(
         return True
 
     except Exception:
-        logger.exception("Error ending game for session %s", session_code)
+        logger.exception(
+            "Error ending game for session %s",
+            safe_session_ref(session_code),
+        )
         return False
